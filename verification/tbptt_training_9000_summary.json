@@ -1,0 +1,21 @@
+{
+  "scope": "Technical training execution, not five-minute gameplay accuracy",
+  "rollout_steps": 9000,
+  "simulation_seconds": 300.0,
+  "chunk_size": 32,
+  "chunk_count": 282,
+  "optimizer_steps": 282,
+  "detach_boundaries": 281,
+  "state_carried": true,
+  "memory_carried": true,
+  "ground_truth_initializations": 1,
+  "map_encoder_calls": 282,
+  "rgb_available": false,
+  "rendered_supervision_steps": 0,
+  "maximum_state_carry_difference": 0,
+  "maximum_memory_carry_difference": 0,
+  "wall_seconds": 283.39099775199975,
+  "final_segment_mean_loss": 1.8454616775512696,
+  "weights_not_bundled": true,
+  "gameplay_accuracy_evaluated": false
+}

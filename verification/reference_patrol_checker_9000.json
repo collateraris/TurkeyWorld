@@ -1,0 +1,8 @@
+{
+  "scope": "Reference engine only, latest integrity checker calibration; not a neural gameplay test",
+  "source_only_checked_steps": 9000,
+  "first_failure": null,
+  "reference_terminal_step": null,
+  "final_hp": 75.99999904632568,
+  "wall_seconds": 8.013425309000013
+}

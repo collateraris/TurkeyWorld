@@ -1,0 +1,167 @@
+{
+  "evaluation": "free_neural_rollout_integrity_and_active_coverage",
+  "format_version": 1,
+  "checkpoint": "/workspace/scratch/3ffc3d7ffe08/turkey_rollout_probe/untrained.pt",
+  "training_steps": 0,
+  "quality_status": "Empirical evaluation only; no trained accuracy, five-minute stability or target FPS is guaranteed.",
+  "device": "cpu",
+  "transition_mode": "event_v1",
+  "episodes": [
+    {
+      "completed_requested_steps": true,
+      "checked_steps": 3,
+      "checked_simulated_seconds": 0.1,
+      "integrity_pass": true,
+      "qualifying_active_session": false,
+      "behavioral_checks_pass": false,
+      "state_integrity_active_300s_pass": false,
+      "first_failure": null,
+      "violation_counts": {},
+      "failure_examples": [],
+      "model_terminal_step": null,
+      "reference_terminal_step": null,
+      "coverage": {
+        "path_tiles": 0.0,
+        "reference_path_tiles": 0.0,
+        "movement_command_steps": 0,
+        "responsive_movement_steps": 0,
+        "reference_responsive_movement_steps": 0,
+        "turn_command_steps": 0,
+        "fire_command_steps": 0,
+        "distinct_player_cells": 1
+      },
+      "npc_responsiveness": {
+        "model_path_tiles_by_id": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "reference_path_tiles_by_id": [
+          0.07000017166137695,
+          0.07180023193359375,
+          0.07359981536865234,
+          0.07540035247802734,
+          0.07719993591308594,
+          0.07900047302246094,
+          0.08080005645751953,
+          0.08259950356235907
+        ],
+        "path_ratio_by_id": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "evaluated_ids": [],
+        "frozen_alive_ids": [],
+        "pass": true,
+        "note": "Broad anti-freeze gate: living NPCs whose reference travelled at least1tile must travel at least10% as far; this does not prove correct AI/combat."
+      },
+      "qualification_note": "Idle/turn/wall, early terminal episodes and frozen predictions cannot establish 300 seconds of active gameplay.",
+      "seed": 10000,
+      "scenario": "idle",
+      "requested_seconds": 0.1,
+      "simulation_hz": 30.0,
+      "requested_steps": 3,
+      "wall_seconds": 0.05296718499994313,
+      "tape_preparation_seconds": 0.10100268699898152,
+      "tape_recorded_before_model_execution": true,
+      "engine_corrections": 0,
+      "model_resets_during_rollout": 0,
+      "event_source": "structured_events",
+      "state_dtype": "torch.float32",
+      "network_dtype": "torch.float32",
+      "state_only_evaluation": false,
+      "rendered_sample_count": 3,
+      "render_nonfinite_count": 0,
+      "render_oracle_rejections": 0,
+      "sampled_rgb_psnr_at_same_predicted_state": {
+        "mean": 10.777701934804353,
+        "p50": 10.77869980648433,
+        "p95": 10.779567784781218
+      },
+      "proposed_minimum_sampled_psnr": 20.0,
+      "sampled_visual_gate_pass": false,
+      "visual_quality_validated": false,
+      "300s_active_pass": false,
+      "paired_trajectory_pose_error_tiles": {
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "paired_trajectory_heading_error_degrees": {
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "paired_event_bit_accuracy": 1.0,
+      "paired_events": {
+        "shot": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 3,
+          "f1": null,
+          "note": "Null F1 means no positive reference/prediction examples; true negatives alone do not prove combat accuracy."
+        },
+        "hit": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 3,
+          "f1": null,
+          "note": "Null F1 means no positive reference/prediction examples; true negatives alone do not prove combat accuracy."
+        },
+        "kill": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 3,
+          "f1": null,
+          "note": "Null F1 means no positive reference/prediction examples; true negatives alone do not prove combat accuracy."
+        },
+        "player_hit": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 3,
+          "f1": null,
+          "note": "Null F1 means no positive reference/prediction examples; true negatives alone do not prove combat accuracy."
+        }
+      },
+      "transition_time_ms": {
+        "mean": 5.878830666309416,
+        "p50": 5.33712299875333,
+        "p95": 7.137372300167044
+      },
+      "checker_time_ms": {
+        "mean": 0.7567746670247288,
+        "p50": 0.6148149986984208,
+        "p95": 1.0453012013385887
+      },
+      "peak_cuda_allocated_mib": null,
+      "limitations": [
+        "Integrity and selected-pose RGB measurements are finite empirical tests, not a proof of generalization.",
+        "Paired trajectories can diverge after combat branches; long-horizon pixel equality is not required.",
+        "Sampled RGB compares the model with the source renderer at the SAME predicted valid state, without feeding that state back.",
+        "No sampled RGB gate is accepted unless --min-render-psnr is explicitly configured.",
+        "A copied/frozen model cannot qualify through elapsed time alone."
+      ]
+    }
+  ],
+  "episode_count": 1,
+  "integrity_pass_count": 1,
+  "qualifying_active_session_count": 0,
+  "state_integrity_active_300s_pass_count": 0,
+  "300s_active_pass_count": 0,
+  "generalization_note": "Current seeds vary trajectories/animation on a fixed arena; new-map generalization is not tested."
+}

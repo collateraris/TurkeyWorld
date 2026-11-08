@@ -1,0 +1,19 @@
+Original generated assets, 2026-11-08.
+Visual reference: https://www.youtube.com/watch?v=Ekomnk1eNFU
+Only the public thumbnail was inspected; this package does not contain extracted video assets.
+
+assets/turkey_atlas.png: transparent 4-column, 2-row original cartoon turkey atlas.
+Frames: idle, walk-left, walk-right, attack, hurt, falling, defeated, alternate-idle.
+Prompt: An original grey-brown pixel-art cartoon turkey enemy with a red wattle,
+blue head accents, broad tail and dark outline, matching a playful bright 1990s
+raycaster aesthetic. Same front-on character and scale in all eight equal cells,
+transparent background, feet aligned, no labels, no scenery, no graphic gore.
+
+assets/gun_atlas.png: transparent 3-column, 1-row original first-person weapon atlas.
+Frames: idle, firing with muzzle flash, recoil.
+Prompt: An original centered retro pixel-art arcade shotgun, dark grey metal,
+wooden grip, small gloved hand, pointing away from the player; three equal aligned
+cells on transparent background, readable pixel edges, no labels, no logos.
+
+Generated using the built-in image-generation tool. Atlas layout is approximate;
+the runtime uses equal fractional cell boundaries, and keeps the source alpha.

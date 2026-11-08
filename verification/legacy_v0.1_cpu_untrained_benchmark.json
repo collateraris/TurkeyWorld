@@ -1,0 +1,72 @@
+{
+  "scope": "Batch-one inference throughput only; no gameplay-quality or display measurement.",
+  "world_weights": "UNTRAINED_RANDOM",
+  "world_training_steps": 0,
+  "sr_weights": "UNTRAINED_BILINEAR_INITIALIZATION",
+  "sr_training_steps": 0,
+  "config": {
+    "kind": "student",
+    "image_size": 256,
+    "tile_types": 16
+  },
+  "parameters": {
+    "map_encoder": 7968,
+    "renderer": 96814,
+    "world_total": 1268588,
+    "dynamics_including_map": 1171774,
+    "upscaler": 25776,
+    "pipeline_total": 1294364
+  },
+  "device": "cpu",
+  "device_name": "CPU",
+  "torch_version": "2.15.0+cpu",
+  "dtype": "fp32",
+  "cpu_threads": 2,
+  "warmup_frames": 3,
+  "measured_frames": 10,
+  "output_shape": [
+    1,
+    3,
+    1024,
+    1024
+  ],
+  "map_encode_once_ms": 1.7588169994269265,
+  "stages": {
+    "dynamics": {
+      "mean_ms": 1.3264751001770492,
+      "p50_ms": 1.1851059998662095,
+      "p95_ms": 1.9070317503974357
+    },
+    "renderer": {
+      "mean_ms": 37.72563160000573,
+      "p50_ms": 37.01265000017884,
+      "p95_ms": 42.014753850617126
+    },
+    "upscaler": {
+      "mean_ms": 85.10649820018443,
+      "p50_ms": 79.45505350016902,
+      "p95_ms": 126.22832774968622
+    },
+    "model_frame": {
+      "mean_ms": 124.15860490036721,
+      "p50_ms": 119.68071650062484,
+      "p95_ms": 165.8293733502432
+    },
+    "host_frame": {
+      "mean_ms": 124.16675240019686,
+      "p50_ms": 119.68907900063641,
+      "p95_ms": 165.8387481510544
+    }
+  },
+  "model_only_fps_from_mean": 8.054214210947874,
+  "host_inference_fps_from_mean": 8.053685714328264,
+  "within_30fps_p95_model_budget": false,
+  "within_60fps_p95_model_budget": false,
+  "peak_cuda_allocated_mib": null,
+  "limitations": [
+    "No CPU readback, window presentation or input latency is included.",
+    "A small training-step count does not prove accuracy or five-minute stability.",
+    "Static map encoding is cached; recurrent world state persists per frame.",
+    "SR receives only current LR RGB; it has no temporal reconstruction guarantees."
+  ]
+}
