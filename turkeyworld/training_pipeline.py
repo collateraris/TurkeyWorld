@@ -286,7 +286,8 @@ class Experiment:
                 ramp_steps=getattr(self.args, "adversarial_ramp", 256),
                 r1_gamma=getattr(self.args, "adversarial_r1_gamma", 1.),
                 r1_interval=getattr(self.args, "adversarial_r1_interval", 16),
-                lr=getattr(self.args, "adversarial_lr", 1e-4))
+                lr=getattr(self.args, "adversarial_lr", 1e-4),
+                num_scales=1 if getattr(self.args, 'image_size', 128) == 32 else 2)
             if saved:
                 trainer.load_state_dict(saved)
         self._adversarial_trainer, self._adversarial_phase = trainer, phase

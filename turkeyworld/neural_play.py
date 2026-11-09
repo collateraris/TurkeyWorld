@@ -4,7 +4,7 @@ The reference engine supplies a map and initial 90-value state exactly once.
 V-JEPA models additionally encode one initial source RGB frame before rollout.
 Every subsequent transition and base image comes from the loaded world model.
 No trained checkpoints are bundled. A successful run proves executable shapes,
-not correct combat, stable five-minute gameplay or RTX 4090 performance.
+not correct combat, stable gameplay or RTX 4090 performance.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ SIM_DT = 1.0 / SIM_HZ
 EVENT_NAMES = ("shot", "hit", "kill", "player_hit")
 
 
-def _arguments():
+def _arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--world", type=Path, required=True, help="World checkpoint produced by turkeyworld.train.")
     p.add_argument("--sr", type=Path, help="Optional trained x4 SR checkpoint; otherwise use classical resize.")
@@ -39,23 +39,36 @@ def _arguments():
     p.add_argument("--steps", type=int, default=0, help="Stop after N simulated 1/30-second steps; headless default is 300, window default unlimited.")
     p.add_argument("--seconds", type=float, default=0, help="Optional window wall-clock duration limit.")
     p.add_argument("--fps", type=int, choices=(30, 60), default=60, help="Display cap. At 60 FPS the latest 30 Hz image is repeated, without interpolation.")
-    p.add_argument("--display-size", type=int, default=1024)
+    p.add_argument("--display-size", type=int, default=None,
+                   help="Window/output size: defaults to native*16 for two-stage playback, otherwise1024.")
+    p.add_argument("--two-stage-upscale", action="store_true",
+                   help="Native32/64 RGB -> trained neural SR x4 -> bilinear x4; requires --sr.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--warmup", type=int, default=3, help="Untimed warmup steps; their predicted state is discarded.")
     p.add_argument("--threads", type=int, default=4, help="CPU PyTorch thread count.")
+    p.add_argument("--max-catchup-steps", type=int, default=None,
+                   help="Maximum neural updates before polling input; defaults to1 for two-stage playback, otherwise4.")
     p.add_argument("--smooth", action="store_true", help="Bilinear rather than nearest classical resize.")
     p.add_argument("--no-hud", action="store_true", help="Hide interactive HUD and crosshair; headless frames are always clean.")
     p.add_argument("--output", type=Path, help="Save the last neural frame as PNG.")
     p.add_argument("--stats", type=Path, help="Also write the JSON report to this path.")
-    a = p.parse_args()
+    a = p.parse_args(argv)
+    if a.max_catchup_steps is None:
+        a.max_catchup_steps = 1 if a.two_stage_upscale else 4
+    if a.display_size is None and not a.two_stage_upscale:
+        a.display_size = 1024
     if a.steps < 0 or a.warmup < 0:
         p.error("--steps and --warmup must be non-negative")
     if not math.isfinite(a.seconds) or a.seconds < 0:
         p.error("--seconds must be finite and non-negative")
-    if not 32 <= a.display_size <= 4096:
+    if a.display_size is not None and not 32 <= a.display_size <= 4096:
         p.error("--display-size must be between 32 and 4096")
+    if a.two_stage_upscale and a.sr is None:
+        p.error("--two-stage-upscale requires a trained --sr checkpoint")
     if a.threads < 1:
         p.error("--threads must be positive")
+    if a.max_catchup_steps < 1:
+        p.error("--max-catchup-steps must be positive")
     if a.fp16 and a.device != "cuda":
         p.error("--fp16 requires --device cuda")
     if a.device == "cuda" and not torch.cuda.is_available():
@@ -88,11 +101,28 @@ class NeuralRuntime:
         self.device = torch.device(args.device)
         torch.set_num_threads(args.threads)
         self.model, self.world_metadata = load_world_checkpoint(args.world, self.device)
+        if getattr(args, "two_stage_upscale", False):
+            native = self.model.config.image_size
+            if args.sr is None or native not in (32, 64):
+                raise ValueError("Two-stage playback requires native32/64 and a trained SR checkpoint")
+            if args.display_size is None:
+                args.display_size = native*16
+            if args.display_size != native*16:
+                raise ValueError("Two-stage display size must equal native model size times16")
         self.simulation_hz = float(self.model.config.simulation_hz)
         self.simulation_dt = 1.0 / self.simulation_hz
         self.sr, self.sr_metadata = (None, None)
         if args.sr is not None:
             self.sr, self.sr_metadata = load_sr_checkpoint(args.sr, self.device)
+        if getattr(args, "two_stage_upscale", False):
+            trained = self.sr_metadata.get("training_steps", 0)
+            if (not isinstance(trained, (int, float)) or isinstance(trained, bool)
+                    or not math.isfinite(trained) or trained < 1):
+                raise ValueError("Two-stage playback requires an SR checkpoint with positive training_steps")
+            for key, expected in (("input_size", self.model.config.image_size),
+                                  ("output_size", self.model.config.image_size*4)):
+                if key in self.sr_metadata and self.sr_metadata[key] != expected:
+                    raise ValueError("SR checkpoint source/output resolution differs from the native world model")
         self.dtype = torch.float16 if args.fp16 else torch.float32
         self.state_dtype = (torch.float32 if self.model.config.transition_mode == "event_v1"
                             else self.dtype)
@@ -130,6 +160,7 @@ class NeuralRuntime:
         self.samples = defaultdict(list)
         self.event_counts = dict.fromkeys(EVENT_NAMES, 0)
         self.last_frame = None
+        self.upscale_stages = []
         self.reset_from_cached_initial_state()
 
     def synchronize(self):
@@ -142,12 +173,34 @@ class NeuralRuntime:
         self.memory = self.initial_memory.clone()
 
     def _resize(self, rgb):
-        if self.sr is not None:
+        self.upscale_stages = []
+        if getattr(self.args, "two_stage_upscale", False):
+            native = self.model.config.image_size
+            if native not in (32, 64) or rgb.shape[-2:] != (native, native) or self.sr is None:
+                raise ValueError("Two-stage playback requires native32/64 RGB and a trained neural x4 SR model")
             rgb = self.sr(rgb)
+            middle, final = native*4, native*16
+            if rgb.shape[-2:] != (middle, middle):
+                raise ValueError("Neural SR must produce exactly x4 native resolution")
+            self.upscale_stages.append({"method": "neural_x4", "input_resolution": [native, native],
+                                        "output_resolution": [middle, middle], "scale": 4})
+            rgb = F.interpolate(rgb, size=(final, final), mode="bilinear", align_corners=False)
+            self.upscale_stages.append({"method": "bilinear", "input_resolution": [middle, middle],
+                                        "output_resolution": [final, final], "scale": 4,
+                                        "align_corners": False})
+            return rgb
+        if self.sr is not None:
+            native = list(rgb.shape[-2:])
+            rgb = self.sr(rgb)
+            self.upscale_stages.append({"method": "neural_x4", "input_resolution": native,
+                                        "output_resolution": list(rgb.shape[-2:]), "scale": 4})
         if rgb.shape[-2:] != (self.args.display_size, self.args.display_size):
             mode = "bilinear" if self.args.smooth else "nearest"
             options = {"align_corners": False} if mode == "bilinear" else {}
+            native = list(rgb.shape[-2:])
             rgb = F.interpolate(rgb, size=(self.args.display_size, self.args.display_size), mode=mode, **options)
+            self.upscale_stages.append({"method": mode, "input_resolution": native,
+                                        "output_resolution": list(rgb.shape[-2:]), **options})
         return rgb
 
     @torch.inference_mode()
@@ -201,6 +254,8 @@ class NeuralRuntime:
         sr_kind = "neural_x4" if self.sr is not None else f"classical_{resize}"
         if self.sr is not None and self.model.config.image_size * 4 != self.args.display_size:
             sr_kind += f"_then_classical_{resize}"
+        if getattr(self.args, "two_stage_upscale", False):
+            sr_kind = "neural_x4_then_bilinear_x4"
         training_steps = int(self.world_metadata.get("training_steps", 0))
         return {
             "mode": "standalone_neural_world_rollout",
@@ -216,6 +271,7 @@ class NeuralRuntime:
             "sr_checkpoint": str(self.args.sr.resolve()) if self.args.sr else None,
             "sr_training_steps": None if self.sr_metadata is None else self.sr_metadata.get("training_steps", 0),
             "upscale": sr_kind,
+            "upscale_stages": getattr(self, "upscale_stages", []),
             "base_resolution": [self.model.config.image_size] * 2,
             "output_resolution": [self.args.display_size] * 2,
             "simulation_hz": self.simulation_hz,
@@ -228,6 +284,7 @@ class NeuralRuntime:
             "display_fps_cap": None if self.args.headless else self.args.fps,
             "displayed_frames": displayed_frames,
             "display_behavior": "latest generated frame repeated; no interpolation",
+            "max_catchup_steps_per_input_poll": getattr(self.args, "max_catchup_steps", 4),
             "max_simulation_backlog_seconds": round(max_backlog, 4),
             "timing_ms": timing,
             "warmup_steps_excluded": self.args.warmup,
@@ -327,7 +384,7 @@ def _interactive(runtime, args):
             # Bound work per display iteration without discarding elapsed time.
             # If inference is slow, backlog is retained and reported explicitly.
             caught_up = 0
-            while accumulator >= runtime.simulation_dt and caught_up < 4:
+            while accumulator >= runtime.simulation_dt and caught_up < getattr(args, "max_catchup_steps", 4):
                 frame = runtime.step(action)
                 cached_surface = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
                 accumulator -= runtime.simulation_dt

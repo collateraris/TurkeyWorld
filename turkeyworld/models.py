@@ -71,8 +71,8 @@ class WorldModelConfig:
     def __post_init__(self):
         if self.kind not in {"teacher", "student"}:
             raise ValueError("kind must be teacher or student")
-        if self.image_size not in {128, 256}:
-            raise ValueError("image_size must be 128 or 256")
+        if self.image_size not in {32, 64, 128, 256}:
+            raise ValueError("image_size must be 32, 64, 128 or 256")
         if self.architecture not in {"camera_transformer", "legacy_cnn", "vjepa2_ac"}:
             raise ValueError("architecture must be camera_transformer, legacy_cnn or vjepa2_ac")
         if self.transition_mode not in {"event_v1", "residual_v0"}:
@@ -85,6 +85,9 @@ class WorldModelConfig:
             raise ValueError('renderer_codec must be pixel or vqgan')
         if self.renderer_codec == 'vqgan' and (self.renderer_mode == 'direct' or not self.renderer_codec_config):
             raise ValueError('VQGAN rendering requires a flow renderer and explicit codec configuration')
+        if (self.renderer_codec == 'vqgan' and self.renderer_codec_config
+                and self.renderer_codec_config.get('image_size', self.image_size) != self.image_size):
+            raise ValueError('World and VQGAN image sizes must match')
         if self.flow_mlp_hidden < 0:
             raise ValueError('Flow hidden width must be nonnegative')
         if self.flow_steps < 0:
@@ -271,6 +274,10 @@ class NeuralWorldModel(nn.Module):
         ])
         self.rgb128 = nn.Conv2d(channels[3], 3, 3, padding=1)
         self.rgb256 = nn.Conv2d(channels[4], 3, 3, padding=1)
+        if self.config.image_size == 64:
+            self.rgb64 = nn.Conv2d(channels[2], 3, 3, padding=1)
+        if self.config.image_size == 32:
+            self.rgb32 = nn.Conv2d(channels[1], 3, 3, padding=1)
         yy, xx = torch.meshgrid(torch.linspace(-1, 1, 16), torch.linspace(-1, 1, 16), indexing="ij")
         self.register_buffer("coordinates", torch.stack([xx, yy])[None], persistent=False)
 
@@ -370,10 +377,11 @@ class NeuralWorldModel(nn.Module):
         condition = condition[:, :, None, None].expand(-1, -1, 16, 16)
         coords = self.coordinates.to(dtype=condition.dtype).expand(state.shape[0], -1, -1, -1)
         image = F.silu(self.render_input(torch.cat([map_features, condition, coords], dim=1)))
-        n_blocks = 3 if self.config.image_size == 128 else 4
+        n_blocks = {32: 1, 64: 2, 128: 3, 256: 4}[self.config.image_size]
         for block in self.render_blocks[:n_blocks]:
             image = block(F.interpolate(image, scale_factor=2, mode="nearest"))
-        head = self.rgb128 if n_blocks == 3 else self.rgb256
+        head = self.rgb32 if n_blocks == 1 else (self.rgb64 if n_blocks == 2
+            else (self.rgb128 if n_blocks == 3 else self.rgb256))
         return torch.sigmoid(head(image))
 
     def render(self, state, features, map_features):
@@ -468,7 +476,7 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
     else:
         parts = {"map_encoder": sum(p.numel() for p in model.map_encoder.parameters())}
-        renderer_names = ("render_condition.", "render_input.", "render_blocks.", "rgb128.", "rgb256.")
+        renderer_names = ("render_condition.", "render_input.", "render_blocks.", "rgb32.", "rgb64.", "rgb128.", "rgb256.")
         parts["renderer"] = sum(p.numel() for n, p in model.named_parameters() if n.startswith(renderer_names))
     if model.config.renderer_mode != "direct":
         parts["renderer"] += sum(p.numel() for p in model.flow_renderer.parameters())

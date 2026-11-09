@@ -118,6 +118,9 @@ def evaluate_vqgan(model, data, panel=None, *, count=128, batch_size=4, device=N
                         or not bool(torch.isfinite(frames).all())
                         or bool((frames < 0).any() or (frames > 1).any())):
                     raise ValueError("Codec validation requires clean source RGB [B,2,3,H,W] in[0,1]")
+                expected_size = configuration.get("image_size")
+                if expected_size is not None and frames.shape[-2:] != (expected_size, expected_size):
+                    raise ValueError("Codec validation source resolution differs from codec image_size")
                 source = frames.flatten(0, 1)
                 output = model(source)
                 reconstruction = output["reconstruction"].float()
@@ -213,11 +216,12 @@ def evaluate_vqgan(model, data, panel=None, *, count=128, batch_size=4, device=N
         "seconds": time.perf_counter() - started, "source_held_out": True,
         "kind": "vqgan_codec_reconstruction", "source_input_allowed_for_codec": True,
         "world_rollout": False, "render_precision": "fp32",
+        "image_size": configuration.get("image_size"),
         "score": summary["mae_mean"] + .5 * (1 - summary["ssim_mean"]),
         "counts": {"pairs": len(panel), "frames": len(per_frame), "tokens": total_tokens,
                    "shot_pairs": sum(pair["shot_transition"] for pair in per_pair), "flash_frames": len(flash)},
         "flash_summary": summarize_visual_quality(flash, limits)["summary"] if flash else None,
-        "scope": "Held-out source-image codec reconstruction; not autonomous world or five-minute qualification"}
+        "scope": "Held-out source-image codec reconstruction; not autonomous world duration qualification"}
     source = torch.stack([image[0] for image in images])
     reconstructed = torch.stack([image[1] for image in images])
     preview = {"source": _uint8(source), "reconstruction": _uint8(reconstructed),
@@ -225,6 +229,7 @@ def evaluate_vqgan(model, data, panel=None, *, count=128, batch_size=4, device=N
         "metadata": {"kind": "vqgan_codec_reconstruction", "step": int(step), "every": 500,
             "generated_at": datetime.now(timezone.utc).isoformat(), "source_held_out": True,
             "source_input_allowed_for_codec": True, "world_rollout": False, "split": "val",
+            "source_image_size": [int(source.shape[-1]), int(source.shape[-2])],
             "reconstruction_finite": bool(torch.isfinite(reconstructed).all()),
             "reconstruction_in_range": bool(torch.isfinite(reconstructed).all()
                 and (reconstructed >= 0).all() and (reconstructed <= 1).all()),

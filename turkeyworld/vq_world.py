@@ -25,6 +25,12 @@ from .vqgan import VQGAN, VQGANConfig
 STUDENT_VQ_PARAMETERS = 22_475_096
 TEACHER_VQ_PARAMETERS = 504_857_752
 TEACHER175_VQ_PARAMETERS = 174_910_616
+# Native64 profiles keep width/depth and eight-by-eight visual tokens. Smaller
+# patch projections, RGB heads and latent positional grids change exact totals.
+TEACHER175_VQ64_PARAMETERS = 174_551_048
+STUDENT_VQ64_PARAMETERS = 22_262_984
+TEACHER175_VQ32_PARAMETERS = 174_461_156
+STUDENT_VQ32_PARAMETERS = 22_209_956
 TEACHER175_VQ_PROFILE = {
     'vjepa_width': 512, 'vjepa_encoder_depth': 18, 'vjepa_predictor_depth': 12,
     'vjepa_heads': 8, 'vjepa_context_frames': 4, 'vjepa_readout_mlp_ratio': 5,
@@ -42,11 +48,11 @@ def teacher175_vq_config(codec_config, **overrides):
     """
     codec = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config)
     codec = asdict(VQGANConfig(**codec))
-    values = dict(kind='teacher', architecture='vjepa2_ac', image_size=128, endless=True,
+    values = dict(kind='teacher', architecture='vjepa2_ac', image_size=codec['image_size'], endless=True,
         renderer_mode='flow_matching', flow_steps=12, renderer_codec='vqgan',
         renderer_codec_config=codec, flow_width=256, flow_depth=6, flow_heads=8,
         flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
-        **TEACHER175_VQ_PROFILE)
+        vjepa_patch_size=codec['image_size']//8 if codec['image_size'] <= 128 else 16, **TEACHER175_VQ_PROFILE)
     values.update(overrides)
     if (values['kind'] != 'teacher' or values['architecture'] != 'vjepa2_ac'
             or values['renderer_codec'] != 'vqgan' or values['renderer_mode'] != 'flow_matching'):
@@ -58,12 +64,12 @@ def student_vq_config(codec_config, **overrides):
     """22.48M complete student, including a frozen 1488-entry shared VQGAN."""
     codec = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config)
     codec = asdict(VQGANConfig(**codec))
-    values = dict(kind='student', architecture='vjepa2_ac', image_size=128, endless=True,
+    values = dict(kind='student', architecture='vjepa2_ac', image_size=codec['image_size'], endless=True,
         renderer_mode='rectified_flow', flow_steps=4, renderer_codec='vqgan',
         renderer_codec_config=codec, vjepa_width=320, vjepa_encoder_depth=4,
         vjepa_predictor_depth=5, vjepa_heads=5, vjepa_context_frames=4,
         vjepa_readout_mlp_ratio=5, flow_width=192, flow_depth=4, flow_heads=4,
-        flow_mlp_hidden=736)
+        flow_mlp_hidden=736, vjepa_patch_size=codec['image_size']//8 if codec['image_size'] <= 128 else 16)
     values.update(overrides)
     if values['kind'] != 'student' or values['architecture'] != 'vjepa2_ac' or values['renderer_codec'] != 'vqgan':
         raise ValueError('The VQ student profile requires a V-JEPA student and shared VQGAN')
@@ -100,7 +106,7 @@ def _user_accepted(saved):
         and all(checks.get(key) is True for key in integrity))
 
 
-def _load_codec(path, require_qualified, accept_user_requested=False):
+def _load_codec(path, require_qualified, accept_user_requested=False, expected_image_size=None):
     saved = torch.load(path, map_location='cpu', weights_only=False)
     if not isinstance(saved, dict) or 'codec_config' not in saved or 'model' not in saved:
         raise ValueError('A trained codec checkpoint with its configuration and weights is required')
@@ -108,6 +114,8 @@ def _load_codec(path, require_qualified, accept_user_requested=False):
         if not (_quality_qualified(saved) or (accept_user_requested and _user_accepted(saved))):
             raise ValueError('Codec must pass and freeze after at least three consecutive quality checks')
     config = VQGANConfig(**saved['codec_config'])
+    if expected_image_size is not None and config.image_size != expected_image_size:
+        raise ValueError('Frozen codec image size does not match the requested world resolution')
     codec = VQGAN(config).eval().requires_grad_(False)
     codec.load_state_dict(saved['model'], strict=True)
     if not bool(codec.quantize.initialized):
@@ -122,14 +130,17 @@ def _load_codec(path, require_qualified, accept_user_requested=False):
     if (mean.shape != (config.embedding_dim,) or std.shape != (config.embedding_dim,)
             or not bool(torch.isfinite(mean).all() and torch.isfinite(std).all()) or not bool((std > 0).all())):
         raise ValueError('Frozen codec latent normalization is invalid')
-    if require_qualified and (config.image_size, config.embedding_dim, config.n_embed) != (128, 16, 1488):
-        raise ValueError('Production world profiles require the selected 128px, 16D, 1488-entry codec')
+    if require_qualified and (config.image_size not in (32, 64, 128)
+            or (config.embedding_dim, config.n_embed) != (16, 1488)
+            or config.downsample_factor != 4):
+        raise ValueError('Production world profiles require a32/64/128px, downsample4, 16D, 1488-entry codec')
     return saved, codec, actual
 
 
-def validate_frozen_codec(checkpoint, *, require_qualified=True, accept_user_requested=False):
+def validate_frozen_codec(checkpoint, *, require_qualified=True, accept_user_requested=False,
+                          expected_image_size=None):
     """Validate the compact codec alone, without loading a world checkpoint."""
-    saved, codec, fingerprint = _load_codec(checkpoint, require_qualified, accept_user_requested)
+    saved, codec, fingerprint = _load_codec(checkpoint, require_qualified, accept_user_requested, expected_image_size)
     return {'checkpoint': str(Path(checkpoint).resolve()), 'codec_config': codec.get_config(),
         'codec_fingerprint': fingerprint, 'quality_gate': saved.get('quality_gate'),
         'latent_normalization': saved['latent_normalization'],
@@ -137,6 +148,13 @@ def validate_frozen_codec(checkpoint, *, require_qualified=True, accept_user_req
         'training_steps': int(saved.get('training_steps', 0)), 'qualified': _quality_qualified(saved),
         'quality_acceptance': saved.get('quality_acceptance'),
         'accepted_by_user': bool(accept_user_requested and _user_accepted(saved))}
+
+
+def vq_profile_parameter_count(config):
+    """Count actual native-resolution modules, including the frozen codec."""
+    with torch.device('meta'):
+        model = NeuralWorldModel(config)
+    return sum(parameter.numel() for parameter in model.parameters())
 
 
 def _pretrain_parameters(model):

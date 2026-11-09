@@ -41,6 +41,14 @@ class CodecExperiment:
         self.args, self.root = args, args.run_dir.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.device = torch.device(args.device)
+        self.image_size = getattr(args, 'image_size', 128)
+        teacher_size = getattr(args, 'teacher_size', '500m_vqgan')
+        fresh_world = bool(getattr(args, 'world_from_scratch', False))
+        source_run = getattr(args, 'world_source_run', None)
+        self.world_plan = {'teacher_size': teacher_size, 'from_scratch': fresh_world,
+            'target_seconds': getattr(args, 'target_seconds', 300.),
+            'image_size': self.image_size,
+            'world_source_run': None if fresh_world or source_run is None else str(source_run.resolve())}
         self.rng = np.random.default_rng(args.seed)
         self.started = time.time()
         self.step, self.streak, self.best_score = 0, 0, None
@@ -51,14 +59,14 @@ class CodecExperiment:
             'stage_label': 'VQGAN: подготовка обучения с нуля', 'model': 'Shared VQGAN codec → Teacher CFM / Student RF',
             'current': 0, 'total': args.max_steps or None, 'progress': None,
             'started_at': now(), 'prediction_every': args.validate_every, 'prediction_preview': None,
-            'evaluation': {'status': 'pending', 'target_seconds': 300, 'passed': False},
-            'model_parameters': {'target_teacher_total': 500000000, 'teacher_total': 504857752,
-                'teacher_trainable': 0, 'target_student_total': 22475096},
+            'evaluation': {'status': 'pending', 'target_seconds': self.world_plan['target_seconds'], 'passed': False},
+            'model_parameters': {'target_teacher_total': 175000000 if teacher_size == '175m_vqgan' else 500000000,
+                'teacher_trainable': 0},
             'codec_training': {'from_scratch': True, 'pretrained_codec_weights_loaded': False,
                 'pretrained_discriminator_weights_loaded': False, 'disc_start': args.disc_start,
                 'required_passes': args.quality_passes, 'consecutive_passes': 0, 'frozen': False},
-            'pipeline': {'world_source_run': str(args.world_source_run.resolve()),
-                'teacher_state': 'checkpointed_waiting_for_frozen_codec',
+            'pipeline': {**self.world_plan,
+                'teacher_state': 'fresh_pending_codec_quality' if fresh_world else 'checkpointed_waiting_for_frozen_codec',
                 'shared_codec_for_teacher_and_student': True}}
         self.update()
 
@@ -87,6 +95,7 @@ class CodecExperiment:
             'rng_numpy': self.rng.bit_generator.state, 'rng_torch': torch.random.get_rng_state(),
             'rng_cuda': torch.cuda.get_rng_state_all() if self.device.type == 'cuda' else [],
             'training_objective': self.objective_metadata(), 'metrics': metrics or {},
+            'world_plan': self.world_plan,
             'initialization': 'from_scratch_codec_and_discriminator; own-training-feature codebook initialization',
             'created_at': now()}
         path = self.root/'checkpoints'/'vqgan_last.pt'
@@ -208,11 +217,13 @@ class CodecExperiment:
             'codec_config': self.model.get_config(), 'model': self.model.state_dict(),
             'training_steps': self.step, 'codec_fingerprint': fingerprint,
             'quality_gate': report, 'training_objective': self.objective_metadata(),
+            'world_plan': self.world_plan,
             'latent_normalization': normalization,
             'generator_parameters': sum(p.numel() for p in self.model.parameters()),
             'pretrained_codec_weights_loaded': False, 'created_at': now()}, temporary)
         replace_file(temporary, path)
         ready = {'checkpoint': str(path), 'codec_fingerprint': fingerprint, 'training_steps': self.step,
+            'codec_config': self.model.get_config(), 'world_plan': self.world_plan,
             'quality_gate_passed': True, 'consecutive_passes': self.streak,
             'required_passes': self.args.quality_passes, 'shared_teacher_and_student': True, 'created_at': now()}
         atomic_json(self.root/'codec_ready.json', ready)
@@ -225,7 +236,8 @@ class CodecExperiment:
     def run(self):
         random.seed(self.args.seed);np.random.seed(self.args.seed);torch.manual_seed(self.args.seed)
         torch.set_num_threads(4)
-        config = VQGANConfig(n_embed=self.args.n_embed, embedding_dim=self.args.embedding_dim)
+        config = VQGANConfig(image_size=self.image_size, n_embed=self.args.n_embed,
+                             embedding_dim=self.args.embedding_dim)
         self.model = VQGAN(config).to(self.device)
         self.discriminator = NLayerDiscriminator(ndf=self.args.discriminator_width).to(self.device)
         self.update(stage='vqgan_initializing', stage_label='VQGAN: подготовка perceptual loss и потока Source RGB')
@@ -258,12 +270,14 @@ class CodecExperiment:
             self.update(stage='vqgan_ready', stage_label='Проверенный VQGAN готов для обоих рендереров')
             return Path(ready['checkpoint'])
         self.validation = VQGANData(self.args.data_dir/'rgb'/'val', self.device, split='val',
+            image_size=self.image_size, require_native_size=True,
             cache_bytes=128*1024**2, seed=self.args.seed)
         panel_path = self.root/'validation_panel.json'
         self.panel = json.loads(panel_path.read_text(encoding='utf-8')) if panel_path.exists() else self.validation.fixed_panel(
             self.args.validation_pairs, self.args.seed)
         if not panel_path.exists():atomic_json(panel_path, self.panel)
         self.data = VQGANData(self.args.data_dir/'rgb'/'train', self.device, split='train',
+            image_size=self.image_size, require_native_size=True,
             cache_bytes=self.args.cache_mb*1024**2, balance=True, event_fraction=.35, seed=self.args.seed,
             initial_file_limit=self.args.initial_files, growth_files=self.args.growth_files)
         self.state['data'] = self.data.stats
@@ -341,6 +355,13 @@ def main(argv=None):
     parser.add_argument('--data-dir', type=Path, default=Path('training_runs/vjepa250_20261109/data'))
     parser.add_argument('--world-source-run', type=Path, default=Path('training_runs/vjepa500_20261109'))
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--image-size', type=int, choices=(32, 64, 128), default=128,
+        help='Native source RGB resolution; input clips must match exactly')
+    parser.add_argument('--teacher-size', choices=('175m_vqgan', '500m_vqgan'), default='500m_vqgan',
+        help='Pending world profile for truthful codec-stage metadata; no teacher is trained here')
+    parser.add_argument('--target-seconds', type=float, default=300., help='Pending world rollout qualification duration')
+    parser.add_argument('--world-from-scratch', action='store_true',
+        help='Record a fresh pending world; launch it with the separate fresh-world controller after codec qualification')
     parser.add_argument('--batch', type=int, default=8, help='Adjacent frame pairs; actual RGB batch is twice this value')
     parser.add_argument('--cache-mb', type=int, default=512)
     parser.add_argument('--initial-files', type=int, default=8192, help='Bootstrap checked training subset; 0 indexes all initially')
@@ -377,6 +398,10 @@ def main(argv=None):
         parser.error('Counts must be positive; max-steps may be0')
     if args.quality_passes < 3:
         parser.error('Shared codec export requires at least three consecutive quality checks')
+    if not np.isfinite(args.target_seconds) or args.target_seconds <= 0:
+        parser.error('--target-seconds must be finite and positive')
+    if args.continue_world and (args.world_from_scratch or args.teacher_size != '500m_vqgan' or args.image_size != 128):
+        parser.error('--continue-world is the legacy 500M/128 migration; use the fresh-world controller for a new world')
     experiment = CodecExperiment(args)
     try:
         with KeepAwake() as awake:

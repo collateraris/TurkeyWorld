@@ -171,6 +171,7 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                     future = torch.stack(generated, dim=1)[0]
                     preview = {"context": _uint8(context_rgb[0]), "source": _uint8(source[0]),
                                "generated": _uint8(future),
+                               "generated_float": future.detach().float().cpu(),
                                "metadata": {"step": int(step), "every": int(preview_every),
                                             "context": context, "horizon": horizon,
                                             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -206,30 +207,76 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
     return report, preview
 
 
-def save_autoregressive_preview(preview, path, *, step=None, every=500):
-    """Write a512x430 context2/source4/model4 contact sheet and JSON sidecar."""
+def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model=None, sr_metadata=None):
+    """Save three legacy rows, or five rows with prediction-only SR and bilinear."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata = dict(preview["metadata"])
     if step is not None:
         metadata["step"] = int(step)
     metadata["every"] = int(every)
-    canvas = Image.new("RGB", (512, 430), (14, 22, 31))
+    rows = [("context", f"CONTEXT input | step {metadata['step']} | held-out", preview["context"]),
+            ("source", "SOURCE future: measurement targets only", preview["source"]),
+            ("generated", "MODEL: free autoregressive future" +
+             (" | INVALID" if not metadata.get("generated_finite", True) else ""), preview["generated"])]
+    native = tuple(np.asarray(preview["generated"]).shape[1:3])
+    metadata["native_resolution"] = list(native)
+    cell, stride, canvas_size = 128, 142, (512, 430)
+    if sr_model is not None:
+        if native not in ((32, 32), (64, 64)):
+            raise ValueError("Preview SR requires native32/64 generated RGB")
+        trained = (sr_metadata or {}).get("training_steps", 0)
+        if not isinstance(trained, (int, float)) or isinstance(trained, bool) or not np.isfinite(trained) or trained < 1:
+            raise ValueError("Preview SR requires positive training_steps")
+        for key, expected in (("input_size", native[0]), ("output_size", native[0]*4)):
+            if key in (sr_metadata or {}) and sr_metadata[key] != expected:
+                raise ValueError("Preview SR checkpoint resolution differs from generated RGB")
+        generated = preview.get("generated_float")
+        if generated is None:
+            generated = torch.as_tensor(np.asarray(preview["generated"])).permute(0, 3, 1, 2).float()/255
+        else:
+            generated = generated.detach().float()
+        if generated.ndim != 4 or tuple(generated.shape[1:]) != (3, *native):
+            raise ValueError("Preview generated_float must contain matching native predictions")
+        parameter = next(sr_model.parameters(), None)
+        device = parameter.device if parameter is not None else torch.device('cpu')
+        dtype = parameter.dtype if parameter is not None else torch.float32
+        with torch.inference_mode():
+            sr = sr_model(generated[:4].to(device=device, dtype=dtype)).float()
+            middle, final = native[0]*4, native[0]*16
+            if tuple(sr.shape[1:]) != (3, middle, middle) or not bool(torch.isfinite(sr).all()):
+                raise ValueError("Preview SR must produce finite RGB at exactly x4 native size")
+            enlarged = torch.nn.functional.interpolate(sr, size=(final, final), mode='bilinear', align_corners=False)
+        rows.extend([("sr", f"LEARNED SR x4: model predictions only | {middle}x{middle}", _uint8(sr)),
+                     ("bilinear", f"BILINEAR x4: same SR row | {final}x{final}", _uint8(enlarged))])
+        cell, stride, canvas_size = final, final+24, (final*4, (final+24)*5+4)
+        metadata.update(sr_resolution=[middle, middle], upscaled_resolution=[final, final],
+            sr_training_steps=int(trained), sr_source='generated_free_rollout_rgb',
+            future_source_feedback=False, sr_world_feedback=False,
+            upscale_stages=[{'method': 'neural_x4', 'input_resolution': list(native),
+                             'output_resolution': [middle, middle], 'scale': 4},
+                            {'method': 'bilinear', 'input_resolution': [middle, middle],
+                             'output_resolution': [final, final], 'scale': 4, 'align_corners': False}])
+    canvas = Image.new("RGB", canvas_size, (14, 22, 31))
     draw = ImageDraw.Draw(canvas)
-    labels = (f"CONTEXT input | step {metadata['step']} | held-out",
-              "SOURCE future: measurement targets only",
-              "MODEL: free autoregressive future" + (" | INVALID" if not metadata.get("generated_finite", True) else ""))
-    for row, (key, label) in enumerate(zip(("context", "source", "generated"), labels)):
-        top = row * 142
+    row_metadata = []
+    for row, (key, label, frames) in enumerate(rows):
+        top = row*stride
         draw.text((4, top + 3), label, fill=(235, 239, 245))
-        for column, frame in enumerate(preview[key][:4]):
+        actual = list(np.asarray(frames).shape[1:3])
+        row_metadata.append({'key': key, 'label': label, 'native_resolution': actual,
+                             'display_resolution': [cell, cell],
+                             'display_resize': 'none' if actual == [cell, cell] else 'nearest'})
+        for column, frame in enumerate(frames[:4]):
             image = Image.fromarray(np.asarray(frame, dtype=np.uint8)).convert("RGB")
-            image = image.resize((128, 128), Image.Resampling.NEAREST)
-            canvas.paste(image, (column * 128, top + 16))
+            if image.size != (cell, cell):
+                image = image.resize((cell, cell), Image.Resampling.NEAREST)
+            canvas.paste(image, (column*cell, top+16))
     temporary = path.with_name(path.stem + f".{os.getpid()}.tmp.png")
     canvas.save(temporary, format="PNG")
     _replace(temporary, path)
-    metadata.update(image_size=[512, 430], path=str(path), caption=preview["metadata"]["caption"])
+    metadata.update(image_size=list(canvas_size), rows=row_metadata, row_count=len(rows),
+                    path=str(path), caption=preview["metadata"]["caption"])
     sidecar = path.with_suffix(".json")
     temporary_json = sidecar.with_name(sidecar.name + f".{os.getpid()}.tmp")
     temporary_json.write_text(json.dumps(metadata, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")

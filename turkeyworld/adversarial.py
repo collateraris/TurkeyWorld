@@ -51,6 +51,9 @@ class _PatchDiscriminator(nn.Module):
 class MultiScaleDiscriminator(nn.Module):
     """Two default PatchGANs at input resolution and half resolution.
 
+    Native32 inputs use one scale explicitly, retaining their actual32 pixels
+    rather than enlarging them for the critic. Existing64/128 profiles use two.
+
     Inputs are RGB [B,C,H,W] in the same [0,1] convention as the renderer.
     The base condition may be coarse and is resized after detaching. Optional
     state [B,90] is restricted to render_state_view, excluding invisible HUD

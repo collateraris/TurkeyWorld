@@ -276,9 +276,10 @@ class VJEPAExperiment(Experiment):
         atomic_json(self.root/f'{model.config.kind}_vjepa_quality_report.json', report)
         if preview:
             contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
-                loss_protocol=self.state.get('loss_protocol'))
+                loss_protocol=self.state.get('loss_protocol'), scope='held_out_quality_preview',
+                quality_gate_evaluated=True)
             self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-                step=self.global_step, every=self.preview_interval())
+                step=self.global_step, every=self.preview_interval(), **self._prediction_sr_options(contact))
         self.state['visual_quality'] = report
         self.state['validation_progress'] = {'status': 'complete', 'step': self.global_step, 'frames': 256,
                                               'seconds': report['seconds']}
@@ -293,6 +294,22 @@ class VJEPAExperiment(Experiment):
                 'scope': 'held_out_autoregressive_future_rgb', 'horizon': self.args.horizon}
         self.metric({'stage': self.state['stage'], 'step': self.global_step, 'validation': report['summary']})
         return report
+
+    def _prediction_sr_options(self, contact):
+        """Reuse a frozen preview-only upscaler without changing world optimizers."""
+        sr_checkpoint = getattr(self.args, 'sr_checkpoint', None)
+        if sr_checkpoint is None:
+            return {}
+        from .models import load_sr_checkpoint
+        sr_path = Path(sr_checkpoint).resolve()
+        identity = (str(sr_path), sr_path.stat().st_mtime_ns, sr_path.stat().st_size)
+        cached = getattr(self, '_prediction_sr_cache', None)
+        if cached is None or cached[0] != identity:
+            sr_model, sr_metadata = load_sr_checkpoint(sr_path, self.device)
+            sr_model.eval().requires_grad_(False)
+            cached = self._prediction_sr_cache = (identity, sr_model, sr_metadata)
+        contact['metadata']['sr_checkpoint'] = str(sr_path)
+        return {'sr_model': cached[1], 'sr_metadata': cached[2]}
 
     def prediction_preview_report(self, model):
         """A small real free rollout; never advances the quality/plateau clocks."""
@@ -312,7 +329,7 @@ class VJEPAExperiment(Experiment):
         contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
             scope='training_preview', quality_gate_evaluated=False, loss_protocol=self.state.get('loss_protocol'))
         self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-            step=self.global_step, every=interval)
+            step=self.global_step, every=interval, **self._prediction_sr_options(contact))
         self.state['prediction_progress'] = {'status': 'complete', 'step': self.global_step,
             'frames': len(panel)*self.args.horizon, 'seconds': report['seconds']}
         atomic_json(self.root/'status.json', self.state)
@@ -370,6 +387,7 @@ class VJEPAExperiment(Experiment):
         if joint_adversarial:
             self.state['renderer_training'].update(sampled_rgb_loss=True, sampler_steps=model.flow_renderer.steps,
                 sampler_checkpointing=True, adversarial_condition_detached=True,
+                sampled_microbatch_size=self.args.batch, adversarial_microbatch_size=self.args.batch,
                 gradient_clipping='separate_world_and_flow_groups')
         object_aware = bool(getattr(self.args, 'object_aware_rendering', False))
         if object_aware:
@@ -449,22 +467,22 @@ class VJEPAExperiment(Experiment):
                     # the complete renderer sample. This branch updates Flow;
                     # its state/base conditions never send GAN gradients back
                     # into the world readouts or the base camera.
-                    base = endpoint['base'][:1].detach()
-                    state = endpoint['state'][:1].detach()
-                    target = endpoint['target'][:1].detach()
+                    base = endpoint['base'].detach()
+                    state = endpoint['state'].detach()
+                    target = endpoint['target'].detach()
                     with self.amp(cache_enabled=False):
                         generated = model.flow_renderer.sample(base, state, checkpoint_velocity=True)
                         if endpoint.get('pixel_weights') is not None:
                             from .object_losses import weighted_image_l1
-                            sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'][:1])
+                            sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'])
                         else:
                             sampled_rgb_loss = .5*F.l1_loss(generated.float(), target.float())
                     negative_options = {}
                     if npc_negatives:
                         if endpoint.get('background') is None or endpoint.get('object_mask') is None:
                             raise ValueError('NPC-negative GAN is missing offline background/mask labels')
-                        negative_options = {'counterfactual': endpoint['background'][:1],
-                            'counterfactual_mask': endpoint['object_mask'][:1],
+                        negative_options = {'counterfactual': endpoint['background'],
+                            'counterfactual_mask': endpoint['object_mask'],
                             'counterfactual_weight': self.args.npc_negative_weight,
                             'counterfactual_min_fraction': self.args.npc_negative_min_fraction}
                     gan_loss, gan_metrics = self._adversarial_loss(generated, target, base, state,
@@ -475,11 +493,12 @@ class VJEPAExperiment(Experiment):
                     (refinement/accumulation).backward()
                     micro_metrics.update(gan_metrics, sampled_rgb_l1_loss=float(sampled_rgb_loss.detach()),
                         gan_weighted_loss=float(gan_loss.detach()),
+                        sampled_rgb_batch_size=int(generated.shape[0]), adversarial_batch_size=int(generated.shape[0]),
                         loss_without_sampled_refinement=float(total_loss))
                     if endpoint.get('object_mask') is not None:
                         from .object_losses import region_error_metrics
                         micro_metrics.update({'sampled_'+name: float(value) for name, value in region_error_metrics(
-                            generated, target, endpoint['object_mask'][:1]).items()})
+                            generated, target, endpoint['object_mask']).items()})
                     total_loss = total_loss+refinement.detach()
                 micro_metrics.update(train_loss=float(total_loss), optimization_loss=float(total_loss))
                 averaged.add(micro_metrics)

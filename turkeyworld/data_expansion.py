@@ -27,8 +27,8 @@ TRAIN_POLICIES = ("movement", "collision", "combat", "misses", "kill", "respawn"
 VALIDATION_POLICIES = TRAIN_POLICIES[:-1]
 
 
-def _frame_shape(path):
-    with zipfile.ZipFile(path) as archive, archive.open("frames.npy") as stream:
+def _frame_shape(path, field="frames"):
+    with zipfile.ZipFile(path) as archive, archive.open(field+".npy") as stream:
         version = np.lib.format.read_magic(stream)
         reader = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
         return reader(stream)[0]
@@ -48,7 +48,7 @@ def _describe(path, output, kind, split, reused=False):
                 "frames": count, "hz": 1/float(saved["dt"]), "policy": str(saved["policy"]), "reused": reused}
 
 
-def _reuse(source, output, targets, size, long_frames, rgb_time_span=0.):
+def _reuse(source, output, targets, size, long_frames, rgb_time_span=0., hr_size=0):
     jobs, modes = [], {"hardlink": 0, "copy": 0, "existing": 0}
     if source is None or not Path(source).is_dir():
         return jobs, modes
@@ -70,6 +70,9 @@ def _reuse(source, output, targets, size, long_frames, rgb_time_span=0.):
                     if kind == "long" and len(saved["actions"]) < long_frames:
                         continue
                     if kind == "rgb" and tuple(_frame_shape(path)[1:]) != (size, size, 3):
+                        continue
+                    if kind == "rgb" and hr_size and ("hr_frames" not in saved.files
+                            or tuple(_frame_shape(path, "hr_frames")[1:]) != (hr_size, hr_size, 3)):
                         continue
                 destination = output/kind/split/path.name
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +124,8 @@ def _append_target_growth(output, jobs, config):
                 "rgb_time_span": config.get("rgb_time_span", 0.) if kind == "rgb" else 0.,
                 "job_id": f"{kind}/{split}/{job_seed}", "kind": kind, "split": split, "seed": job_seed,
                 "frames": config["clip_frames"] if kind == "rgb" else config["long_frames"], "policy": policy,
-                "size": config["size"], "hr_size": 0, "hz": config["hz"], "endless": True, "long_geometry": False,
+                "size": config["size"], "hr_size": config.get("hr_size", 0) if kind == "rgb" else 0,
+                "hz": config["hz"], "endless": True, "long_geometry": False,
                 "return_offset": (0, 48, 80, 96, 128, 160, 176, 192)[index % 8],
                 "delayed_attack": policy == "attack", "reused": False,
                 "reference_path": references[index % len(references)] if references and policy == "perturbed" else None})
@@ -187,10 +191,12 @@ def _summarize(records, jobs, started, newly_finished, errors, targets=None, lon
 
 def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
                       long_train=256, long_val=32, clip_frames=32, long_frames=9000,
-                      size=128, hz=30, seed=10_000_000, workers=8, behavior_version=None, rgb_time_span=0.):
+                      size=128, hz=30, seed=10_000_000, workers=8, behavior_version=None, rgb_time_span=0., hr_size=0):
     behavior_version = current_behavior_version(behavior_version)
     if not np.isfinite(rgb_time_span) or rgb_time_span < 0:
         raise ValueError("RGB time span must be finite and nonnegative")
+    if hr_size not in (0, size*4):
+        raise ValueError("Paired HR size must be zero or exactly four times native RGB")
     output = Path(output).resolve()
     source = Path(source).resolve() if source else None
     output.mkdir(parents=True, exist_ok=True)
@@ -200,6 +206,8 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
     config = {"targets": targets, "source": str(source) if source else None,
               "clip_frames": clip_frames, "long_frames": long_frames, "size": size, "hz": hz, "seed": seed,
               "behavior_version": behavior_version, "rgb_time_span": float(rgb_time_span)}
+    if hr_size:
+        config['hr_size'] = hr_size
     manifest_path, plan_path = output/"manifest.json", output/"expansion_plan.json"
     if plan_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -225,7 +233,7 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
             manifest["config"], manifest["targets"] = config, dict(targets)
             _atomic_json(manifest_path, manifest)
     else:
-        reused_jobs, modes = _reuse(source, output, targets, size, long_frames, rgb_time_span)
+        reused_jobs, modes = _reuse(source, output, targets, size, long_frames, rgb_time_span, hr_size)
         references = [job["path"] for job in reused_jobs if job["kind"] == "rgb" and job["split"] == "train"]
         jobs = list(reused_jobs)
         # Expanded validation is generated before bulk training clips.
@@ -242,7 +250,8 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
                     "rgb_time_span": float(rgb_time_span) if kind == "rgb" else 0.,
                     "job_id": f"{kind}/{split}/{job_seed}", "kind": kind, "split": split, "seed": job_seed,
                     "frames": clip_frames if kind == "rgb" else long_frames, "policy": policy,
-                    "size": size, "hr_size": 0, "hz": hz, "endless": True, "long_geometry": False,
+                    "size": size, "hr_size": hr_size if kind == "rgb" else 0,
+                    "hz": hz, "endless": True, "long_geometry": False,
                     "return_offset": (0, 48, 80, 96, 128, 160, 176, 192)[index % 8],
                     "delayed_attack": policy == "attack", "reused": False,
                     "reference_path": references[index % len(references)] if references and policy == "perturbed" else None})
@@ -381,6 +390,7 @@ def main(argv=None):
     parser.add_argument("--clip-frames", type=int, default=32)
     parser.add_argument("--long-frames", type=int, default=9000)
     parser.add_argument("--size", type=int, default=128)
+    parser.add_argument("--hr-size", type=int, default=0, help="Genuine paired source RGB, either0 or native size times4")
     parser.add_argument("--hz", type=int, default=30)
     parser.add_argument("--seed", type=int, default=10_000_000)
     parser.add_argument("--workers", type=int, default=8)

@@ -208,6 +208,10 @@ class CameraTransformerWorldModel(nn.Module):
         self.screen_position = nn.Sequential(nn.Linear(18, width), nn.GELU(), nn.Linear(width, width))
         self.render_blocks = nn.ModuleList([TokenReadBlock(width, heads) for _ in range(layers)])
         self.render_norm = nn.LayerNorm(width)
+        if config.image_size == 32:
+            self.rgb32 = nn.Linear(width, 3 * 2 * 2)
+        if config.image_size == 64:
+            self.rgb64 = nn.Linear(width, 3 * 4 * 4)
         if not render_only or config.image_size == 128:
             self.rgb128 = nn.Linear(width, 3 * 8 * 8)
         if not render_only or config.image_size == 256:
@@ -315,13 +319,14 @@ class CameraTransformerWorldModel(nn.Module):
                                   gate, torch.ones(state.shape[0], 1, device=state.device, dtype=state.dtype)], 1)
         for block in self.render_blocks:
             queries = block(queries, context, key_weights=key_weights)
-        patch = 8 if self.config.image_size == 128 else 16
-        head = self.rgb128 if patch == 8 else self.rgb256
+        patch = self.config.image_size // 16
+        head = self.rgb32 if patch == 2 else (self.rgb64 if patch == 4
+            else (self.rgb128 if patch == 8 else self.rgb256))
         pixels = head(self.render_norm(queries)).reshape(-1, 16, 16, 3, patch, patch)
         rgb = pixels.permute(0, 3, 1, 4, 2, 5).reshape(-1, 3, 16 * patch, 16 * patch).sigmoid()
         return {"rgb": rgb, **geometry}
 
     def renderer_parameter_count(self):
         names = ("render_condition.", "screen_position.", "render_blocks.", "render_norm.",
-                  "rgb128.", "rgb256.")
+                  "rgb32.", "rgb64.", "rgb128.", "rgb256.")
         return sum(p.numel() for name, p in self.named_parameters() if name.startswith(names))

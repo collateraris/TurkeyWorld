@@ -26,9 +26,13 @@ def teacher_vq_config(codec_config, teacher_size='500m_vqgan'):
     if teacher_size != '500m_vqgan':
         raise ValueError('Unknown shared-codec teacher profile')
     from .vjepa2_ac import VJEPA500_PROFILE
-    return WorldModelConfig(kind='teacher', architecture='vjepa2_ac', image_size=128,
+    from .vqgan import VQGANConfig
+    codec = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config)
+    codec = asdict(VQGANConfig(**codec))
+    return WorldModelConfig(kind='teacher', architecture='vjepa2_ac', image_size=codec['image_size'],
         endless=True, renderer_mode='flow_matching', flow_steps=12,
-        renderer_codec='vqgan', renderer_codec_config=dict(codec_config),
+        renderer_codec='vqgan', renderer_codec_config=codec,
+        vjepa_patch_size=codec['image_size']//8 if codec['image_size'] <= 128 else 16,
         flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
         **VJEPA500_PROFILE)
 
@@ -42,7 +46,19 @@ class LatentWorldExperiment(MassiveExperiment):
         self.teacher_budget = None
         self.training_subset = None
         self.codec_options = {'accept_user_requested': True} if getattr(args, 'accept_current_codec', False) else {}
-        self.codec_info = validate_frozen_codec(args.codec_checkpoint, **self.codec_options)
+        validation_options = dict(self.codec_options)
+        if hasattr(args, 'image_size'):
+            validation_options['expected_image_size'] = args.image_size
+        self.codec_info = validate_frozen_codec(args.codec_checkpoint, **validation_options)
+        self.image_size = int(getattr(args, 'image_size', self.codec_info['codec_config']['image_size']))
+        if self.image_size != self.codec_info['codec_config']['image_size']:
+            raise ValueError('Frozen codec image size does not match the requested world resolution')
+        args.image_size = self.image_size
+        if self.image_size < 128 and not getattr(args, 'from_scratch', False):
+            raise ValueError('Native32/64px world training requires --from-scratch in a new run directory')
+        if self.image_size != 128:
+            from .vq_world import vq_profile_parameter_count
+            self.STUDENT_PARAMETER_TARGET = vq_profile_parameter_count(student_vq_config(self.codec_info['codec_config']))
         requested_size = getattr(args, 'teacher_size', '500m_vqgan')
         self.teacher_size = '500m_vqgan' if requested_size == '500m' else requested_size
         if self.teacher_size not in ('175m_vqgan', '500m_vqgan'):
@@ -87,6 +103,8 @@ class LatentWorldExperiment(MassiveExperiment):
                     'trained_codec_reused': True}
                 if previous.get('teacher_size', '500m_vqgan') != self.teacher_size:
                     raise ValueError('Existing initialization marker belongs to a different scratch experiment')
+                if previous.get('image_size', 128) != self.image_size:
+                    raise ValueError('Existing initialization marker belongs to a different image resolution')
                 if self.teacher_size == '175m_vqgan':
                     expected.update(self.teacher_initialization_profile())
                 if any(previous.get(key) != value for key, value in expected.items()):
@@ -94,7 +112,8 @@ class LatentWorldExperiment(MassiveExperiment):
             args.train_renderer_during_pretrain = True
         super().__init__(args)
         self.state.update(model=f'Compact V-JEPA 2-AC {tier}M / shared VQGAN / latent CFM → RF',
-            teacher_size=self.teacher_size, codec_validation=self.codec_info['quality_gate'],
+            teacher_size=self.teacher_size, image_size=self.image_size, base_resolution=[self.image_size]*2,
+            codec_validation=self.codec_info['quality_gate'],
             codec_ready=self.codec_info,
             codec_training={'from_scratch': True, 'pretrained_codec_weights_loaded': False,
                 'parameters': self.codec_info['generator_parameters'], 'frozen': True,
@@ -117,6 +136,8 @@ class LatentWorldExperiment(MassiveExperiment):
                 'trained_codec_reused': True, 'seed': args.seed,
                 'behavior_version': BEHAVIOR_VERSION,
                 'codec_fingerprint': self.codec_info['codec_fingerprint']}
+            if self.image_size != 128:
+                self.state['initialization']['image_size'] = self.image_size
             if self.teacher_size == '175m_vqgan':
                 self.state['initialization'].update(self.teacher_initialization_profile())
             self.state['enemy_policy'] = {'source_deterministic': True, 'version': BEHAVIOR_VERSION,
@@ -156,6 +177,10 @@ class LatentWorldExperiment(MassiveExperiment):
         self.update('initializing', 0, 1, label)
 
     def teacher_parameter_count(self):
+        codec = self.codec_info['codec_config']
+        if codec.get('image_size', 128) != 128:
+            from .vq_world import vq_profile_parameter_count
+            return vq_profile_parameter_count(teacher_vq_config(codec, getattr(self, 'teacher_size', '500m_vqgan')))
         if self.PROFILE == '175vq':
             from .vq_world import TEACHER175_VQ_PARAMETERS
             return TEACHER175_VQ_PARAMETERS
@@ -324,6 +349,10 @@ def main(argv=None):
         source=Path('training_runs/vjepa500_20261109/checkpoints/teacher500_world.pt'),
         teacher_size='500m_vqgan', target_seconds=120)
     parser.add_argument('--codec-checkpoint', required=True, type=Path)
+    parser.add_argument('--sr-checkpoint', type=Path,
+        help='Optional trained x4 SR used only for progress-preview rows; never a world-training input')
+    parser.add_argument('--image-size', type=int, choices=(32, 64, 128), default=128,
+        help='Native source/world/Base/Flow RGB size; the frozen codec must have the same resolution')
     parser.add_argument('--control-run-dir', type=Path)
     parser.add_argument('--from-scratch', action='store_true')
     parser.add_argument('--teacher-size', choices=('175m_vqgan', '500m_vqgan'), default='500m_vqgan')

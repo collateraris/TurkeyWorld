@@ -38,13 +38,16 @@ class VQGANData:
     def __init__(self, directory, device="cpu", *, split=None, image_size=128,
                  cache_bytes=512*1024**2, refresh_interval=30., balance=False,
                  event_fraction=.35, policy_weights=None, seed=273,
-                 initial_file_limit=0, growth_files=0):
+                 initial_file_limit=0, growth_files=0, require_native_size=False):
         if not 0 <= event_fraction <= 1 or refresh_interval < 0:
             raise ValueError("Event fraction must be in[0,1] and refresh interval nonnegative")
         if (not isinstance(initial_file_limit, (int, np.integer)) or initial_file_limit < 0
                 or not isinstance(growth_files, (int, np.integer)) or growth_files < 0):
             raise ValueError("Initial file limit and growth files must be nonnegative integers")
         self.initial_file_limit, self.growth_files = int(initial_file_limit), int(growth_files)
+        if not isinstance(image_size, (int, np.integer)) or image_size < 1:
+            raise ValueError("Codec image_size must be a positive integer")
+        self.image_size, self.require_native_size = int(image_size), bool(require_native_size)
         self.directory = Path(directory).resolve()
         self.data = SequenceData(self.directory, device=device, split=split, image_size=image_size,
                                  mode="stream", cache_bytes=cache_bytes, refresh_interval=refresh_interval,
@@ -89,6 +92,11 @@ class VQGANData:
         return self.data.frame_count
 
     def _rebuild_counts(self):
+        if self.require_native_size:
+            for episode in self.data.episodes:
+                if episode["frames"].shape[1:3] != (self.image_size, self.image_size):
+                    raise ValueError(f"{Path(episode['path']).name}: codec requires native source RGB "
+                                     f"{self.image_size}x{self.image_size}; resizing another corpus is not allowed")
         self._pair_counts = np.asarray([len(episode["frames"])-1 for episode in self.data.episodes], np.int64)
         self._pair_cumulative = self._pair_counts.cumsum()
 
@@ -157,6 +165,7 @@ class VQGANData:
                 "initial_file_limit": self.initial_file_limit, "current_file_limit": self.data._stream_limit,
                 "growth_files": self.growth_files,
                 "rgb_frames": self.data.frame_count, "adjacent_pairs": len(self), "split": self.split,
+                "image_size": self.image_size, "require_native_size": self.require_native_size,
                 "directory": str(self.directory), "source_rgb_field": "frames", "augmentations": [],
                 "cache_bytes": self.data.raw_bytes, "cache_limit_bytes": self.data.cache_limit_bytes,
                 "logical_decoded_bytes": self.data.total_raw_bytes,

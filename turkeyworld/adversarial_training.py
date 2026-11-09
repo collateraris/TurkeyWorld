@@ -22,18 +22,24 @@ class AdversarialTrainer:
 
     def __init__(self, device, weight=.02, feature_weight=.05, warmup_steps=64,
                  ramp_steps=256, r1_gamma=1., r1_interval=16, lr=1e-4,
-                 base_channels=32):
+                 base_channels=32, num_scales=2):
         values = (weight, feature_weight, r1_gamma, lr)
         if not all(math.isfinite(value) for value in values) or min(weight, feature_weight, r1_gamma) < 0 or lr <= 0:
             raise ValueError("Adversarial weights/gamma must be finite and nonnegative; lr must be positive")
-        if warmup_steps < 0 or min(ramp_steps, r1_interval, base_channels) < 1:
+        if (warmup_steps < 0 or min(ramp_steps, r1_interval, base_channels) < 1
+                or not isinstance(num_scales, int) or isinstance(num_scales, bool) or num_scales < 1):
             raise ValueError("Warmup must be nonnegative; ramp/interval/channels must be positive")
         self.device = torch.device(device)
         self.config = {"weight": float(weight), "feature_weight": float(feature_weight),
                        "warmup_steps": int(warmup_steps), "ramp_steps": int(ramp_steps),
                        "r1_gamma": float(r1_gamma), "r1_interval": int(r1_interval),
                        "lr": float(lr), "base_channels": int(base_channels)}
-        self.discriminator = MultiScaleDiscriminator(base_channels=base_channels).to(self.device).float()
+        # Keep legacy two-scale checkpoint configuration exactly unchanged.
+        # A native32 image needs one scale; no RGB enlargement is introduced.
+        if num_scales != 2:
+            self.config['num_scales'] = num_scales
+        self.discriminator = MultiScaleDiscriminator(base_channels=base_channels,
+                                                     num_scales=num_scales).to(self.device).float()
         self.optimizer = torch.optim.AdamW(self.discriminator.parameters(), lr=lr, betas=(0., .99))
         self.updates = 0
         self.counterfactual_updates = 0

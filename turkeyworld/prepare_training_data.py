@@ -449,6 +449,8 @@ def _generate_job(job):
         payload["frame_source"] = np.asarray("reference_engine")
     if highres is not None:
         payload["hr_frames"] = highres[:count + 1]
+        payload["hr_frame_source"] = np.asarray("reference_engine")
+        payload["paired_source_rgb"] = np.asarray(True)
     if geometry:
         payload.update(depth=depth[:count + 1], visibility=visibility[:count + 1])
     path.parent.mkdir(parents=True, exist_ok=True)
