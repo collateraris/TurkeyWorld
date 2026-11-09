@@ -14,6 +14,23 @@ from .jepa_training_utils import latent_prediction_loss, variance_covariance_los
 from .train import image_loss, state_loss, supervised_event_losses
 
 
+@torch.no_grad()
+def npc_motion_diagnostics(result, previous, target, *, simulation_hz=30.):
+    """Measure masked proposal saturation without adding it to any loss."""
+    proposal = result.get('proposed_npc_displacement')
+    if proposal is None:
+        return {}
+    old = previous.detach().float()[:, 8:88].reshape(-1, 8, 10)
+    expected = target.detach().float()[:, 8:88].reshape_as(old)
+    continuing = (old[:, :, 5] > .5) & (expected[:, :, 5] > .5)
+    saturated = proposal.detach().float().norm(dim=-1) > (1.2/simulation_hz/16)*(1+1e-5)
+    stopped = (expected[:, :, :2]-old[:, :, :2]).norm(dim=-1) < 1e-7
+    denominator = continuing.sum().clamp_min(1)
+    return {'npc_saturated_fraction': (saturated & continuing).sum()/denominator,
+        'npc_stopped_target_fraction': (stopped & continuing).sum()/denominator,
+        'npc_stopped_saturated_fraction': (stopped & saturated & continuing).sum()/denominator}
+
+
 def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags, events,
                                 *, simulation_hz=30., none_class_weight=.2, attack_pos_weight=4.):
     """Label a transition computed at exactly GT previous state/observations.
@@ -55,7 +72,8 @@ def _observed_memory(model, observed, states, map_features, end, context):
 
 
 def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, teacher=None,
-                               distill_endpoint=False, render_last_only=True):
+                               distill_endpoint=False, render_last_only=True, object_region_boost=1.,
+                               detach_flow_base=False):
     """Return loss/metrics and a GT-pose-aligned RGB/GAN endpoint.
 
     `endpoint['ar_state']`/`ar_features` are the independent main prediction.
@@ -72,6 +90,10 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     previous = batch["previous_states"].detach()
     targets = batch["target_states"].detach()
     images = batch["target_frames"].detach()
+    object_masks = batch.get('target_object_masks') if object_region_boost > 1 else None
+    if object_region_boost > 1 and object_masks is None:
+        raise ValueError('Object-aware image supervision requires offline target NPC masks')
+    pixel_weights = None
     hits = batch["hit_ids"] if "hit_ids" in batch else batch["hits"]
     attacks = batch["attack_flags"] if "attack_flags" in batch else batch["attacks"]
     events = batch["events"]
@@ -112,6 +134,7 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
             teacher_observed = teacher.core.encode_video(batch["frames"][:, :context + horizon - 1].detach())
     auxiliary, auxiliary_latents, base_values, flow_values, distill_values, reflow_values = [], [], [], [], [], []
     flow_metrics = {}
+    motion_diagnostics = []
     for index in range(horizon):
         end = context + index
         auxiliary_memory = _observed_memory(model, observed, states, map_features, end, context)
@@ -119,6 +142,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
         auxiliary_latents.append(result["latent_prediction"])
         auxiliary.append(aligned_auxiliary_step_loss(result, previous[:, index], targets[:, index],
             hits[:, index], attacks[:, index], events[:, index], simulation_hz=model.config.simulation_hz))
+        motion_diagnostics.append(npc_motion_diagnostics(result, previous[:, index], targets[:, index],
+            simulation_hz=model.config.simulation_hz))
         teach = None
         if teacher is not None:
             with torch.no_grad():
@@ -132,9 +157,17 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
         render_state = targets[:, index]
         base = model.render_base(render_state, result["features"], map_features)
         target_rgb = images[:, index]
-        base_values.append(image_loss(base, target_rgb))
+        if object_masks is not None:
+            from .object_losses import object_region_weights, weighted_image_loss
+            pixel_weights = object_region_weights(object_masks[:, index], object_region_boost)
+            base_values.append(weighted_image_loss(base, target_rgb, pixel_weights))
+        else:
+            base_values.append(image_loss(base, target_rgb))
         if render:
-            flow, flow_metrics = model.flow_renderer.loss(target_rgb, base, render_state)
+            options = {'pixel_weights': pixel_weights} if pixel_weights is not None else {}
+            if detach_flow_base:
+                options['detach_base'] = True
+            flow, flow_metrics = model.flow_renderer.loss(target_rgb, base, render_state, **options)
             flow_values.append(flow)
         if teacher is not None and distill_endpoint:
             count = 1
@@ -143,7 +176,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
                 teacher_base = teacher.render_base(render_state[:count], teach["features"][:count], teacher_map[:count])
                 endpoint = teacher.flow_renderer.sample(teacher_base, render_state[:count], noise=noise)
             reflow, _ = model.flow_renderer.loss(target_rgb[:count], base[:count], render_state[:count],
-                                                noise=noise, target_endpoint=endpoint)
+                                                noise=noise, target_endpoint=endpoint,
+                                                **({'detach_base': True} if detach_flow_base else {}))
             reflow_values.append(reflow)
     parts["combat"] = torch.stack([value["events"] + value["target"] + value["attack"] for value in auxiliary]).mean()
     parts["motion"] = 5 * torch.stack([value["motion"] for value in auxiliary]).mean()
@@ -159,9 +193,20 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     if reflow_values:
         parts["reflow"] = torch.stack(reflow_values).mean()
     metrics = {name: float(value.detach()) for name, value in parts.items()}
+    for name in ('npc_saturated_fraction', 'npc_stopped_target_fraction', 'npc_stopped_saturated_fraction'):
+        if all(name in value for value in motion_diagnostics):
+            metrics[name] = float(torch.stack([value[name] for value in motion_diagnostics]).mean())
     metrics.update({name: float(value) for name, value in {**regularizer_metrics, **latent_metrics, **flow_metrics}.items()})
     metrics.update(supervised_pose_aligned=True, auxiliary_steps=horizon,
                    rgb_supervised_steps=len(base_values), ar_future_gt_feedback=False)
+    if detach_flow_base:
+        metrics['flow_base_detached'] = True
+    if object_masks is not None:
+        from .object_losses import region_error_metrics
+        metrics.update({name: float(value) for name, value in region_error_metrics(
+            base, target_rgb, object_masks[:, -1]).items()})
     return sum(parts.values()), metrics, {"base": base, "state": render_state, "target": target_rgb,
         "features": result["features"], "ar_state": ar_state, "ar_features": ar_features,
-        "ar_memory": ar_memory, "pose_aligned": True}
+        "ar_memory": ar_memory, "pose_aligned": True, 'pixel_weights': pixel_weights,
+        'object_mask': object_masks[:, -1] if object_masks is not None else None,
+        'background': batch['target_background_frames'][:, -1] if 'target_background_frames' in batch else None}

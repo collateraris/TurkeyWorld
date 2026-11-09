@@ -146,7 +146,7 @@ class TransformerRuntimeTests(unittest.TestCase):
     def test_visibility_affects_renderer_after_token_normalization(self):
         # A positive scalar before LayerNorm is nearly normalized away. Hold
         # state/map/object appearance fixed and change only confidence: the
-        # rendered image must still respond to learned center visibility.
+        # rendered image must still respond to extent-aware rendering confidence.
         torch.manual_seed(11)
         model = self.Model(self.Config(architecture="camera_transformer", image_size=128)).eval()
         state = torch.tensor(simple_state())[None]
@@ -155,8 +155,8 @@ class TransformerRuntimeTests(unittest.TestCase):
         with torch.inference_mode():
             encoded = model.encode_map(grid)
             geometry = model.geometry(state, encoded)
-            high_visibility = {**geometry, "visibility": torch.ones(1, 8)}
-            low_visibility = {**geometry, "visibility": torch.full((1, 8), .1)}
+            high_visibility = {**geometry, "render_gate": torch.ones(1, 8)}
+            low_visibility = {**geometry, "render_gate": torch.full((1, 8), .55)}
             with patch.object(model.camera_backend, "geometry", return_value=high_visibility):
                 high = model.render(state, features, encoded)
             with patch.object(model.camera_backend, "geometry", return_value=low_visibility):

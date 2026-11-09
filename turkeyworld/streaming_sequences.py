@@ -15,6 +15,32 @@ import torch
 REQUIRED = {"frames", "states", "actions", "events", "hit_ids", "attack_flags", "map"}
 
 
+def resolve_episode_paths(directory, episode_paths):
+    """Validate an ordered fixed selection; relative paths start at directory."""
+    if episode_paths is None:
+        return None
+    if isinstance(episode_paths, (str, Path)):
+        raise ValueError('episode_paths must be a nonempty sequence of NPZ paths')
+    directory = Path(directory).resolve()
+    paths, seen = [], set()
+    for value in episode_paths:
+        path = Path(value)
+        path = (path if path.is_absolute() else directory/path).resolve()
+        if path.parent != directory:
+            raise ValueError('Selected episode must belong directly to the explicit split directory')
+        if path.suffix.lower() != '.npz':
+            raise ValueError('Selected episode must be an .npz file')
+        if path in seen:
+            raise ValueError('Selected episode paths must not contain duplicates')
+        if not path.is_file():
+            raise ValueError(f'Selected episode does not exist: {path}')
+        seen.add(path)
+        paths.append(path)
+    if not paths:
+        raise ValueError('episode_paths must be a nonempty sequence of NPZ paths')
+    return tuple(paths)
+
+
 def _frame_header(path):
     with zipfile.ZipFile(path) as archive, archive.open("frames.npy") as stream:
         version = np.lib.format.read_magic(stream)
@@ -132,10 +158,12 @@ class LazyEpisode(Mapping):
 
 def initialize_stream(owner, directory, device="cpu", limit=0, max_bytes=6*1024**3,
                       split=None, image_size=None, seed=0, cache_bytes=512*1024**2,
-                      refresh_interval=30.):
+                      refresh_interval=30., episode_paths=None, object_masks_directory=None,
+                      counterfactual_backgrounds=False):
     if limit < 0 or cache_bytes < 1 or max_bytes < 1 or refresh_interval < 0 or image_size is not None and image_size < 1:
         raise ValueError("Invalid streamed dataset limit/cache/image size")
     owner.directory, owner.device = Path(directory), torch.device(device)
+    owner._fixed_episode_paths = resolve_episode_paths(directory, episode_paths)
     owner.split = split or (owner.directory.name if owner.directory.name in {"train", "val", "test"} else None)
     owner.mode, owner.image_size, owner.rng = "stream", image_size, np.random.default_rng(seed)
     owner.episodes, owner.episode_ranges = [], []
@@ -146,13 +174,18 @@ def initialize_stream(owner, directory, device="cpu", limit=0, max_bytes=6*1024*
     refresh_stream(owner, force=True)
     if not owner.episodes:
         raise ValueError(f"No RGB episodes in explicit split directory {directory}")
+    if hasattr(owner, "_initialize_object_masks"):
+        owner._initialize_object_masks(object_masks_directory, counterfactual_backgrounds)
+    elif object_masks_directory is not None or counterfactual_backgrounds:
+        raise ValueError("Object mask loading requires a SequenceData owner")
 
 
 def refresh_stream(owner, force=False):
-    """Append new completed NPZ files; existing episode indices remain stable."""
+    """Append allowed completed NPZ files; fixed selections never discover others."""
     if not force and time.monotonic()-owner._last_refresh < owner.refresh_interval:
         return 0
-    paths = sorted(owner.directory.glob("*.npz"))
+    paths = (owner._fixed_episode_paths if owner._fixed_episode_paths is not None
+             else sorted(owner.directory.glob("*.npz")))
     if owner._stream_limit:
         paths = paths[:owner._stream_limit]
     added = 0

@@ -1,25 +1,81 @@
-"""Decode learned spawn distributions using the disclosed endless spawn rules.
+"""Shared deterministic source/neural spawn rules and legacy learned decoding.
 
 The initialization map supplies allowed floor-tile centers. This module does
 not import the reference engine or query its collision, navigation or hit code.
-The network chooses among legal distant, separated centers; it does not select
-arbitrary floating-point positions and then ask the engine to repair them.
+The deterministic policy cycles through eight fixed anchors every three game
+seconds. Safety filters retain player/NPC separation and wall exclusion; a
+static row-major floor order is the fallback. No hidden RNG or time hash is
+used. The learned decoder remains the default for neural model architectures.
+No engine collision/navigation/hit query is used.
 """
 from __future__ import annotations
 
-import torch
+BEHAVIOR_VERSION = 'deterministic_enemy_v3_simple_spawn'
+SPAWN_TICK_HZ = 30
+SPAWN_PHASE_SECONDS = 3
+SPAWN_PHASE_TICKS = SPAWN_PHASE_SECONDS * SPAWN_TICK_HZ
+# All eight cells are floor on the reference16x16 arena. Clockwise ordering
+# gives neighboring time phases neighboring regions, without a hash avalanche.
+SPAWN_ANCHORS = ((2, 2), (8, 2), (13, 2), (13, 8),
+                 (13, 13), (6, 13), (2, 13), (2, 8))
+SPAWN_CYCLE_SECONDS = SPAWN_PHASE_SECONDS * len(SPAWN_ANCHORS)
 
-from .structured_state import DEATH_DURATION, ENTITY_SLOTS, MAP_EXTENT, RESPAWN_DELAY
+
+def spawn_tile_rank(tick, slot, tile):
+    """Coarse cyclic anchor priority; accepts integers or torch int64 tensors.
+
+    Anchor(slot+floor(game_seconds/3)) modulo8 comes first, followed by the
+    remaining anchors in ring order. Other cells follow in static row-major
+    order. The schedule repeats every24seconds; walls/occupancy may skip an
+    anchor but cannot introduce randomness.
+    """
+    count = len(SPAWN_ANCHORS)
+    preferred = (tick // SPAWN_PHASE_TICKS + slot) % count
+    rank = count + tile
+    for index, (x, y) in enumerate(SPAWN_ANCHORS):
+        priority = (index-preferred) % count
+        rank = rank + (tile == y*16+x) * (priority-rank)
+    return rank
 
 
-@torch.no_grad()
-def decode_spawn_positions(logits, previous, walkable, dt):
+def deterministic_spawn_tile(walkable, player_xy, positions, alive, slot, tick):
+    """Choose a floor tile using map-unit coordinates; return (x,y) or None.
+
+    This small dependency-free implementation is used by the source engine.
+    The neural decoder applies the same rank and distance rules in tensors.
+    """
+    candidates = []
+    for iy, row in enumerate(walkable):
+        for ix, floor in enumerate(row):
+            if not floor:
+                continue
+            x, y = ix + .5, iy + .5
+            if (x-player_xy[0])**2 + (y-player_xy[1])**2 < 16.:
+                continue
+            if any(living and (x-xy[0])**2 + (y-xy[1])**2 < 1.
+                   for xy, living in zip(positions, alive)):
+                continue
+            tile = iy * 16 + ix
+            candidates.append((spawn_tile_rank(tick, slot, tile), tile, x, y))
+    if not candidates:
+        return None
+    _, _, x, y = min(candidates)
+    return x, y
+
+
+def decode_spawn_positions(logits, previous, walkable, dt, *, deterministic=False):
     """Return normalized centers [B,8,2] and availability [B,8].
 
-    Selecting a legal tile is a declared discrete game rule. Relative preference
-    between legal tiles comes from the learned categorical logits. Different
-    dead slots are decoded in ID order so newly selected centers stay apart.
+    With deterministic=True, learned logits are auxiliary labels only. The
+    shared game-time rule controls placement. Slots are processed in ID order
+    so simultaneous spawns remain separated. Defaults retain old checkpoints.
     """
+    import torch
+    from .structured_state import DEATH_DURATION, ENTITY_SLOTS, MAP_EXTENT, RESPAWN_DELAY
+
+    # Selection is a discrete, disclosed rule in both modes, never a gradient
+    # path. Detach once so source-only users need no PyTorch import at all.
+    previous, logits = previous.detach(), logits.detach()
     batch = previous.shape[0]
     if logits.shape != (batch, ENTITY_SLOTS, 256):
         raise ValueError("spawn logits must have shape [B,8,256]")
@@ -43,12 +99,18 @@ def decode_spawn_positions(logits, previous, walkable, dt):
     floor = walkable.to(device=previous.device, dtype=torch.bool).flatten(1)
     player_distance = ((centers[None] - previous[:, None, :2]) * MAP_EXTENT).square().sum(-1)
     base_allowed = floor & (player_distance >= 4.0 ** 2)
+    ticks = torch.round((previous[:, -1].double() * 300 + dt) * SPAWN_TICK_HZ).long()
+    tiles = torch.arange(256, device=previous.device, dtype=torch.long)
     for slot in range(ENTITY_SLOTS):
         distances = ((centers[None, :, None] - positions[:, None]) * MAP_EXTENT).square().sum(-1)
         separated = ~((distances < 1.0) & alive[:, None]).any(-1)
         allowed = base_allowed & separated
         usable = ready[:, slot] & allowed.any(-1)
-        chosen = logits[:, slot].masked_fill(~allowed, -torch.finfo(logits.dtype).max).argmax(-1)
+        if deterministic:
+            ranks = spawn_tile_rank(ticks[:, None], slot, tiles[None]) * 256 + tiles[None]
+            chosen = ranks.masked_fill(~allowed, torch.iinfo(torch.long).max).argmin(-1)
+        else:
+            chosen = logits[:, slot].masked_fill(~allowed, -torch.finfo(logits.dtype).max).argmax(-1)
         positions[:, slot] = torch.where(usable[:, None], centers[chosen], positions[:, slot])
         alive[:, slot] |= usable
         available[:, slot] = usable

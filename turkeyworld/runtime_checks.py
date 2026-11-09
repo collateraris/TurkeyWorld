@@ -428,9 +428,13 @@ class RolloutMonitor:
                           and combat_pass and alive_pass)
         integrity = self.first_failure is None
         return {"completed_requested_steps": completed, "checked_steps": self.steps,
+                "requested_steps": self.requested_steps,
+                "requested_seconds": round(self.requested_steps*self.dt, 6),
                 "checked_simulated_seconds": round(self.steps*self.dt, 6),
                 "integrity_pass": integrity, "qualifying_active_session": qualifying,
                 "behavioral_checks_pass": bool(meaningful_motion and npc_response_pass and combat_pass and alive_pass),
+                "state_integrity_active_requested_pass": bool(integrity and qualifying
+                    and self.steps*self.dt >= self.requested_steps*self.dt-1e-6),
                 "state_integrity_active_300s_pass": bool(integrity and qualifying and self.steps*self.dt >= 300.-1e-6),
                 "first_failure": self.first_failure, "violation_counts": dict(self.counts),
                 "failure_examples": self.examples, "model_terminal_step": self.terminal_step,
@@ -454,4 +458,4 @@ class RolloutMonitor:
                                        "frozen_alive_ids": frozen_npcs,
                                        "pass": npc_response_pass,
                                        "note": "Broad anti-freeze gate: living NPCs whose reference travelled at least1tile must travel at least10% as far; this does not prove correct AI/combat."},
-                "qualification_note": "Idle/turn/wall, early terminal episodes, frozen predictions and endless sessions without combat/respawns cannot establish 300 seconds of active gameplay."}
+                "qualification_note": "Idle/turn/wall, early terminal episodes, frozen predictions and endless sessions without combat/respawns cannot establish active gameplay for the requested duration."}

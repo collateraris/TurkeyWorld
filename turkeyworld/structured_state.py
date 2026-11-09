@@ -34,13 +34,19 @@ EVENT_NAMES = ("shot", "hit", "kill", "player_hit")
 STRUCTURED_STATE_VERSION = "event_v1"
 
 
-def _bounded_delta(previous_xy, candidate_xy, speed, dt):
-    """Euclidean movement cap in normalized 16x16-map coordinates."""
+def _bounded_delta(previous_xy, candidate_xy, speed, dt, *, training=False):
+    """Hard speed cap with an optional straight-through training derivative.
+
+    Radial clipping otherwise has zero radial derivative for an overspeed
+    proposal, so a stopped or slower NPC target cannot teach it to slow down.
+    The forward displacement and inference rule remain the same hard bound.
+    """
     delta = candidate_xy.clamp(0, 1) - previous_xy
     tiny = max(torch.finfo(delta.dtype).tiny, 1e-6)
     norm = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
     factor = ((speed * dt / MAP_EXTENT) / norm.clamp_min(tiny)).clamp_max(1)
-    return delta * factor
+    bounded = delta * factor
+    return bounded.detach() + (delta - delta.detach()) if training else bounded
 
 
 def _straight_through(hard, soft, training):
@@ -67,8 +73,9 @@ def structured_transition(previous, candidate, action, target_logits,
             and cooldown guards must also hold. Occlusion remains learned.
         dt: positive finite seconds, normally 1/30; rules are otherwise rate aware.
         training: preserve hard forward decisions but use straight-through
-            softmax/sigmoid gradients through damage. Train the two heads with
-            their target-CE/attack-BCE labels; ``events`` itself is hard-valued.
+            gradients through NPC speed clipping and softmax/sigmoid damage.
+            Train the two heads with their target-CE/attack-BCE labels;
+            ``events`` itself is hard-valued.
 
     Return values include state[B,90], events[B,4], event_probs/event_logits,
     accepted_target[B] (-1 for no accepted hit), accepted_attacks[B,8] bool,
@@ -200,8 +207,11 @@ def structured_transition(previous, candidate, action, target_logits,
 
     # NPC motion occurs after the shot. Killed or previously dead slots keep
     # their old location; terminal player states also stop NPC movement.
-    npc_delta = _bounded_delta(old[:, :, :2], proposed[:, :, :2], NPC_SPEED_BOUND, dt)
-    npc_moving = alive & player_alive[:, None]
+    npc_delta = _bounded_delta(old[:, :, :2], proposed[:, :, :2], NPC_SPEED_BOUND, dt,
+                               training=training)
+    # A freshly respawned slot holds its center and phase for this tick, as
+    # does the deterministic source. Learned motion starts on the next tick.
+    npc_moving = alive & player_alive[:, None] & ~respawn
     npc_delta = npc_delta * npc_moving[:, :, None].to(dtype)
     npc_xy = old[:, :, :2] + npc_delta
     # Schema stores vx/2 and vy/2, while XY is normalized by map extent.

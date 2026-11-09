@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .spawn import BEHAVIOR_VERSION, SPAWN_TICK_HZ, deterministic_spawn_tile
+
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
 ENTITY_SLOTS = 8
@@ -63,6 +65,7 @@ class Game:
     """
 
     STATE_DIM = STATE_DIM
+    BEHAVIOR_VERSION = BEHAVIOR_VERSION
     ENTITY_SLOTS = ENTITY_SLOTS
     FIRE_INTERVAL = 0.22
     FLASH_DURATION = 0.10
@@ -111,10 +114,11 @@ class Game:
         return {"id": ident, "x": x, "y": y, "vx": 0.0, "vy": 0.0,
                 "hp": 60.0, "alive": True, "attack_cooldown": 0.0,
                 "hurt_timer": 0.0, "death_timer": 0.0,
-                "animation_phase": float(self.rng.random())}
+                "animation_phase": 0.0}
 
     def get_state(self):
         return copy.deepcopy({"version": 1, "seed": self.seed, "time": self.time,
+                              "behavior_version": BEHAVIOR_VERSION,
                               "endless": self.endless,
                               "player": self.player, "enemies": self.enemies,
                               "kills": self.kills, "rng_state": self.rng.bit_generator.state})
@@ -265,34 +269,23 @@ class Game:
         return field
 
     def _respawn_enemies(self):
-        """Replace expired corpses at reachable, separated spawn locations."""
+        """Replace expired corpses by the shared three-second anchor cycle."""
         ready = [e for e in self.enemies
                  if not e["alive"] and e["death_timer"] >= self.RESPAWN_DELAY - 1e-8]
         if not ready:
-            return
-        field = self._navigation()
+            return set()
         p = self.player
-        c, s = math.cos(p["angle"]), math.sin(p["angle"])
-        tangent = math.tan(math.radians(34))
+        spawned = set()
+        tick = round(self.time * SPAWN_TICK_HZ)
         for enemy in ready:
-            candidates, hidden = [], []
-            for iy, ix in np.argwhere((self.map == 0) & (field < 10000)):
-                x, y = float(ix) + 0.5, float(iy) + 0.5
-                dx, dy = x - p["x"], y - p["y"]
-                if dx * dx + dy * dy < self.SPAWN_DISTANCE ** 2:
-                    continue
-                if any(e["alive"] and (x - e["x"]) ** 2 + (y - e["y"]) ** 2 < 1.0
-                       for e in self.enemies):
-                    continue
-                candidates.append((x, y))
-                forward, lateral = dx * c + dy * s, -dx * s + dy * c
-                if (forward <= 0 or abs(lateral) > forward * tangent
-                        or not self._line_clear(p["x"], p["y"], x, y)):
-                    hidden.append((x, y))
-            locations = hidden or candidates
-            if locations:
-                x, y = locations[int(self.rng.integers(len(locations)))]
+            location = deterministic_spawn_tile(self.map == 0, (p['x'], p['y']),
+                [(e['x'], e['y']) for e in self.enemies], [e['alive'] for e in self.enemies],
+                enemy['id'], tick)
+            if location is not None:
+                x, y = location
                 enemy.update(self._new_enemy(enemy["id"], x, y))
+                spawned.add(enemy['id'])
+        return spawned
 
     def step(self, action, dt=1 / 30):
         a = np.asarray(action, dtype=np.float64)
@@ -317,8 +310,7 @@ class Game:
         if p["hp"] <= 0:
             self.last_events = events
             return events
-        if self.endless:
-            self._respawn_enemies()
+        respawned = self._respawn_enemies() if self.endless else set()
         p["angle"] = float((p["angle"] + a[2] * 2.2 * dt + math.pi) % (2 * math.pi) - math.pi)
         c, s = math.cos(p["angle"]), math.sin(p["angle"])
         forward, strafe = a[0], a[1]
@@ -355,7 +347,7 @@ class Game:
                     events["kill"], events["killed_id"] = True, target["id"]
         field = self._navigation()
         for e in self.enemies:
-            if not e["alive"]:
+            if not e["alive"] or e['id'] in respawned:
                 continue
             rx, ry = p["x"] - e["x"], p["y"] - e["y"]
             distance = math.hypot(rx, ry)

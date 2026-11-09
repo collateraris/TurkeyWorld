@@ -133,17 +133,23 @@ class VJEPAExperiment(Experiment):
             atomic_json(start_path, {'started_at': started_at})
         self.started = datetime.fromisoformat(started_at).timestamp()
         self.state['started_at'] = started_at
+        target_seconds = int(getattr(args, 'target_seconds', 300))
+        if target_seconds < 1:
+            raise ValueError('target_seconds must be positive')
+        target_steps = target_seconds*30
+        self.state['evaluation']['target_seconds'] = target_seconds
         self.state.update(model='Compact V-JEPA 2-AC 125M / Flow Matching → Rectified Flow',
             teacher_world_architecture='vjepa2_ac_compact', teacher_size='125m',
             prediction_preview=None, estimated_total_range_seconds=None, eta_seconds=None,
-            prediction_every=self.preview_interval(), target_rollout_steps=9000,
+            prediction_every=self.preview_interval(), target_rollout_steps=target_steps,
             first_cycle_estimate={'range_seconds': [14400, 21600],
                 'scope': 'First teacher plateau handoff plus16000 student updates and long evaluations; excludes repair rounds',
                 'teacher_seconds_per_update': 2.76, 'student_seconds_per_update': .405,
                 'target_quality_completion_time_known': False},
             training_protocol={'own_predictions': True, 'future_ground_truth_feedback': False,
                 'persistent_map': True, 'persistent_object_slots': 8, 'tbptt_chunk': args.chunk,
-                'curriculum': [32, 128, 512, 2048, 9000], 'teacher_before_student': True},
+                'curriculum': [value for value in (32, 128, 512, 2048) if value < target_steps]+[target_steps],
+                'teacher_before_student': True},
             plateau_policy={'enabled': True, 'patience': args.plateau_patience,
                 'min_relative_improvement': args.plateau_delta, 'every': 500})
         self.state['teacher_plateau'] = {'enabled': True, 'patience': args.plateau_patience,
@@ -187,6 +193,16 @@ class VJEPAExperiment(Experiment):
         if batch_state.get('status') == 'accumulating' and batch_state.get('microstep', 0):
             raise ValueError('Checkpoint requires a completed optimizer update, not pending microbatch gradients')
         additional = {**self.extra, 'global_training_step': self.global_step}
+        if self.state.get('loss_protocol'):
+            additional['loss_protocol'] = self.state['loss_protocol']
+        if self.state.get('renderer_training'):
+            additional['renderer_training'] = self.state['renderer_training']
+        if self.state.get('initialization'):
+            additional['initialization'] = self.state['initialization']
+        if self.state.get('enemy_policy'):
+            additional['behavior_version'] = self.state['enemy_policy']['version']
+        from .optimizer_migration import optimizer_parameter_names
+        additional['optimizer_parameter_names'] = optimizer_parameter_names(model, optimizer)
         additional['training_counters'] = {'optimizer_updates': self.global_step,
             'fragments_seen': getattr(self, 'fragments_seen', self.global_step*getattr(self.args, 'batch', 1)),
             'gradient_accumulation_steps': self.accumulation_steps(), 'pending_microbatches': 0}
@@ -194,6 +210,15 @@ class VJEPAExperiment(Experiment):
             additional['ema_target_encoder'] = self.ema.state_dict()
         additional.update(extra or {})
         return super().save(model, optimizer, phase, step, metrics, additional)
+
+    def optimizer_state_for_restore(self, checkpoint, model, optimizer):
+        if (getattr(self.args, 'train_renderer_during_pretrain', False)
+                or 'optimizer_parameter_names' in checkpoint):
+            from .optimizer_migration import optimizer_state_for_trainables
+            state, report = optimizer_state_for_trainables(checkpoint, model, optimizer)
+            self.state['optimizer_migration'] = report
+            return state
+        return super().optimizer_state_for_restore(checkpoint, model, optimizer)
 
     def restore(self, model, optimizer, phase):
         step = super().restore(model, optimizer, phase)
@@ -250,7 +275,8 @@ class VJEPAExperiment(Experiment):
         report['global_training_step'] = self.global_step
         atomic_json(self.root/f'{model.config.kind}_vjepa_quality_report.json', report)
         if preview:
-            contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'])
+            contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
+                loss_protocol=self.state.get('loss_protocol'))
             self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
                 step=self.global_step, every=self.preview_interval())
         self.state['visual_quality'] = report
@@ -284,7 +310,7 @@ class VJEPAExperiment(Experiment):
             thresholds=self.quality_thresholds(), seed=self.args.seed,
             step=self.global_step, preview_every=interval)
         contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
-            scope='training_preview', quality_gate_evaluated=False)
+            scope='training_preview', quality_gate_evaluated=False, loss_protocol=self.state.get('loss_protocol'))
         self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
             step=self.global_step, every=interval)
         self.state['prediction_progress'] = {'status': 'complete', 'step': self.global_step,
@@ -310,13 +336,15 @@ class VJEPAExperiment(Experiment):
         """Optional selection hook; patience remains on the phase validation clock."""
 
     def fit(self, model, data, phase, steps=None, *, teacher=None, quality=False, pretrain=False):
+        joint_renderer = pretrain and getattr(self.args, 'train_renderer_during_pretrain', False)
+        joint_adversarial = bool(joint_renderer and getattr(self.args, 'adversarial_during_pretrain', False)
+                                 and getattr(self.args, 'adversarial', False))
         if pretrain:
             # The newly initialized encoder/predictor first learns the game;
             # preserve the warm-started renderer during this stage.
-            for parameter in model.flow_renderer.parameters():
-                parameter.requires_grad_(False)
+            model.flow_renderer.requires_grad_(bool(joint_renderer))
             for parameter in model.vjepa_backend.renderer.parameters():
-                parameter.requires_grad_(False)
+                parameter.requires_grad_(bool(joint_renderer and getattr(self.args, 'from_scratch', False)))
         else:
             model.requires_grad_(True)
         self.ema = EMATargetEncoder(model.core.encoder, self.args.ema).to(self.device)
@@ -333,21 +361,52 @@ class VJEPAExperiment(Experiment):
                 self.freeze_teacher(model, reason, self.extra['teacher_plateau'], completed)
             model.requires_grad_(True)
             return
-        if not pretrain:
+        if not pretrain or joint_adversarial:
             self._setup_adversarial(phase)
+        self.state['renderer_training'] = {'active': not pretrain or joint_renderer,
+            'reason': 'joint_dynamics_flow_matching_gan' if joint_adversarial else 'joint_dynamics_flow_matching' if joint_renderer else 'dynamics_pretraining' if pretrain else 'image_training',
+            'adversarial_active': (not pretrain or joint_adversarial) and bool(getattr(self.args, 'adversarial', False)),
+            'codec_frozen': getattr(getattr(model, 'config', None), 'renderer_codec', 'pixel') == 'vqgan'}
+        if joint_adversarial:
+            self.state['renderer_training'].update(sampled_rgb_loss=True, sampler_steps=model.flow_renderer.steps,
+                sampler_checkpointing=True, adversarial_condition_detached=True,
+                gradient_clipping='separate_world_and_flow_groups')
+        object_aware = bool(getattr(self.args, 'object_aware_rendering', False))
+        if object_aware:
+            self.state['renderer_training'].update(object_aware=True,
+                object_region_boost=self.args.npc_region_boost, sprite_visibility_mode='projected_extent',
+                object_mask_source='offline_visible_npc_pixels')
+        detach_flow_base = bool(getattr(self.args, 'detach_flow_base', False))
+        npc_negatives = bool(getattr(self.args, 'gan_npc_negatives', False))
+        if npc_negatives and not joint_adversarial:
+            raise ValueError('NPC-negative GAN requires the joint adversarial branch')
+        if detach_flow_base:
+            self.state['renderer_training'].update(flow_base_detached=True, base_objective='rgb_and_edges')
+        if npc_negatives:
+            self.state['renderer_training'].update(gan_npc_negatives=True,
+                npc_negative_weight=self.args.npc_negative_weight,
+                npc_negative_min_fraction=self.args.npc_negative_min_fraction)
+        self.state['loss_protocol'] = 'joint_dynamics_flow_matching_gan_v1' if joint_adversarial else 'joint_dynamics_flow_matching_v1' if joint_renderer else 'dynamics_pretraining_v1' if pretrain else 'image_training_v1'
+        if object_aware:
+            self.state['loss_protocol'] = 'joint_dynamics_flow_matching_gan_objects_v1' if joint_adversarial else self.state['loss_protocol']+'_objects'
+        if detach_flow_base or npc_negatives:
+            self.state['loss_protocol'] = 'joint_dynamics_flow_matching_gan_objects_separate_v2'
         self._publish_model_sizes(model)
         panel_hash = self.extra.get('teacher_plateau', {}).get('fingerprint', '')
         tracker = PlateauTracker.from_state(self.extra.get('teacher_plateau'), patience=self.args.plateau_patience,
             min_relative_improvement=self.args.plateau_delta, phase=phase, fingerprint=panel_hash,
             current_step=completed)
         streak = int(self.extra.get('quality_streak', 0))
-        label = ('Учитель: видеокодировщик и прогноз действий' if pretrain else
+        label = ('Учитель: динамика / Flow Matching / GAN' if joint_adversarial else
+                 'Учитель: динамика и генератор Flow Matching' if joint_renderer else
+                 'Учитель: видеокодировщик и прогноз действий' if pretrain else
                  'Учитель: качество прогноза / Flow Matching / GAN' if quality else
                  'Студент: V-JEPA / Rectified Flow / дистилляция')
         self.update(phase, completed, steps, label, global_training_step=self.global_step,
                     message='Обучение на собственных состояниях; будущие RGB используются только как цели')
         if (self.preview_interval() < 500 and
-                (self.state.get('prediction_preview') or {}).get('every') != self.preview_interval()):
+                ((self.state.get('prediction_preview') or {}).get('every') != self.preview_interval()
+                 or (object_aware and (self.state.get('prediction_preview') or {}).get('loss_protocol') != self.state['loss_protocol']))):
             self.prediction_preview_report(model)
         model.train()
         started, initial_step, metrics = time.perf_counter(), completed, {}
@@ -365,8 +424,12 @@ class VJEPAExperiment(Experiment):
                 batch = data.batch(self.args.batch, context=self.args.context, horizon=self.args.horizon, rng=self.rng)
                 with self.amp(cache_enabled=False):
                     loss_function = getattr(self, 'loss_function', short_rollout_loss)
+                    image_options = {'object_region_boost': self.args.npc_region_boost} if object_aware else {}
+                    if detach_flow_base:
+                        image_options['detach_flow_base'] = True
                     loss, micro_metrics, endpoint = loss_function(model, self.ema, batch, context=self.args.context,
-                        render=not pretrain, teacher=teacher, distill_endpoint=teacher is not None and step % 4 == 0)
+                        render=not pretrain or joint_renderer, teacher=teacher, distill_endpoint=teacher is not None and step % 4 == 0,
+                        **image_options)
                     generated = None
                     if not pretrain:
                         generated = model.flow_renderer.sample(endpoint['base'][:1], endpoint['state'][:1])
@@ -380,7 +443,45 @@ class VJEPAExperiment(Experiment):
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f'Nonfinite {phase} loss at {step}, microbatch {microstep+1}')
                 (loss/accumulation).backward()
-                micro_metrics.update(train_loss=float(loss.detach()), optimization_loss=float(loss.detach()))
+                total_loss = loss.detach()
+                if joint_adversarial:
+                    # Release the large world/CFM graph before differentiating
+                    # the complete renderer sample. This branch updates Flow;
+                    # its state/base conditions never send GAN gradients back
+                    # into the world readouts or the base camera.
+                    base = endpoint['base'][:1].detach()
+                    state = endpoint['state'][:1].detach()
+                    target = endpoint['target'][:1].detach()
+                    with self.amp(cache_enabled=False):
+                        generated = model.flow_renderer.sample(base, state, checkpoint_velocity=True)
+                        if endpoint.get('pixel_weights') is not None:
+                            from .object_losses import weighted_image_l1
+                            sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'][:1])
+                        else:
+                            sampled_rgb_loss = .5*F.l1_loss(generated.float(), target.float())
+                    negative_options = {}
+                    if npc_negatives:
+                        if endpoint.get('background') is None or endpoint.get('object_mask') is None:
+                            raise ValueError('NPC-negative GAN is missing offline background/mask labels')
+                        negative_options = {'counterfactual': endpoint['background'][:1],
+                            'counterfactual_mask': endpoint['object_mask'][:1],
+                            'counterfactual_weight': self.args.npc_negative_weight,
+                            'counterfactual_min_fraction': self.args.npc_negative_min_fraction}
+                    gan_loss, gan_metrics = self._adversarial_loss(generated, target, base, state,
+                        accumulation_steps=accumulation, microstep=microstep, **negative_options)
+                    refinement = sampled_rgb_loss+gan_loss
+                    if not torch.isfinite(refinement):
+                        raise FloatingPointError(f'Nonfinite sampled GAN loss at {step}, microbatch {microstep+1}')
+                    (refinement/accumulation).backward()
+                    micro_metrics.update(gan_metrics, sampled_rgb_l1_loss=float(sampled_rgb_loss.detach()),
+                        gan_weighted_loss=float(gan_loss.detach()),
+                        loss_without_sampled_refinement=float(total_loss))
+                    if endpoint.get('object_mask') is not None:
+                        from .object_losses import region_error_metrics
+                        micro_metrics.update({'sampled_'+name: float(value) for name, value in region_error_metrics(
+                            generated, target, endpoint['object_mask'][:1]).items()})
+                    total_loss = total_loss+refinement.detach()
+                micro_metrics.update(train_loss=float(total_loss), optimization_loss=float(total_loss))
                 averaged.add(micro_metrics)
                 self.fragments_seen += self.args.batch
                 self.publish_accumulation(microstep+1, 'accumulating')
@@ -388,19 +489,30 @@ class VJEPAExperiment(Experiment):
                     self.state.update(updated_at=now(), elapsed_seconds=round(time.time()-self.started, 1),
                         loss=averaged.mean()['train_loss'], current=step-1, global_training_step=self.global_step)
                     atomic_json(self.root/'status.json', self.state)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
+            if joint_adversarial:
+                flow_parameters = [p for p in model.flow_renderer.parameters() if p.requires_grad]
+                flow_ids = {id(p) for p in flow_parameters}
+                world_parameters = [p for p in model.parameters() if p.requires_grad and id(p) not in flow_ids]
+                torch.nn.utils.clip_grad_norm_(world_parameters, 1., error_if_nonfinite=True)
+                torch.nn.utils.clip_grad_norm_(flow_parameters, 1., error_if_nonfinite=True)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
             optimizer.step()
             self.ema.update(model.core.encoder)
             self.global_step += 1
             self.publish_accumulation(accumulation, 'updated')
             metrics = averaged.mean()
-            for name in ('step', 'completed_updates', 'optimizer_updated', 'accumulation_microstep', 'accumulation_steps'):
+            for name in ('step', 'completed_updates', 'optimizer_updated', 'accumulation_microstep', 'accumulation_steps',
+                         'cf_completed_updates'):
                 key = 'adversarial_'+name
                 if key in micro_metrics:
                     metrics[key] = micro_metrics[key]
             metrics.update(gradient_accumulation_steps=accumulation, microbatch_size=self.args.batch,
                 effective_batch_size=self.args.batch*accumulation, fragments_seen=self.fragments_seen,
                 loss_aggregation='mean_of_microbatches')
+            metrics['loss_protocol'] = self.state['loss_protocol']
+            if 'flow' in metrics:
+                metrics['loss_without_flow'] = metrics['train_loss']-metrics['flow']
             if accumulation > 1:
                 self.update(phase, step, steps, label, global_training_step=self.global_step, loss=metrics['train_loss'])
             control = getattr(self.args, 'control_run_dir', None)
@@ -497,10 +609,12 @@ class VJEPAExperiment(Experiment):
         if self.state.get('adversarial'):
             self.state['adversarial']['active'] = False
         self.ema = EMATargetEncoder(model.core.encoder, self.args.ema).to(self.device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=self.args.lr*.25, weight_decay=.01)
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=self.args.lr*.25, weight_decay=.01)
         completed = self.restore(model, optimizer, phase)
         if self.extra.get('phase_complete'):
             return
+        self.state['renderer_training'] = {'active': False, 'reason': 'long_dynamics_curriculum',
+            'codec_frozen': getattr(getattr(model, 'config', None), 'renderer_codec', 'pixel') == 'vqgan'}
         if not hasattr(self, 'fragments_seen'):
             self.fragments_seen = self.global_step*getattr(self.args, 'batch', 1)
         def callback(progress):
@@ -524,7 +638,7 @@ class VJEPAExperiment(Experiment):
                 self.preview_if_due(model)
             model.train()
             self.update(phase, progress['completed_transitions'], progress['total_transitions'],
-                ('Учитель' if kind == 'teacher' else 'Студент')+': автономные последовательности до 9 000 переходов',
+                ('Учитель' if kind.startswith('teacher') else 'Студент')+f': автономные последовательности до {target_steps} переходов',
                 global_training_step=self.global_step, rollout_horizon=progress['horizon'],
                 loss=metrics.get('loss'), eta_seconds=progress.get('eta_seconds'),
                 message='TBPTT обрезает граф, но сохраняет собственные состояния и память без исправлений')
@@ -537,6 +651,9 @@ class VJEPAExperiment(Experiment):
             if updated:
                 self.check_stop(model, optimizer, phase, completed, metrics)
         options = {'gradient_accumulation_steps': self.accumulation_steps()} if self.accumulation_steps() > 1 else {}
+        target_steps = int(getattr(self.args, 'target_seconds', 300))*30
+        if target_steps != 9000:
+            options['schedule'] = tuple(value for value in ((32,)*8+(128,)*4+(512,)*2+(2048,)*2) if value < target_steps)+(target_steps,)
         report = train_curriculum(model, self.root/'data'/'long'/'train', optimizer,
             device=self.device, chunk_size=self.args.chunk, resume=self.extra.get('long_curriculum_state'),
             on_chunk=callback, seed=self.args.seed, return_directory=self.root/'data'/'memory',
@@ -550,14 +667,16 @@ class VJEPAExperiment(Experiment):
 
     def evaluate_9000(self, checkpoint, kind, round_index=0):
         """Independent held-out tapes, no resets/corrections during execution."""
-        self.update(kind+'_evaluation', 0, 18000, ('Учитель' if kind == 'teacher' else 'Студент')+
-                    ': проверка двух автономных прогонов по 5 минут', eta_seconds=None)
+        seconds = int(getattr(self.args, 'target_seconds', 300))
+        rollout_steps = seconds*30
+        self.update(kind+'_evaluation', 0, 2*rollout_steps, ('Учитель' if kind == 'teacher' else 'Студент')+
+                    f': два автономных прогона по {seconds} секунд', eta_seconds=None)
         reports = []
         report_prefix = kind if round_index == 0 else f'{kind}_round_{round_index:03d}'
         for index, scenario in enumerate(('explore', 'mixed')):
             output = self.root/f'{report_prefix}_vjepa_evaluation_{scenario}.json'
             command = [sys.executable, '-X', 'utf8', '-u', '-m', 'turkeyworld.evaluate_rollout',
-                '--world', str(checkpoint), '--seconds', '300', '--episodes', '1', '--scenario', scenario,
+                '--world', str(checkpoint), '--seconds', str(seconds), '--episodes', '1', '--scenario', scenario,
                 '--device', str(self.device), '--seed', str(41000+round_index*1000+index*100), '--threads', '4',
                 '--render-every', '300', '--min-render-psnr', str(self.args.quality_psnr),
                 '--continue-on-failure', '--output', str(output)]
@@ -570,7 +689,7 @@ class VJEPAExperiment(Experiment):
                         process.terminate()
                         process.wait()
                         self.state['status'] = 'stopped'
-                        self.update(kind+'_evaluation', index*9000, 18000, 'Проверка остановлена; checkpoint сохранён')
+                        self.update(kind+'_evaluation', index*rollout_steps, 2*rollout_steps, 'Проверка остановлена; checkpoint сохранён')
                         raise SystemExit(0)
                     evaluation_step = 0
                     try:
@@ -582,17 +701,22 @@ class VJEPAExperiment(Experiment):
                                 continue
                     except OSError:
                         pass
-                    self.update(kind+'_evaluation', index*9000+evaluation_step, 18000,
+                    self.update(kind+'_evaluation', index*rollout_steps+evaluation_step, 2*rollout_steps,
                         f'{kind}: автономный прогон {scenario}',
                         evaluation_progress={'model': kind, 'scenario': scenario, 'step': evaluation_step,
-                            'requested_steps': 9000, 'simulated_seconds': evaluation_step/30,
+                            'requested_steps': rollout_steps, 'simulated_seconds': evaluation_step/30,
                             'engine_corrections': 0, 'model_resets': 0})
                     time.sleep(10)
             if process.returncode:
                 raise RuntimeError(f'Rollout evaluation failed; see {kind}.evaluation.{scenario}.log')
             reports.append(json.loads(output.read_text(encoding='utf-8')))
-        result = {'status': 'complete', 'target_seconds': 300,
-            'passed': all(r['300s_active_pass_count'] == r['episode_count'] for r in reports),
+        def passed(report):
+            count = report.get('requested_active_pass_count')
+            if count is None and seconds == 300:
+                count = report.get('300s_active_pass_count')
+            return count == report['episode_count'] and report.get('target_seconds', seconds) == seconds
+        result = {'status': 'complete', 'target_seconds': seconds, 'target_steps': rollout_steps,
+            'passed': all(passed(r) for r in reports),
             'episodes': sum(r['episode_count'] for r in reports), 'reports': reports,
             'engine_corrections': 0, 'model_resets_during_rollout': 0,
             'checkpoint': str(checkpoint), 'round': round_index,
@@ -672,7 +796,7 @@ class VJEPAExperiment(Experiment):
                 return result
             progress.update(round=round_index+1, status='repairing', last_checkpoint=str(checkpoint),
                 last_failed_evaluation_round=round_index, updated_at=now(),
-                reason='Independent five-minute evaluation did not pass; continue own-prediction training')
+                reason=f'Independent {getattr(self.args, "target_seconds", 300)}-second evaluation did not pass; continue own-prediction training')
             atomic_json(progress_path, progress)
             self.metric({'stage': 'student_continuation', 'round': round_index+1,
                          'message': progress['reason'], 'evaluation_passed': False})
@@ -743,7 +867,7 @@ class VJEPAExperiment(Experiment):
         self.ema = None
         result = self.qualify_student(student, teacher, data, final)
         self.state['status'] = 'completed'
-        self.update('complete', 1, 1, 'Студент прошёл две независимые пятиминутные проверки', eta_seconds=0,
+        self.update('complete', 1, 1, f'Студент прошёл две независимые проверки по {getattr(self.args, "target_seconds", 300)} секунд', eta_seconds=0,
             message='Подробные результаты автономных проверок сохранены для учителя и студента')
 
 
@@ -758,6 +882,8 @@ def main(argv=None):
     parser.add_argument('--batch', type=int, default=2)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
     parser.add_argument('--preview-every', type=int, default=10)
+    parser.add_argument('--train-renderer-during-pretrain', action='store_true')
+    parser.add_argument('--target-seconds', type=int, default=300)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--ema', type=float, default=.996)
     parser.add_argument('--context', type=int, default=2)

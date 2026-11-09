@@ -156,11 +156,17 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                     values = {name: value.detach().cpu().tolist() for name, value in measured.items()}
                     for row, (episode_index, start) in enumerate(chosen):
                         episode = data.episodes[episode_index]
+                        object_values = {}
+                        if 'target_object_masks' in batch:
+                            from .object_losses import region_error_metrics
+                            object_values = {name: float(value) for name, value in region_error_metrics(
+                                image[row:row+1], source[row:row+1, offset],
+                                batch['target_object_masks'][row:row+1, offset]).items()}
                         per_frame.append({"window": first + row, "episode_index": episode_index,
                                           "episode": Path(episode["path"]).name,
                                           "start": start, "future_offset": offset + 1,
                                           "source_frame": start + context + offset,
-                                          **{name: value[row] for name, value in values.items()}})
+                                          **{name: value[row] for name, value in values.items()}, **object_values})
                 if preview is None:
                     future = torch.stack(generated, dim=1)[0]
                     preview = {"context": _uint8(context_rgb[0]), "source": _uint8(source[0]),
@@ -172,6 +178,11 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                                             "kind": "free_rollout", "window": specification["windows"][0],
                                             "generated_finite": bool(torch.isfinite(future).all()),
                                             "caption": "Context RGB only; predicted future state/memory; source future is target only"}}
+                    object_frames = [frame for frame in per_frame if frame['window'] == 0 and frame.get('npc_present')]
+                    if object_frames:
+                        preview['metadata'].update(npc_rgb_mae=float(np.mean([frame['npc_rgb_mae'] for frame in object_frames])),
+                            background_rgb_mae=float(np.mean([frame['background_rgb_mae'] for frame in object_frames])),
+                            npc_pixel_fraction=float(np.mean([frame['npc_pixel_fraction'] for frame in object_frames])))
     finally:
         for module, training in modes:
             module.training = training

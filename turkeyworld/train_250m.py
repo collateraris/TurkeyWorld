@@ -73,6 +73,12 @@ class ExpandedExperiment(VJEPAExperiment):
         migrate = getattr(vjepa2_ac, f'migrate_vjepa{self.PROFILE}_checkpoint')
         return migrate(self.args.source, initial)
 
+    def training_data_options(self):
+        return {}
+
+    def validation_data_options(self):
+        return {}
+
     def record_teacher_best(self, model, optimizer, phase, step, metrics, report):
         score = report['summary']['mae_mean']+.5*(1-report['summary']['ssim_mean'])
         previous = self.extra.get('teacher_selection', {})
@@ -212,16 +218,21 @@ class ExpandedExperiment(VJEPAExperiment):
             {key: str(value) if isinstance(value, Path) else value for key, value in vars(self.args).items()})
         initial = self.root/'checkpoints'/f'teacher_vjepa{self.PROFILE}_initial.pt'
         if not initial.exists():
-            self.update('initializing', 0, 1, f'Расширение учителя до{self.PROFILE}M с сохранением обученных весов')
+            label = (f'Создание учителя {self.PROFILE} с нуля; повторное использование замороженного VQGAN'
+                     if getattr(self.args, 'from_scratch', False) else
+                     f'Расширение учителя до{self.PROFILE}M с сохранением обученных весов')
+            self.update('initializing', 0, 1, label)
             report = self.create_initial_teacher(initial)
             atomic_json(self.root/f'vjepa{self.PROFILE}_migration.json', report)
         self.wait_for_data()
         # Training clips remain on disk with a bounded LRU; validation is small
         # enough to retain fixed source windows without changing the split.
         data = SequenceData(self.root/'data'/'rgb'/'train', self.device, seed=self.args.seed,
-                            mode='stream', cache_bytes=self.args.cache_mb*1024**2)
+                            mode='stream', cache_bytes=self.args.cache_mb*1024**2,
+                            **self.training_data_options())
         self.validation = SequenceData(self.root/'data'/'rgb'/'val', self.device, seed=self.args.seed,
-                                      mode='stream', cache_bytes=min(self.args.cache_mb, 256)*1024**2)
+                                      mode='stream', cache_bytes=min(self.args.cache_mb, 256)*1024**2,
+                                      **self.validation_data_options())
         panel_path = self.root/f'validation_panel{self.PROFILE}.json'
         if panel_path.exists():
             panels = json.loads(panel_path.read_text(encoding='utf-8'))
@@ -286,7 +297,7 @@ class ExpandedExperiment(VJEPAExperiment):
             checkpoint=self.state.get('playable_checkpoint', str(final)))
         atomic_json(self.root/'student_plan.json', self.state['student_plan'])
         self.state['status'] = 'completed'
-        self.update('complete', 1, 1, 'Студент прошёл независимые пятиминутные проверки', eta_seconds=0)
+        self.update('complete', 1, 1, f'Студент прошёл независимые проверки по {getattr(self.args, "target_seconds", 300)} секунд', eta_seconds=0)
 
 
 def main(argv=None):
@@ -302,6 +313,8 @@ def main(argv=None):
     parser.add_argument('--batch', type=int, default=1)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
     parser.add_argument('--preview-every', type=int, default=10)
+    parser.add_argument('--train-renderer-during-pretrain', action='store_true')
+    parser.add_argument('--target-seconds', type=int, default=300)
     parser.add_argument('--cache-mb', type=int, default=512)
     parser.add_argument('--visited-clips', type=int, default=256)
     parser.add_argument('--lr', type=float, default=5e-5)

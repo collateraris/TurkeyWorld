@@ -19,7 +19,8 @@ import zipfile
 import numpy as np
 
 from .engine import EVENT_NAMES
-from .prepare_training_data import _atomic_json, _episode_stats, _generate_job
+from .prepare_training_data import (_atomic_json, _episode_stats, _generate_job,
+                                    _require_episode_behavior, current_behavior_version)
 
 
 TRAIN_POLICIES = ("movement", "collision", "combat", "misses", "kill", "respawn", "return_memory", "attack", "perturbed")
@@ -35,16 +36,19 @@ def _frame_shape(path):
 
 def _describe(path, output, kind, split, reused=False):
     with np.load(path, allow_pickle=False) as saved:
+        behavior_version = _require_episode_behavior(saved, current_behavior_version(), path)
         if "split" in saved.files and str(saved["split"]) != split:
             raise ValueError(f"Refusing cross-split source reuse: {path}")
         seed = int(saved["seed"])
         count = int(saved["requested_transitions"]) if "requested_transitions" in saved.files else len(saved["actions"])
         return {"path": str(path), "relative_path": str(path.relative_to(output)).replace("\\", "/"),
+                "behavior_version": behavior_version,
+                "rgb_time_span": float(saved["rgb_time_span"]) if "rgb_time_span" in saved.files else 0.,
                 "job_id": f"{kind}/{split}/{seed}", "kind": kind, "split": split, "seed": seed,
                 "frames": count, "hz": 1/float(saved["dt"]), "policy": str(saved["policy"]), "reused": reused}
 
 
-def _reuse(source, output, targets, size, long_frames):
+def _reuse(source, output, targets, size, long_frames, rgb_time_span=0.):
     jobs, modes = [], {"hardlink": 0, "copy": 0, "existing": 0}
     if source is None or not Path(source).is_dir():
         return jobs, modes
@@ -56,6 +60,9 @@ def _reuse(source, output, targets, size, long_frames):
                 if selected >= target:
                     break
                 with np.load(path, allow_pickle=False) as saved:
+                    _require_episode_behavior(saved, current_behavior_version(), path)
+                    if kind == "rgb" and (float(saved["rgb_time_span"]) if "rgb_time_span" in saved.files else 0.) != rgb_time_span:
+                        raise ValueError("Source RGB time span differs from the requested corpus")
                     if "split" in saved.files and str(saved["split"]) != split:
                         raise ValueError("Original corpus split metadata is inconsistent")
                     if "endless" in saved.files and not bool(saved["endless"]):
@@ -110,6 +117,8 @@ def _append_target_growth(output, jobs, config):
             relative = f"{kind}/{split}/episode_{job_seed:010d}.npz"
             policy = choices[index % len(choices)] if kind == "rgb" else "survival"
             extra.append({"path": str(output/relative), "relative_path": relative,
+                "behavior_version": config["behavior_version"],
+                "rgb_time_span": config.get("rgb_time_span", 0.) if kind == "rgb" else 0.,
                 "job_id": f"{kind}/{split}/{job_seed}", "kind": kind, "split": split, "seed": job_seed,
                 "frames": config["clip_frames"] if kind == "rgb" else config["long_frames"], "policy": policy,
                 "size": config["size"], "hr_size": 0, "hz": config["hz"], "endless": True, "long_geometry": False,
@@ -160,6 +169,7 @@ def _summarize(records, jobs, started, newly_finished, errors, targets=None, lon
                                       for split in ("train", "val"))
     status = "failed" if errors and not remaining else "complete" if not remaining and qualified else "running"
     return {"status": status, "state": status, "completed": len(records), "total": len(jobs),
+        "behavior_version": current_behavior_version(),
         "completed_files": len(records), "planned_files": len(jobs), "remaining_files": remaining,
         "reused_files": reused, "new_files": len(records)-reused,
         "elapsed_seconds": round(elapsed, 2), "eta_seconds": round(elapsed*remaining/newly_finished) if newly_finished else None,
@@ -177,7 +187,10 @@ def _summarize(records, jobs, started, newly_finished, errors, targets=None, lon
 
 def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
                       long_train=256, long_val=32, clip_frames=32, long_frames=9000,
-                      size=128, hz=30, seed=10_000_000, workers=8):
+                      size=128, hz=30, seed=10_000_000, workers=8, behavior_version=None, rgb_time_span=0.):
+    behavior_version = current_behavior_version(behavior_version)
+    if not np.isfinite(rgb_time_span) or rgb_time_span < 0:
+        raise ValueError("RGB time span must be finite and nonnegative")
     output = Path(output).resolve()
     source = Path(source).resolve() if source else None
     output.mkdir(parents=True, exist_ok=True)
@@ -185,16 +198,20 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
     if min(targets.values()) < 0 or max(targets.values()) >= 1_000_000 or min(workers, clip_frames, long_frames) < 1:
         raise ValueError("Invalid expanded dataset counts or lengths")
     config = {"targets": targets, "source": str(source) if source else None,
-              "clip_frames": clip_frames, "long_frames": long_frames, "size": size, "hz": hz, "seed": seed}
+              "clip_frames": clip_frames, "long_frames": long_frames, "size": size, "hz": hz, "seed": seed,
+              "behavior_version": behavior_version, "rgb_time_span": float(rgb_time_span)}
     manifest_path, plan_path = output/"manifest.json", output/"expansion_plan.json"
     if plan_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         old_config = manifest["config"]
+        old_config.setdefault("rgb_time_span", 0.)
         if ({key: value for key, value in old_config.items() if key != "targets"}
                 != {key: value for key, value in config.items() if key != "targets"}
                 or any(targets[key] < old_config["targets"][key] for key in targets)):
             raise ValueError("Expansion configuration changed; choose another output directory")
         jobs = json.loads(plan_path.read_text(encoding="utf-8"))
+        if any(job.get("behavior_version") != behavior_version for job in jobs):
+            raise ValueError("Expansion plan behavior version changed; choose another output directory")
         extra = _append_target_growth(output, jobs, config)
         if extra:
             jobs.extend(extra)
@@ -208,7 +225,7 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
             manifest["config"], manifest["targets"] = config, dict(targets)
             _atomic_json(manifest_path, manifest)
     else:
-        reused_jobs, modes = _reuse(source, output, targets, size, long_frames)
+        reused_jobs, modes = _reuse(source, output, targets, size, long_frames, rgb_time_span)
         references = [job["path"] for job in reused_jobs if job["kind"] == "rgb" and job["split"] == "train"]
         jobs = list(reused_jobs)
         # Expanded validation is generated before bulk training clips.
@@ -221,17 +238,20 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
                 relative = f"{kind}/{split}/episode_{job_seed:010d}.npz"
                 policy = choices[index % len(choices)] if kind == "rgb" else "survival"
                 jobs.append({"path": str(output/relative), "relative_path": relative,
+                    "behavior_version": behavior_version,
+                    "rgb_time_span": float(rgb_time_span) if kind == "rgb" else 0.,
                     "job_id": f"{kind}/{split}/{job_seed}", "kind": kind, "split": split, "seed": job_seed,
                     "frames": clip_frames if kind == "rgb" else long_frames, "policy": policy,
                     "size": size, "hr_size": 0, "hz": hz, "endless": True, "long_geometry": False,
                     "return_offset": (0, 48, 80, 96, 128, 160, 176, 192)[index % 8],
                     "delayed_attack": policy == "attack", "reused": False,
                     "reference_path": references[index % len(references)] if references and policy == "perturbed" else None})
-        manifest = {"format_version": 4, "expansion_version": 1, "config": config,
+        manifest = {"format_version": 4, "expansion_version": 1, "behavior_version": behavior_version, "config": config,
             "targets": targets, "reuse": modes, "paths": {"world_training": "rgb/train", "world_validation": "rgb/val",
                 "long_training": "long/train", "long_validation": "long/val"},
             "seed_rule": f"Preserved inherited split seeds; fresh disjoint RGBtrain/RGBval/longtrain/longval bands at{seed},+1M,+2M,+3M.",
             "train_policies": list(TRAIN_POLICIES), "validation_policies": list(VALIDATION_POLICIES),
+            "rgb_time_initialization": "Seeded initial clock offset before warmup; valid training states, not elapsed survival; long recordings start at zero",
             "oracle_augmentation": {"training_only": True, "model_visited": False,
                 "source": "valid perturbed reference initial states", "labels": "exact Game.step subsequent transitions"}}
         _atomic_json(manifest_path, manifest)
@@ -329,6 +349,8 @@ def prepare_expansion(output, *, source=None, rgb_train=8192, rgb_val=512,
                 job_seed = band_seed+next_index+offset
                 relative = f"long/{split}/episode_{job_seed:010d}.npz"
                 extra.append({"path": str(output/relative), "relative_path": relative,
+                    "behavior_version": behavior_version,
+                    "rgb_time_span": 0.,
                     "job_id": f"long/{split}/{job_seed}", "kind": "long", "split": split,
                     "seed": job_seed, "frames": long_frames, "policy": "survival", "size": size,
                     "hr_size": 0, "hz": hz, "endless": True, "long_geometry": False, "reused": False,
@@ -353,6 +375,7 @@ def main(argv=None):
     parser.add_argument("--source", type=Path)
     parser.add_argument("--rgb-train", type=int, default=8192)
     parser.add_argument("--rgb-val", type=int, default=512)
+    parser.add_argument("--rgb-time-span", type=float, default=0., help="Seeded RGB-only initial game-time range; long recordings still start at zero")
     parser.add_argument("--long-train", type=int, default=256)
     parser.add_argument("--long-val", type=int, default=32)
     parser.add_argument("--clip-frames", type=int, default=32)
@@ -361,6 +384,7 @@ def main(argv=None):
     parser.add_argument("--hz", type=int, default=30)
     parser.add_argument("--seed", type=int, default=10_000_000)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--behavior-version", help="Assert engine behavior version; incompatible source/resume data are rejected")
     args = vars(parser.parse_args(argv))
     keep_awake = None
     if os.name == "nt":

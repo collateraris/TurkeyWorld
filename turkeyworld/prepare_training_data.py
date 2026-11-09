@@ -18,11 +18,33 @@ import time
 
 import numpy as np
 
+from . import engine as _engine
 from .engine import ENTITY_SLOTS, EVENT_NAMES, Game
 from .geometry_targets import build_geometry_targets
 
 FORMAT_VERSION = 4
 POLICIES = ("combat", "misses", "attack", "sweep", "respawn")
+
+
+def current_behavior_version(expected=None):
+    """Identify actual engine semantics; an optional CLI value is an assertion.
+
+    The fallback identifies older engines explicitly. Missing episode tags
+    are never treated as evidence of matching the running engine.
+    """
+    actual = getattr(_engine, "BEHAVIOR_VERSION", "legacy_random_v1")
+    if not isinstance(actual, str) or not actual:
+        raise ValueError("Engine BEHAVIOR_VERSION must be a nonempty string")
+    if expected is not None and expected != actual:
+        raise ValueError(f"Requested behavior version {expected!r} differs from running engine {actual!r}")
+    return actual
+
+
+def _require_episode_behavior(data, expected, path):
+    actual = str(data["behavior_version"]) if "behavior_version" in data.files else None
+    if actual != expected:
+        raise ValueError(f"Episode behavior version differs from the running engine: {path} ({actual!r} != {expected!r})")
+    return actual
 
 
 def _wrap(angle):
@@ -165,6 +187,7 @@ def _perturb_reference_initial_state(game, rng, source_path=None):
     state = game.get_state()
     if source_path:
         with np.load(source_path, allow_pickle=False) as saved:
+            _require_episode_behavior(saved, current_behavior_version(), source_path)
             if "split" in saved.files and str(saved["split"]) != "train":
                 raise ValueError("Reference-state augmentation must use training sources")
             state = json.loads(str(saved["initial_state"]))
@@ -259,6 +282,10 @@ def _atomic_json(path, payload):
 def _episode_stats(path, job):
     """Inspect compact labels only; RGB is not decompressed when resuming."""
     with np.load(path, allow_pickle=False) as data:
+        behavior_version = _require_episode_behavior(data, job.get("behavior_version", current_behavior_version()), path)
+        span = float(data["rgb_time_span"]) if "rgb_time_span" in data.files else 0.
+        if span != (float(job.get("rgb_time_span", 0.)) if job["kind"] == "rgb" else 0.):
+            raise ValueError(f"Existing episode RGB time span differs from its job: {path}")
         states, actions, events = (data[key] for key in ("states", "actions", "events"))
         if (int(data["seed"]) != job["seed"] or int(data["format_version"]) != FORMAT_VERSION
                 or states.shape != (len(actions) + 1, 90) or actions.shape != (len(actions), 4)
@@ -274,6 +301,9 @@ def _episode_stats(path, job):
         tiles = np.clip(positions.astype(int), 0, 15)
         bins = ((np.arctan2(states[:, 2], states[:, 3]) + math.pi) / (2 * math.pi) * 16).astype(int) % 16
         return {"job_id": job["job_id"], "path": job["relative_path"], "seed": job["seed"],
+                "behavior_version": behavior_version,
+                "rgb_time_span": span,
+                "initial_game_time": float(data["initial_game_time"]) if "initial_game_time" in data.files else float(states[0, -1])*300,
                 "split": job["split"], "kind": job["kind"], "policy": job["policy"],
                 "transitions": len(actions), "requested_transitions": job["frames"],
                 "simulated_seconds": len(actions) / job["hz"],
@@ -297,6 +327,7 @@ def _episode_stats(path, job):
 
 
 def _generate_job(job):
+    job = dict(job, behavior_version=current_behavior_version(job.get("behavior_version")))
     path = Path(job["path"])
     if path.exists():
         result = _episode_stats(path, job)
@@ -328,6 +359,13 @@ def _generate_job(job):
                 policy = ClipPolicy(job["seed"] + 5000, job["policy"], job["hz"], job["frames"])
     else:
         policy = SurvivalPolicy(job["seed"], job["hz"])
+    rgb_time_span = float(job.get("rgb_time_span", 0.)) if job["kind"] == "rgb" else 0.
+    if not math.isfinite(rgb_time_span) or rgb_time_span < 0:
+        raise ValueError("RGB time span must be finite and nonnegative")
+    initial_time_offset = 0.
+    if rgb_time_span:
+        initial_time_offset = int(rng.integers(math.ceil(rgb_time_span*job["hz"]))) / job["hz"]
+        game.time = initial_time_offset  # Valid initial clock; no elapsed-play claim or in-clip resets.
     warmup = 0
     if job["policy"] == "return_memory":
         for index in range(int(job.get("return_offset", 96))):
@@ -347,6 +385,7 @@ def _generate_job(job):
                 break
     if game.player["hp"] <= 0:
         raise RuntimeError(f"Warmup ended in death for {job['job_id']}; no clip was saved")
+    initial_game_time = game.time
     initial_state = json.dumps(game.get_state(), ensure_ascii=False)
     capacity = job["frames"]
     states = np.empty((capacity + 1, 90), dtype=np.float32)
@@ -389,6 +428,9 @@ def _generate_job(job):
         if game.player["hp"] <= 0:
             break
     payload = {"format_version": np.asarray(FORMAT_VERSION),
+               "behavior_version": np.asarray(job["behavior_version"]),
+               "rgb_time_span": np.asarray(rgb_time_span), "initial_time_offset": np.asarray(initial_time_offset),
+               "initial_game_time": np.asarray(initial_game_time),
                "map": game.map.astype(np.int8), "states": states[:count + 1],
                "actions": actions[:count], "events": events[:count],
                "hit_ids": hits[:count], "attack_flags": attacks[:count],
@@ -404,6 +446,7 @@ def _generate_job(job):
                "requested_transitions": np.asarray(capacity)}
     if frames is not None:
         payload["frames"] = frames[:count + 1]
+        payload["frame_source"] = np.asarray("reference_engine")
     if highres is not None:
         payload["hr_frames"] = highres[:count + 1]
     if geometry:
@@ -428,6 +471,7 @@ def _jobs(output, config, counts):
                 seed = config["seed"] + band * 1_000_000 + index
                 relative = f"{kind}/{split}/episode_{seed:010d}.npz"
                 job = dict(config, seed=seed, kind=kind, split=split,
+                           rgb_time_span=config.get("rgb_time_span", 0.) if kind == "rgb" else 0.,
                            frames=config["clip_frames"] if kind == "rgb" else config["long_frames"],
                            policy=POLICIES[index % len(POLICIES)] if kind == "rgb" else "survival",
                            relative_path=relative, path=str(output / relative),
@@ -459,6 +503,7 @@ def _summary(records, total, started, new_completed, errors):
     elapsed = time.perf_counter() - started
     remaining = max(0, total - len(records))
     return {"status": "complete" if not remaining and not errors else "running",
+            "behavior_version": current_behavior_version(),
             "planned_files": total, "completed_files": len(records), "remaining_files": remaining,
             "elapsed_seconds": round(elapsed, 3),
             "eta_seconds": round(elapsed * remaining / new_completed, 1) if new_completed else None,
@@ -468,29 +513,34 @@ def _summary(records, total, started, new_completed, errors):
 
 def prepare(output, *, rgb_train=512, rgb_val=64, clip_frames=32, size=128,
             hr_size=0, long_train=16, long_val=4, long_frames=9000,
-            seed=0, hz=30, workers=1, endless=True, long_geometry=False):
+            seed=0, hz=30, workers=1, endless=True, long_geometry=False, behavior_version=None, rgb_time_span=0.):
     """Generate jobs independently; rerunning the same configuration resumes."""
     counts = dict(rgb_train=rgb_train, rgb_val=rgb_val, long_train=long_train, long_val=long_val)
     if any(value < 0 or value >= 1_000_000 for value in counts.values()) or not sum(counts.values()):
         raise ValueError("Episode counts must be nonnegative, below one million, and not all zero")
     if min(clip_frames, long_frames, workers) < 1 or not 4 <= hz <= 240:
         raise ValueError("Frames/workers must be positive and hz must be between 4 and 240")
+    if not math.isfinite(rgb_time_span) or rgb_time_span < 0:
+        raise ValueError("RGB time span must be finite and nonnegative")
     if not 32 <= size <= 2048 or hr_size not in (0, size * 4):
         raise ValueError("size must be between 32 and 2048; hr-size must be zero or 4*size")
     if (clip_frames + 1) * (size * size + hr_size * hr_size) * 3 > 256 * 1024**2:
         raise ValueError("One RGB job exceeds 256 MiB; reduce clip-frames or image sizes")
+    behavior_version = current_behavior_version(behavior_version)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     config = dict(clip_frames=clip_frames, size=size, hr_size=hr_size, long_frames=long_frames,
-                  seed=seed, hz=hz, endless=bool(endless), long_geometry=bool(long_geometry))
+                  seed=seed, hz=hz, endless=bool(endless), long_geometry=bool(long_geometry),
+                  behavior_version=behavior_version, rgb_time_span=float(rgb_time_span))
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.get("config", {}).setdefault("rgb_time_span", 0.)
         if manifest.get("config") != config or manifest.get("format_version") != FORMAT_VERSION:
             raise ValueError("Dataset configuration changed; choose another output directory")
-    manifest = {"format_version": FORMAT_VERSION, "config": config, "counts": counts,
+    manifest = {"format_version": FORMAT_VERSION, "behavior_version": behavior_version, "config": config, "counts": counts,
                 "split_rule": "Seed bands: rgb/train=base, rgb/val=base+1M, long/train=base+2M, long/val=base+3M",
-                "rgb_initialization": "Random valid player/NPC positions and view angles; engine-only transitions thereafter",
+                "rgb_initialization": "Random valid poses and optional seeded clock offset before warmup; engine-only transitions thereafter; clock offset is not elapsed gameplay",
                 "long_initialization": "Normal engine reset; no resets/health changes within a recording",
                 "paths": {"world_training": "rgb/train", "world_validation": "rgb/val",
                           "long_training": "long/train", "long_validation": "long/val"}}
@@ -558,6 +608,7 @@ def main(argv=None):
     parser.add_argument("output", type=Path)
     parser.add_argument("--rgb-train", type=int, default=512)
     parser.add_argument("--rgb-val", type=int, default=64)
+    parser.add_argument("--rgb-time-span", type=float, default=0., help="Seeded RGB-only initial game-time range in seconds; not recorded survival")
     parser.add_argument("--clip-frames", type=int, default=32)
     parser.add_argument("--size", type=int, default=128)
     parser.add_argument("--hr-size", type=int, default=0)
@@ -567,6 +618,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hz", type=int, default=30)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--behavior-version", help="Assert the running engine behavior version; never relabel another engine")
     parser.add_argument("--classic", action="store_true")
     parser.add_argument("--long-geometry", action="store_true")
     args = vars(parser.parse_args(argv))

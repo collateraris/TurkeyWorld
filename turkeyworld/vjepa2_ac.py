@@ -350,6 +350,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         candidate = torch.cat([state[:, :2]+.1*motion[:, :2], state[:, 2:8],
                                candidate_entities.flatten(1), state[:, -2:]], -1)
         candidate = projection(candidate, previous=state)
+        proposed_npc_displacement = candidate[:, 8:88].reshape(batch, 8, 10)[:, :, :2]-old_entities[:, :, :2]
         targets = self.hit_target_head(pooled.to(self.hit_target_head[0].weight.dtype)).float()
         attacks = self.attack_head(pooled.to(self.attack_head[0].weight.dtype)).float()
         spawn = {}
@@ -368,6 +369,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         next_block = torch.cat([next_block[:, :1], next_block[:, 1:2]+next_context[:, None], next_block[:, 2:]], 1)
         next_memory = torch.cat([packed.reshape_as(blocks)[:, 1:].flatten(1, 2), next_block], 1)
         return {**result, **spawn, 'memory': next_memory, 'latent_prediction': prediction,
+                'proposed_npc_displacement': proposed_npc_displacement,
                 'features': self.feature_head(pooled.to(self.feature_head.weight.dtype)),
                 'target_logits': targets, 'attack_logits': attacks}
 

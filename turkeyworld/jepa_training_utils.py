@@ -8,6 +8,8 @@ context frames and from controls that describe the predicted transitions.
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
+import json
 import math
 from pathlib import Path
 
@@ -137,23 +139,31 @@ class SequenceData:
     raw_bytes/cached_bytes describe the resident cache; total_raw_bytes is the
     logical decoded corpus size. refresh() appends newly completed clips, and
     ordinary training batches also discover them every refresh_interval.
+    Supplying episode_paths freezes the ordered file selection in either mode;
+    relative paths resolve within directory and refresh ignores other files.
     """
 
     def __init__(self, directory, device="cpu", limit=0, max_bytes=6 * 1024**3,
                  split=None, image_size=None, seed=0, mode="memory", cache_bytes=512*1024**2,
-                 refresh_interval=30.):
+                 refresh_interval=30., episode_paths=None, object_masks_directory=None,
+                 counterfactual_backgrounds=False):
         if mode not in {"memory", "stream"}:
             raise ValueError("SequenceData mode must be memory or stream")
         if mode == "stream":
             from .streaming_sequences import initialize_stream
             initialize_stream(self, directory, device, limit, max_bytes, split, image_size,
-                              seed, cache_bytes, refresh_interval)
+                              seed, cache_bytes, refresh_interval, episode_paths=episode_paths,
+                              object_masks_directory=object_masks_directory,
+                              counterfactual_backgrounds=counterfactual_backgrounds)
             return
         self.mode = "memory"
         self.directory, self.device = Path(directory), torch.device(device)
         if limit < 0 or max_bytes < 1 or image_size is not None and image_size < 1:
             raise ValueError("File limit must be nonnegative; memory/image sizes must be positive")
-        paths = sorted(self.directory.glob("*.npz"))
+        from .streaming_sequences import resolve_episode_paths
+        self._fixed_episode_paths = resolve_episode_paths(directory, episode_paths)
+        paths = (self._fixed_episode_paths if self._fixed_episode_paths is not None
+                 else sorted(self.directory.glob("*.npz")))
         if limit:
             paths = paths[:limit]
         if not paths:
@@ -211,6 +221,125 @@ class SequenceData:
                 self.frame_count += count + 1
                 self.episodes.append(episode)
         self.split, self.files = observed_split, len(self.episodes)
+        self._initialize_object_masks(object_masks_directory, counterfactual_backgrounds)
+
+    def _initialize_object_masks(self, directory, counterfactual_backgrounds=False):
+        """Preflight completed training-only annotations, without engine calls."""
+        self.object_masks_directory = Path(directory).resolve() if directory is not None else None
+        self._object_mask_cache = OrderedDict()
+        self._object_mask_sidecar_identities = {}
+        self.object_mask_cache_limit = 16
+        self.object_mask_cached_bytes = 0
+        self.counterfactual_backgrounds = bool(counterfactual_backgrounds)
+        self._object_background_cache = OrderedDict()
+        self.object_background_cache_limit = 16
+        self.object_background_cached_bytes = 0
+        if self.object_masks_directory is None:
+            if self.counterfactual_backgrounds:
+                raise ValueError("Counterfactual backgrounds require an object mask cache directory")
+            return
+        from .object_mask_cache import MASK_KIND
+        target = self.object_masks_directory
+        if not target.is_dir() or target.name != self.split:
+            raise ValueError("Object mask directory must match the explicit dataset split")
+        manifest_path = target.parent / "manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("Object mask cache manifest is missing")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        records = manifest.get("records", [])
+        if (manifest.get("format_version") != 1 or manifest.get("mask_kind") != MASK_KIND
+                or manifest.get("status") != "complete" or not records
+                or manifest.get("completed_episodes") != len(records)
+                or manifest.get("total_episodes") != len(records)):
+            raise ValueError("Object mask cache manifest must describe a complete verified cache")
+        source_root = Path(manifest.get("source_data_root", "")).resolve()
+        if (source_root / "rgb" / self.split).resolve() != self.directory.resolve():
+            raise ValueError("Object mask cache source directory/split mismatch")
+        self._object_mask_behavior = manifest.get("behavior_version")
+        if not isinstance(self._object_mask_behavior, str) or not self._object_mask_behavior:
+            raise ValueError("Object mask cache behavior version is missing")
+        source_manifest = source_root / "manifest.json"
+        if source_manifest.is_file():
+            source_behavior = json.loads(source_manifest.read_text(encoding="utf-8")).get("behavior_version")
+            if source_behavior != self._object_mask_behavior:
+                raise ValueError("Object mask cache/source behavior version mismatch")
+        available = {record.get("episode") for record in records if record.get("split") == self.split
+                     and record.get("behavior_version") == self._object_mask_behavior}
+        if any(Path(episode["path"]).name not in available for episode in self.episodes):
+            raise ValueError("Object mask cache manifest is missing selected split/behavior episodes")
+        if self.counterfactual_backgrounds:
+            background_episodes = {record.get("episode") for record in records if record.get("split") == self.split
+                                   and record.get("background_frames_available") is True}
+            if (manifest.get("background_frames_available") is not True
+                    or any(Path(episode["path"]).name not in background_episodes for episode in self.episodes)):
+                raise ValueError("Counterfactual backgrounds are unavailable; complete the offline cache upgrade")
+
+    def _episode_object_masks(self, episode):
+        from .object_mask_cache import read_object_masks
+        source = Path(episode["path"])
+        key = str(source.resolve())
+        stat = source.stat()
+        identity = (stat.st_size, stat.st_mtime_ns)
+        sidecar = self.object_masks_directory / source.name
+        if not sidecar.is_file() or sidecar.resolve().parent != self.object_masks_directory:
+            raise ValueError(f"Object mask sidecar is missing or outside its split: {source.name}")
+        sidecar_stat = sidecar.stat()
+        sidecar_identity = (sidecar_stat.st_size, sidecar_stat.st_mtime_ns)
+        if key in self._object_mask_cache:
+            masks, recorded_identity = self._object_mask_cache[key]
+            if identity != recorded_identity:
+                raise ValueError("Object mask source episode changed after it was cached")
+            if self._object_mask_sidecar_identities[key] == sidecar_identity:
+                self._object_mask_cache.move_to_end(key)
+                return masks
+            self._object_mask_cache.pop(key)
+            self.object_mask_cached_bytes -= masks.nbytes
+        masks, metadata = read_object_masks(sidecar, source, expected_split=self.split)
+        with np.load(source, allow_pickle=False) as saved:
+            behavior = str(saved["behavior_version"]) if "behavior_version" in saved.files else None
+        if metadata.get("behavior_version") != self._object_mask_behavior or behavior != self._object_mask_behavior:
+            raise ValueError("Object mask sidecar/source behavior version mismatch")
+        if masks.shape != tuple(episode["frames"].shape[:3]):
+            raise ValueError(f"Object mask shape does not match source frames: {source.name}")
+        self._object_mask_cache[key] = (masks, identity)
+        self._object_mask_sidecar_identities[key] = sidecar_identity
+        self.object_mask_cached_bytes += masks.nbytes
+        while len(self._object_mask_cache) > self.object_mask_cache_limit:
+            removed_key, (removed, _) = self._object_mask_cache.popitem(last=False)
+            self._object_mask_sidecar_identities.pop(removed_key, None)
+            self.object_mask_cached_bytes -= removed.nbytes
+        return masks
+
+    def _episode_object_backgrounds(self, episode):
+        from .object_mask_cache import read_object_backgrounds
+        source = Path(episode["path"])
+        sidecar = self.object_masks_directory / source.name
+        if not sidecar.is_file() or sidecar.resolve().parent != self.object_masks_directory:
+            raise ValueError(f"Counterfactual background sidecar is missing: {source.name}")
+        key = str(source.resolve())
+        stat, label_stat = source.stat(), sidecar.stat()
+        identity = (stat.st_size, stat.st_mtime_ns)
+        label_identity = (label_stat.st_size, label_stat.st_mtime_ns)
+        if key in self._object_background_cache:
+            frames, recorded_identity, recorded_label_identity = self._object_background_cache[key]
+            if identity != recorded_identity:
+                raise ValueError("Counterfactual background source episode changed after caching")
+            if label_identity == recorded_label_identity:
+                self._object_background_cache.move_to_end(key)
+                return frames
+            self._object_background_cache.pop(key)
+            self.object_background_cached_bytes -= frames.nbytes
+        frames, metadata = read_object_backgrounds(sidecar, source, expected_split=self.split)
+        if metadata.get("behavior_version") != self._object_mask_behavior:
+            raise ValueError("Counterfactual background behavior version mismatch")
+        if frames.shape != tuple(episode["frames"].shape):
+            raise ValueError(f"Counterfactual background shape does not match source frames: {source.name}")
+        self._object_background_cache[key] = (frames, identity, label_identity)
+        self.object_background_cached_bytes += frames.nbytes
+        while len(self._object_background_cache) > self.object_background_cache_limit:
+            _, (removed, _, _) = self._object_background_cache.popitem(last=False)
+            self.object_background_cached_bytes -= removed.nbytes
+        return frames
 
     def __len__(self):
         return self.count
@@ -223,6 +352,11 @@ class SequenceData:
         return 0
 
     def clear_cache(self):
+        self._object_mask_cache.clear()
+        self._object_mask_sidecar_identities.clear()
+        self.object_mask_cached_bytes = 0
+        self._object_background_cache.clear()
+        self.object_background_cached_bytes = 0
         if self.mode == "stream":
             self._stream_cache.clear()
             self.raw_bytes = self.cached_bytes = 0
@@ -302,9 +436,13 @@ class SequenceData:
                 if (not 0 <= episode_index < self.files or start < 0
                         or start + length > len(self.episodes[int(episode_index)]["frames"])):
                     raise ValueError("Fixed panel window crosses an episode boundary")
-        selected = []
+        selected, object_masks, background_frames = [], [], []
         for episode_index, start in zip(chosen, starts):
             episode = self.episodes[int(episode_index)]
+            if self.object_masks_directory is not None:
+                object_masks.append(self._episode_object_masks(episode)[start+context:start+length])
+            if self.counterfactual_backgrounds:
+                background_frames.append(self._episode_object_backgrounds(episode)[start+context:start+length])
             first_action = start + context - 1
             selected.append({"frames": episode["frames"][start:start + length],
                              "states": episode["states"][start:start + length],
@@ -330,6 +468,19 @@ class SequenceData:
                       target_states=result["states"][:, context:],
                       episode_indices=torch.as_tensor(chosen, device=self.device),
                       start_indices=torch.as_tensor(starts, device=self.device))
+        if object_masks:
+            masks = torch.from_numpy(np.stack(object_masks))[:, :, None].to(self.device, dtype=torch.float32)
+            if masks.shape[-2:] != images.shape[-2:]:
+                masks = F.interpolate(masks.flatten(0, 1), images.shape[-2:], mode="nearest").reshape(
+                    batch_size, horizon, 1, *images.shape[-2:])
+            result["target_object_masks"] = masks
+        if background_frames:
+            backgrounds = torch.from_numpy(np.stack(background_frames)).permute(0, 1, 4, 2, 3).contiguous()
+            backgrounds = backgrounds.to(self.device, dtype=torch.float32).div_(255)
+            if backgrounds.shape[-2:] != images.shape[-2:]:
+                backgrounds = F.interpolate(backgrounds.flatten(0, 1), images.shape[-2:], mode="bilinear",
+                    align_corners=False, antialias=True).reshape(batch_size, horizon, 3, *images.shape[-2:])
+            result["target_background_frames"] = backgrounds
         result["hits"], result["attacks"] = result["hit_ids"], result["attack_flags"]
         return result
 

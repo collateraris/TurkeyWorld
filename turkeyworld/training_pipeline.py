@@ -232,6 +232,9 @@ class Experiment:
     def amp(self, cache_enabled=True):
         return torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=cache_enabled) if self.device.type == "cuda" else nullcontext()
 
+    def optimizer_state_for_restore(self, checkpoint, model, optimizer):
+        return checkpoint['optimizer']
+
     def restore(self, model, optimizer, phase):
         path = self.root / "checkpoints" / f"{phase}.pt"
         if not path.exists():
@@ -242,7 +245,7 @@ class Experiment:
         if normalize_world_config(checkpoint["config"]) != asdict(model.config):
             raise ValueError(f"Configuration mismatch in {path}")
         model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        optimizer.load_state_dict(self.optimizer_state_for_restore(checkpoint, model, optimizer))
         self.rng.bit_generator.state = checkpoint["rng_numpy"]
         torch.random.set_rng_state(checkpoint["rng_torch"].cpu())
         if self.device.type == "cuda" and checkpoint.get("rng_cuda"):
@@ -295,7 +298,10 @@ class Experiment:
         if self._adversarial_trainer is None:
             return predicted.new_zeros(()), {}
         loss, metrics = self._adversarial_trainer.generator_loss(predicted, real, condition, state, **accumulation)
-        self.state["adversarial"] = {**metrics, "active": bool(metrics.get("enabled")), "enabled": True}
+        self.state["adversarial"] = {**metrics, "active": bool(metrics.get("enabled")), "enabled": True,
+            "discriminator_training": True, "generator_adversarial_active": bool(metrics.get("enabled")),
+            "max_weight": self._adversarial_trainer.config['weight'],
+            "max_feature_weight": self._adversarial_trainer.config['feature_weight']}
         flattened = {"adversarial_" + key: value for key, value in metrics.items()
                      if isinstance(value, (int, float))}
         return loss, flattened

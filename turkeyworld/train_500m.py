@@ -34,6 +34,8 @@ def build_parser():
     parser.add_argument('--batch', type=int, default=1)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
     parser.add_argument('--preview-every', type=int, default=10)
+    parser.add_argument('--train-renderer-during-pretrain', action='store_true')
+    parser.add_argument('--target-seconds', type=int, default=300)
     parser.add_argument('--cache-mb', type=int, default=512)
     parser.add_argument('--visited-clips', type=int, default=256)
     parser.add_argument('--minimum-train-clips', type=int, default=8192)

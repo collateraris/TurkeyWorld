@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .camera import sample_camera_frustum, object_camera_features
+from .camera import sample_camera_frustum, object_camera_features, project_sprite_bounds
 
 STATE_DIM, ENTITY_DIM, ENTITY_SLOTS = 90, 10, 8
 FEATURE_DIM, OBJECT_CAMERA_DIM = 128, 18
@@ -88,9 +88,10 @@ class CameraGeometry(nn.Module):
     Object visibility is center/FOV visibility against walls; it is not an
     alpha-accurate sprite mask and does not model inter-object occlusion.
     """
-    def __init__(self, width):
+    def __init__(self, width, image_size=128):
         super().__init__()
         self.width = width
+        self.image_size = image_size
         self.opacity_network = nn.Sequential(nn.Linear(width + 1, 32), nn.SiLU(), nn.Linear(32, 1))
         nn.init.normal_(self.opacity_network[-1].weight, std=.01)
         nn.init.constant_(self.opacity_network[-1].bias, math.log(.05 / .95))
@@ -146,8 +147,19 @@ class CameraGeometry(nn.Module):
         frustum = objects["frustum"].bool()
         logits = torch.where(frustum, raw_visibility_logits, torch.full_like(raw_visibility_logits, -20.))
         visibility = logits.sigmoid() * frustum.to(logits.dtype)
+        # Center labels still train the existing head. Appearance conditioning
+        # uses full sprite overlap: a large close sprite can fill the screen
+        # while its center lies outside the FOV. Learned wall occlusion may
+        # increase this path, but cannot erase an overlapping object's tokens.
+        sprites = project_sprite_bounds(state, image_size=self.image_size)
+        sprite_frustum = sprites["sprite_frustum"]
+        render_visibility = raw_visibility_logits.sigmoid()*sprite_frustum.to(logits.dtype)
+        render_gate = torch.where(sprite_frustum, .5+.5*render_visibility,
+                                  torch.full_like(render_visibility, .05))
         return {"depth": depth.to(sampled.dtype), "visibility_logits": logits,
                 "visibility": visibility, "frustum": frustum,
+                "sprite_frustum": sprite_frustum, "render_visibility": render_visibility,
+                "render_gate": render_gate,
                 "ray_tokens": ray_tokens, "object_tokens": object_tokens,
                 "object_identity_tokens": object_identity,
                 "object_appearance_tokens": object_appearance,
@@ -166,7 +178,7 @@ class CameraTransformerWorldModel(nn.Module):
         layers = 4 if config.kind == "teacher" else 2
         hidden = config.hidden
         self.map_encoder = MapTokenEncoder(config.tile_types, width, heads, layers)
-        self.geometry_reader = CameraGeometry(width)
+        self.geometry_reader = CameraGeometry(width, image_size=config.image_size)
         if not render_only:
             self.player_token = nn.Sequential(nn.Linear(10, width), nn.GELU(), nn.Linear(width, width))
             self.action_token = nn.Linear(4, width)
@@ -296,7 +308,7 @@ class CameraTransformerWorldModel(nn.Module):
         # a sprite can straddle a wall/FOV edge while its center is hidden.
         # Keep every ID/geometry token and retain a small appearance path even
         # for center-hidden objects; corpses are never removed by alive.
-        gate = .05 + .95 * geometry["visibility"]
+        gate = geometry["render_gate"]
         objects = geometry["object_identity_tokens"] + gate[..., None] * geometry["object_appearance_tokens"]
         context = torch.cat([geometry["ray_tokens"], objects, condition[:, None]], 1)
         key_weights = torch.cat([torch.ones(state.shape[0], RAY_COUNT, device=state.device, dtype=state.dtype),

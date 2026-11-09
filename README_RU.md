@@ -6,12 +6,13 @@ TurkeyWorld — шутер с противниками-индюками и эк�
 которая учится продолжать состояние игры и генерировать изображение.
 Сохранённый RGB-профиль: **Teacher 500 044 741 параметр → Student 22 475 013 параметров**,
 compact V-JEPA 2-AC, Flow Matching и Rectified Flow.
-Следующий этап — общий VQGAN, обучаемый с нуля, затем продолжение Teacher и
-Student в его латентном пространстве.
+Активный Teacher 175M содержит **174 910 616 параметров** с учётом кодека.
+В новом детерминированном запуске мир, нейрорендер и GAN обучаются с нуля,
+используя прежний обученный замороженный VQGAN.
 
 **Проверенных игровых весов пока нет.** Обучение и checkpoints сохраняются
 локально. Завершённый сбор данных, низкий loss или короткий тест не означают
-пять минут правильной игры. Скорость нового Student и достижение 30–60 FPS
+две минуты правильной игры. Скорость нового Student и достижение 30–60 FPS
 ещё не подтверждены.
 
 Навигация: [установка и игра](#установка-и-обычная-игра) ·
@@ -132,7 +133,14 @@ flowchart LR
 
 ## Данные и их сбор
 
-Цели текущего корпуса:
+Ниже описаны сохранённый прежний корпус и команды его сбора. Активный
+детерминированный запуск использует отдельный
+`training_runs/simple_spawn_32k_phases_20261109/data`: 1000 RGB train-клипов,
+512 RGB val-клипов, без длинных записей. Актуальная команда приведена
+в разделе общего VQGAN.
+Записи с прежней политикой врагов не смешиваются с новым корпусом.
+
+Цели прежнего корпуса:
 
 | Часть | Цель |
 |---|---:|
@@ -265,7 +273,7 @@ RGB-примеры. Эти счётчики не означают число п�
 и MAE ≤1/255; также нужны конечные значения и минимум три активных кода.
 Кодек принимается после **трёх успешных проверок подряд** в FP32.
 Срок прохождения порогов заранее неизвестен. Успешная реконструкция сама
-по себе не подтверждает пять минут автономной игры или её FPS.
+по себе не подтверждает две минуты автономной игры или её FPS.
 
 По явному запросу пользователя обучение кодека можно завершить с текущим
 качеством и перейти дальше. Тогда сохраняются
@@ -282,10 +290,11 @@ validation. Автоматическое принятие по-прежнему 
 
 При прямом продолжении обучения world model с таким экспортом также нужен
 `--accept-current-codec`. Принятие пользователем замораживает кодек для
-следующего этапа; пороги реконструкции и цель пяти минут игры остаются
+следующего этапа; пороги реконструкции и цель двух минут игры остаются
 непройденными.
 
-После прохождения проверки `codec_ready.json` фиксирует замороженный экспорт
+В сохранённом workflow продолжения 500M после прохождения проверки
+`codec_ready.json` фиксирует замороженный экспорт
 `checkpoints/codec_for_renderer.pt`. С `--continue-world` контроллер мигрирует
 и продолжает сохранённый checkpoint 500M в
 `training_runs/vjepa500_vqgan_20261109`. Teacher Flow Matching и Student
@@ -304,31 +313,208 @@ Checkpoints кодека сохраняют оба оптимизатора и �
 Файл `stop_training` в каталоге кодека останавливает и активного учителя/студента;
 перед продолжением удалите маркеры остановки.
 
-Прямое продолжение уже мигрировавшей world model:
+Новый корпус V3 собирается в отдельном терминале: 1000 RGB train-клипов,
+512 RGB val-клипов, без длинных эпизодов. План — 32 000 train-переходов;
+прежний резерв V2 к нему не подключается:
+
+```powershell
+& $twPython -m turkeyworld.data_expansion `
+  training_runs/simple_spawn_32k_phases_20261109/data `
+  --rgb-train 1000 --rgb-val 512 --clip-frames 32 --rgb-time-span 120 `
+  --long-train 0 --long-val 0 --long-frames 3600 --size 128 --hz 30 --workers 8 `
+  --behavior-version deterministic_enemy_v3_simple_spawn
+```
+
+`--rgb-time-span 120` задаёт воспроизводимые смещения игрового времени
+в диапазоне 0–120 секунд до warmup, покрывая восемь фаз 24-секундного цикла
+spawn. Первый сохранённый кадр идёт после warmup, поэтому его время может
+превышать 120 секунд: в текущем корпусе максимум составляет 124,97 секунды
+для train и 125,7 для val. Warmup не считается автономным выживанием.
+После инициализации каждый клип непрерывно продолжает настоящий движок.
+Клип по-прежнему содержит только 32 перехода; это не запись 120 секунд
+автономной игры.
+
+После того как collector создаст каталог данных, подготовьте новый run-dir
+в терминале обучения. Runner читает `RUN_DIR/data`; аргумента `--data-dir`
+у него нет. Уже существующая правильная junction проверяется и сохраняется;
+другой существующий путь останавливает подготовку без перезаписи файлов.
+
+```powershell
+$twRunDirectory = Join-Path $PWD 'training_runs/vjepa175_simple_spawn_32k_20261109'
+$twCorpusDirectory = (Resolve-Path -LiteralPath 'training_runs/simple_spawn_32k_phases_20261109/data').Path
+New-Item -ItemType Directory -Path $twRunDirectory -Force | Out-Null
+$twDataLink = Join-Path $twRunDirectory 'data'
+if (Test-Path -LiteralPath $twDataLink) {
+  $twExistingLink = Get-Item -LiteralPath $twDataLink -Force
+  if ($twExistingLink.LinkType -ne 'Junction' -or @($twExistingLink.Target)[0] -ne $twCorpusDirectory) {
+    throw 'Existing run/data is not the expected corpus junction; check it before continuing.'
+  }
+} else {
+  New-Item -ItemType Junction -Path $twDataLink -Target $twCorpusDirectory | Out-Null
+}
+$twMaskSource = (Resolve-Path -LiteralPath 'training_runs/vjepa500_simple_spawn_32k_20261109/object_masks').Path
+$twMaskLink = Join-Path $twRunDirectory 'object_masks'
+if (Test-Path -LiteralPath $twMaskLink) {
+  $twExistingMasks = Get-Item -LiteralPath $twMaskLink -Force
+  if ($twExistingMasks.LinkType -ne 'Junction' -or @($twExistingMasks.Target)[0] -ne $twMaskSource) {
+    throw 'Existing object_masks is not the expected annotation junction; check before continuing.'
+  }
+} else {
+  New-Item -ItemType Junction -Path $twMaskLink -Target $twMaskSource | Out-Null
+}
+```
+
+Новый run использует прежние данные и офлайн-аннотации через эти две junction.
+Команда кэша ниже проверяет и переиспользует соответствующие маски и фоны;
+исходные клипы и дополнительные обучающие примеры не создаются.
+
+После готовности минимум 1000 полных train-клипов и отдельных 512 val-клипов
+создайте неизменяемую обучающую выборку из 32 000 переходов:
+
+```powershell
+& $twPython -m turkeyworld.training_subset `
+  --source training_runs/simple_spawn_32k_phases_20261109/data/rgb/train `
+  --output training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --transitions 32000 --seed 173 --behavior-version deterministic_enemy_v3_simple_spawn
+```
+
+Manifest фиксирует 1000 клипов по 32 перехода и fingerprint. При продолжении
+используется тот же файл. Перед включением object-aware обучения и негативных
+примеров без NPC подготовьте или обновите офлайн-кэш train/val.
+`--include-backgrounds` дополнительно сохраняет соответствующий Source без NPC:
+
+```powershell
+& $twPython -m turkeyworld.object_mask_cache `
+  --data-root training_runs/vjepa175_simple_spawn_32k_20261109/data `
+  --output training_runs/vjepa175_simple_spawn_32k_20261109/object_masks `
+  --training-subset-manifest training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --workers 8 --include-backgrounds
+```
+
+Затем запустите или продолжите существующий run в рамках того же сохранённого
+бюджета 6000 обновлений оптимизатора Teacher:
 
 ```powershell
 & $twPython -m turkeyworld.train_vq_world `
-  --run-dir training_runs/vjepa500_vqgan_20261109 `
+  --run-dir training_runs/vjepa175_simple_spawn_32k_20261109 `
+  --teacher-size 175m_vqgan `
   --codec-checkpoint training_runs/vqgan_20261109/checkpoints/codec_for_renderer.pt `
   --control-run-dir training_runs/vqgan_20261109 `
-  --accept-current-codec --batch 1 --gradient-accumulation-steps 8 --preview-every 10
+  --accept-current-codec --batch 1 --gradient-accumulation-steps 16 --preview-every 10 `
+  --from-scratch --train-renderer-during-pretrain --target-seconds 120 `
+  --adversarial-during-pretrain --pretrain-adversarial-weight .005 `
+  --pretrain-adversarial-feature-weight .01 --pretrain-adversarial-warmup 32 `
+  --pretrain-adversarial-ramp 128 `
+  --detach-flow-base --gan-npc-negatives `
+  --npc-negative-weight 1.0 --npc-negative-min-fraction .005 `
+  --object-aware-rendering --npc-region-boost 4 `
+  --object-mask-directory training_runs/vjepa175_simple_spawn_32k_20261109/object_masks `
+  --minimum-train-clips 1000 `
+  --training-subset-manifest training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --optimizer-update-budget 6000
 ```
 
-Teacher и Student используют микробатч 1 и **8 шагов накопления градиентов**:
-эффективный batch — 8 фрагментов на обновление оптимизатора. В коротких фазах
+В новом запуске Teacher 175M динамика мира, базовая камера, Flow Matching, GAN,
+оптимизаторы и EMA создаются с нуля. Веса и состояния оптимизаторов
+остановленного 500M не импортируются. Повторно используется только замороженный
+VQGAN: 4 763 731 параметр, 11 586 обновлений обучения; он принят пользователем
+с текущим качеством, а непройденный строгий quality gate сохраняется в отчёте.
+
+Teacher содержит **174 910 616 параметров** при инференсе; **170 146 885**
+обучаются. World-модуль содержит 100 167 843: encoder 57 137 664, predictor 38 405 632
+и readouts 4 624 547. Base содержит 3 892 386, Flow — 66 086 656 параметров.
+Внешний EMA-encoder содержит 57 137 664 параметра и не входит в инференс;
+D также учитывается отдельно. Ширина world 512, encoder 18 блоков, predictor 12.
+Flow сохраняет ширину 256/глубину 6 с adapter 512/12 и 12 шагами Heun.
+Student остаётся запланированным: эти размеры не означают, что его обучение
+началось или что две минуты игры уже проверены.
+
+Динамика и нейрорендер учатся совместно с начала нового запуска.
+`--detach-flow-base` отключает градиент Flow loss в Base: базовая камера
+обучается по RGB L1 и границам с объектными весами. Отдельная Base-only
+warmup-фаза не вводится. Sampled RGB L 1 с весом 0,5 проходит через 12 шагов
+Heun с activation checkpointing; GAN использует detached base/state.
+Новый D начинает со своего шага 0: первые 32 обновления учится при нулевом
+adversarial-весе генератора, затем за 128 обновлений D веса возрастают до
+0,005 для adversarial loss и 0,01 для feature matching. Последующие перезапуски
+сохраняют собственные веса 175M, моменты оптимизаторов, EMA, счётчик D и
+бюджет 0→6000.
+
+Conditioning учитывает полные проецируемые границы NPC. Точные офлайн-маски
+видимых пикселей задают RGB/CFM веса с boost 4 и нормализацией к среднему 1.
+Прежние маски и соответствующие Source-фоны без NPC используются через
+object_masks junction нового run. Подготовка проверяет replay движком офлайн;
+обучение и инференс движок не вызывают. Исходные NPZ, выборка 32k и её
+fingerprint не меняются. Будущие GT служат метками loss и не исправляют
+авторегрессивную траекторию.
+
+`--gan-npc-negatives` добавляет Source без NPC как отрицательный пример
+вместе с фактическим sampled RGB; Source служит положительным. Для всех
+используются те же detached base/state. Вес дополнительного негатива 1,0;
+он пропускается при доле видимых NPC менее 0,5%, включая естественно пустые
+и полностью закрытые стенами сцены. Протокол —
+`joint_dynamics_flow_matching_gan_objects_separate_v2`. Разность presence scores
+служит диагностикой, а не точностью или подтверждением качества.
+Прежние checkpoints 500M, оптимизаторы и отчёты сохранены.
+
+Отдельный корпус `training_runs/simple_spawn_32k_phases_20261109/data` содержит
+только запрошенные 32 000 train-переходов и отдельную validation-выборку.
+Готовность сбора показывается по фактическим данным.
+Новая инициализация сама по себе не подтверждает качество кадров или две
+минуты игры. Раздел сохранённого RGB-запуска ниже описывает прежнюю миграцию
+и порядок с заморозкой генератора.
+
+Активный Teacher использует только **32 000 train-переходов / 1000 клипов**
+из закреплённого manifest. Validation остаётся отдельной: **512 клипов /
+16 384 перехода**. Политика `deterministic_enemy_v3_simple_spawn` использует
+восемь фиксированных spawn-точек: фаза меняется каждые три секунды,
+цикл повторяется через 24 секунды. Проверки безопасности и резервный
+выбор допустимого места сохраняются.
+Прежний V2-запуск `training_runs/vjepa500_deterministic_scratch_20261109`
+остановлен на шаге 20 и сохранён вместе с отдельным резервным корпусом
+`training_runs/deterministic_20261109/data`. Новый мир и рендер V3 создаются
+с нуля, без весов и записей V2; обученный замороженный VQGAN используется
+повторно. Нейросеть при этом учит собственные
+детерминированные переходы и выбор spawn через argmax: название политики
+не подтверждает совпадение ещё обучаемых предсказаний с правилами Source.
+Монитор показывает фактическую версию политики.
+
+Текущая цель — **120 секунд: 3600 автономных переходов при 30 Гц**.
+После отдельного решения пользователя длинный curriculum может использовать
+горизонты 32/128/512/2048/3600. Сейчас длинные записи не генерируются.
+Прежние запуски сохраняются отдельно.
+
+Добавление sampled RGB L1 и GAN снова меняет total loss: его абсолютное
+значение нельзя напрямую сравнивать с прежним loss динамики/Flow Matching.
+Монитор отдельно показывает
+фактические `flow` и `loss_without_flow`; `loss_protocol` отделяет кривую новой
+функции потерь от старых записей.
+
+Отрезок Teacher использует микробатч 1 и **16 шагов накопления градиентов**:
+эффективный batch — 16 фрагментов на обновление оптимизатора. В коротких фазах
 основной счётчик считает обновления оптимизатора. В длинных прогонах прогресс
 измеряется переходами траектории; глобальный счётчик оптимизатора показан отдельно.
 Интервал preview и графики считают обновления оптимизатора. Монитор отдельно
-показывает текущий микрошаг, например 7/8, и число обработанных фрагментов.
+показывает текущий микрошаг, например 3/16, и число обработанных фрагментов.
 Train loss усредняется по накопленной группе. В длинном TBPTT последний
-неполный набор обновляется на границе эпизода и может содержать меньше 8
+неполный набор обновляется на границе эпизода и может содержать меньше 16
 фрагментов. `--gradient-accumulation-steps 1` сохраняет прежний режим.
+
+Цель отрезка — обучение на фиксированной выборке до проверки более широкого
+обобщения. Существующие regularizers сохраняются для устойчивости.
+Бюджет обновлений начинается с нулевого шага нового Teacher 175M:
+текущий свежий отрезок идёт от шага 0 до 6000. Перезапуск продолжает тот же
+сохранённый бюджет. После его исчерпания сохраняется checkpoint и статус
+становится **`awaiting_user`**. Дальнейшее обучение Teacher, расширение
+выборки, последующие длинные/quality-фазы и Student автоматически не запускаются:
+для продолжения нужно решение пользователя. Завершение бюджета не означает
+прохождение качества или игровой квалификации.
 
 ETA рассчитывается по времени полного обновления оптимизатора со всеми его
 фрагментами. На одно обновление требуется больше вычислений; накопление не
 даёт пропорционального ускорения обработки примеров. JEPA covariance и
 variance regularizers считаются для каждого микробатча отдельно: их
-статистика отличается от одного одновременного batch 8.
+статистика отличается от одного одновременного batch 16.
 
 Source допустим на входе панели реконструкции кодека. Последующий
 `free_rollout` world model получает только начальный контекст и управление;
@@ -346,9 +532,9 @@ Source допустим на входе панели реконструкции 
 
 Поэтому чистый clone без локальных весов позволяет запустить обычную игру,
 собрать данные и обучить отдельную базовую модель, но не воспроизводит
-текущий 500M эксперимент одной командой. Checkpoints и корпус не входят в Git.
+архивную миграцию 500M одной командой. Checkpoints и корпус не входят в Git.
 
-### Команда запуска и продолжения
+### Архивная команда миграции RGB-checkpoints
 
 ```powershell
 & $twPython -m turkeyworld.train_500m `
@@ -366,9 +552,17 @@ optimizer, RNG, EMA и состояние текущей фазы. В длинн
 замороженного Teacher и квалификация Student имеют отдельные durable
 указатели, чтобы после перезапуска не начинать завершённую фазу заново.
 
-### Порядок обучения
+## Текущее обучение и квалификация
 
-1. **Динамика Teacher:** 6000 обновлений без GAN. Если короткий gate не
+Ниже описан дальнейший pipeline. Текущий запуск ограничен отрезком Teacher
+на фиксированной выборке; последующие этапы требуют нового решения пользователя.
+
+1. **Динамика Teacher, Flow Matching и GAN:** 6000 обновлений оптимизатора с нуля;
+   world core, нейросетевая базовая камера, признаки карты и Flow Matching
+   учатся совместно с нуля в новом запуске 175M. Обученный VQGAN заморожен.
+   Новый GAN начинает описанный warmup/ramp с собственного шага 0. Перезапуск
+   сохраняет выполненные шаги этого run и его бюджет 0→6000.
+   Если короткий gate не
    пройден — раунды по 3000 обновлений. Gate проверяет 128 held-out окон,
    по два кадра начального контекста и четыре будущих собственных шага.
 2. **Плато динамики:** шесть разных проверок без накопленного улучшения
@@ -376,8 +570,10 @@ optimizer, RNG, EMA и состояние текущей фазы. В длинн
    фиксируется непройденный gate, Teacher замораживается и передаётся Student.
    Длинная и визуальная донастройка Teacher в этой ветке пропускаются.
 3. **Если динамика прошла:** Teacher проходит настоящий длинный curriculum
-   с горизонтами 32/128/512/2048/9000, всего 14 888 переходов, TBPTT по 16.
-   Внутри 9000-шагового сегмента нет сбросов состояния и памяти.
+   с горизонтами 32/128/512/2048/3600, всего **9488 переходов**:
+   32×8 + 128×4 + 512×2 + 2048×2 + 3600×1. TBPTT обрезает граф,
+   сохраняя собственные состояние и память; внутри 3600-шагового сегмента
+   нет их сбросов.
 4. **Визуальное качество Teacher:** обучаются итоговый FM-рендер и GAN.
    Проверка использует 64 фиксированных val-окна: два начальных кадра →
    четыре собственных будущих кадра, итого 256 кадров. Порог: PSNR ≥35 дБ,
@@ -389,13 +585,13 @@ optimizer, RNG, EMA и состояние текущей фазы. В длинн
    preview-проверкам между локальными проверками терпения. При плато
    восстанавливаются лучшие веса; плато не означает достижение качества.
    При достижении трёх проходов сохраняются текущие прошедшие веса.
-6. **Замороженный Teacher:** два независимых автономных прогона по 9000
-   переходов, сценарии explore и mixed. Их результаты сохраняются явно,
+6. **Замороженный Teacher:** два независимых автономных прогона по **3600
+   переходов / 120 секунд**, сценарии explore и mixed. Их результаты сохраняются явно,
    независимо от причины остановки обучения Teacher.
 7. **Student 22,48M:** 16 000 коротких обновлений JEPA/Rectified Flow,
    дистилляция от замороженного Teacher; каждое четвёртое обновление включает
    reflow с одинаковым noise и Teacher endpoint. Затем тот же длинный
-   curriculum и два собственных пятиминутных прогона.
+   curriculum и два собственных двухминутных прогона.
 8. **Если Student не прошёл:** новые раунды по 2000 коротких обновлений,
    длинному curriculum и двум новым независимым проверкам. Teacher остаётся
    замороженным. Продолжение не имеет заранее обещанного срока сходимости.
@@ -434,7 +630,7 @@ Discriminator и EMA при игре не используются.
 
 ```powershell
 & $twPython -m training_dashboard.local_server `
-  --run-dir training_runs/vjepa500_20261109 --port 8765
+  --run-dir training_runs/vqgan_20261109 --port 8765
 ```
 
 Страница показывает текущую фазу, реальные метрики, отдельные размеры
@@ -447,7 +643,7 @@ Teacher/Student/EMA/D, динамику до GAN, сбор корпуса, го�
 прохождением quality gate. При смене частоты старый preview сохраняет
 фактический шаг генерации до появления нового изображения. Будущий Source
 служит только для сравнения и не исправляет прогноз. Накопление градиентов
-составляет 8: десять полных обновлений обрабатывают 80 фрагментов.
+составляет 16: десять полных обновлений обрабатывают 160 фрагментов.
 Микрошаги и игровые кадры не увеличивают счётчик preview.
 Реконструкция кодека сохраняет свой отдельный интервал проверки 500 обновлений.
 История предыдущей фазы не подставляется в график новой фазы.
@@ -455,14 +651,14 @@ Teacher/Student/EMA/D, динамику до GAN, сбор корпуса, го�
 Остановить обучение с сохранением на ближайшей границе:
 
 ```powershell
-New-Item -ItemType File -Path training_runs/vjepa500_20261109/stop_training -Force
+New-Item -ItemType File -Path training_runs/vqgan_20261109/stop_training -Force
 ```
 
 Продолжить: удалите или переименуйте флаг, затем повторите команду
-`train_500m` из предыдущего раздела.
+`train_vq_world` из раздела текущего запуска с нуля.
 
 ```powershell
-Remove-Item -LiteralPath training_runs/vjepa500_20261109/stop_training
+Remove-Item -LiteralPath training_runs/vqgan_20261109/stop_training
 ```
 
 Runner использует Windows `SetThreadExecutionState` с
@@ -477,7 +673,7 @@ Runner использует Windows `SetThreadExecutionState` с
 
 ```powershell
 & $twPython -m turkeyworld.power_guard `
-  --pid-file training_runs/vjepa500_20261109/training.pid
+  --pid-file training_runs/vjepa175_simple_spawn_32k_20261109/training.pid
 ```
 
 Guard пишет `power_guard.json`. Не запускайте второй worker обучения
@@ -486,17 +682,20 @@ Guard пишет `power_guard.json`. Не запускайте второй work
 
 ## Артефакты и нейросетевая игра
 
+Пути относятся к новому 175M. Артефакты следующих фаз появятся только после
+отдельного решения пользователя и выполнения этих фаз; наличие Student не заявляется.
+
 | Путь внутри run-dir | Назначение |
 |---|---|
-| `checkpoints/teacher_vjepa500_initial.pt` | Мигрированный старт 500M |
-| `checkpoints/teacher500_world*.pt` | Динамика и repair-фазы |
-| `teacher_world_progress500.json`, `dynamics_gate_*.json` | Продолжение и реальные результаты gate |
-| `checkpoints/teacher500_vjepa_temporal.pt` | Длинный curriculum Teacher |
-| `checkpoints/teacher_quality_500m*.pt` | Визуальная фаза и лучшие веса |
-| `checkpoints/teacher_for_student_vjepa500.pt` | Канонический замороженный Teacher |
-| `teacher_handoff_vjepa500.json` | Причина передачи, выбранные веса и fingerprint |
+| `checkpoints/teacher_vjepa175vq_initial.pt` | Новая инициализация мира и рендера с сохранённым VQGAN |
+| `checkpoints/teacher175vq_world*.pt` | Динамика и repair-фазы |
+| `teacher_world_progress175vq.json`, `dynamics_gate_*.json` | Продолжение и реальные результаты gate |
+| `checkpoints/teacher175vq_vjepa_temporal.pt` | Длинный curriculum Teacher |
+| `checkpoints/teacher_quality_175vqm*.pt` | Визуальная фаза и лучшие веса |
+| `checkpoints/teacher_for_student_vjepa175vq.pt` | Канонический замороженный Teacher |
+| `teacher_handoff_vjepa175vq.json` | Причина передачи, выбранные веса и fingerprint |
 | `student_plan.json` | Профиль 22,48M и состояние его обучения |
-| `checkpoints/student_vjepa500_distill.pt` | Короткое обучение Student |
+| `checkpoints/student_vjepa175vq_distill.pt` | Короткое обучение Student |
 | `checkpoints/student_vjepa_temporal.pt` | Длинное обучение Student |
 | `student_continuation_vjepa.json` | Продолжение repair-раундов и квалификация |
 | `teacher_vjepa_evaluation*.json`, `student_vjepa_evaluation*.json` | Независимые проверки |
@@ -506,7 +705,7 @@ Guard пишет `power_guard.json`. Не запускайте второй work
 
 ```powershell
 & $twPython -m turkeyworld.neural_play `
-  --world training_runs/vjepa500_20261109/checkpoints/student_vjepa_temporal.pt `
+  --world training_runs/vjepa175_simple_spawn_32k_20261109/checkpoints/student_vjepa_temporal.pt `
   --device cuda --display-size 1024 --fps 60
 ```
 
@@ -523,14 +722,14 @@ Guard пишет `power_guard.json`. Не запускайте второй work
 
 ```powershell
 & $twPython -m turkeyworld.evaluate_rollout `
-  --world training_runs/vjepa500_20261109/checkpoints/student_vjepa_temporal.pt `
-  --device cuda --seconds 300 --episodes 1 --scenario mixed `
+  --world training_runs/vjepa175_simple_spawn_32k_20261109/checkpoints/student_vjepa_temporal.pt `
+  --device cuda --seconds 120 --episodes 1 --scenario mixed `
   --render-every 300 --min-render-psnr 35 --continue-on-failure `
-  --output reports/student_mixed_300s.json
+  --output reports/student_mixed_120s.json
 ```
 
-Один завершённый 9000-шаговый прогон и state-only запуск не являются
-свидетельством правильной пятиминутной игры. Runner требует оба свежих
+Один завершённый 3600-шаговый прогон и state-only запуск не являются
+свидетельством правильной двухминутной игры. Runner требует оба свежих
 активных сценария с проверками состояния и диагностического RGB.
 Исходные метки этих проверок не подаются обратно в модель.
 
@@ -538,24 +737,26 @@ Guard пишет `power_guard.json`. Не запускайте второй work
 
 ```powershell
 & $twPython -m turkeyworld.benchmark `
-  --checkpoint training_runs/vjepa500_20261109/checkpoints/student_vjepa_temporal.pt `
+  --checkpoint training_runs/vjepa175_simple_spawn_32k_20261109/checkpoints/student_vjepa_temporal.pt `
   --image-size 128 --device cuda --dtype fp32 --frames 300 --warmup 30 `
   --no-sr --output-json reports/student_speed.json
 ```
 
 ## Измерения и ограничения
 
-В отдельном замере Teacher 500M на RTX 4090, batch 1, обновление динамики
+В архивном замере Teacher 500M на RTX 4090, batch 1, обновление динамики
 заняло около **5,08 с**, полный Heun/GAN — **5,89 с**, пик памяти —
 **13,83 ГиБ**. Это время обучения, не inference FPS. Ориентир первых
-6000 обновлений — около 8–10 часов плюс проверки, но холодный участок
-с сохранением checkpoints и чтением данных был медленнее; текущий ETA
-считается по реальному запуску.
+6000 обновлений — около 8–10 часов плюс проверки — относился к прежнему
+objective без накопления шестнадцати фрагментов. Для нового совместного обучения
+эта оценка не действует; текущий ETA считается по времени полной группы.
 
 Начальный CPU-замер расширения корпуса давал ориентир около 80 минут
 и ещё 64 ГиБ сжатых данных до базовых 5M переходов. Скорость и остаток
 меняются при параллельном обучении; актуальны `data/status.json` и dashboard.
-Срок до прохождения автономных 300 секунд неизвестен. Для нового
+Эта оценка CPU относится к прежнему корпусу; у нового детерминированного
+корпуса собственные фактические счётчики и ETA.
+Срок до прохождения автономных 120 секунд неизвестен. Для нового
 Student 22,48M нельзя переносить старые замеры меньшей модели.
 
 ## Чистая установка без checkpoints и прежние модели

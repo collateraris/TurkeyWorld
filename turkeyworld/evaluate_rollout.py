@@ -2,7 +2,7 @@
 
 The reference engine prepares a fixed action tape before neural execution. Its
 states are measurement targets, never corrections to the model or GRU memory.
-A completed 9000-step command alone is not a five-minute gameplay certificate.
+A completed rollout alone does not establish active gameplay for its duration.
 """
 from __future__ import annotations
 
@@ -257,6 +257,7 @@ def evaluate_episode(model, metadata, args, seed):
                    "proposed_minimum_sampled_psnr": args.min_render_psnr,
                    "sampled_visual_gate_pass": visual_pass,
                    "visual_quality_validated": visual_pass,
+                   "requested_active_pass": bool(report["state_integrity_active_requested_pass"] and visual_pass),
                    "300s_active_pass": bool(report["state_integrity_active_300s_pass"] and visual_pass),
                    "paired_trajectory_pose_error_tiles": _summary(pose_errors),
                    "paired_trajectory_heading_error_degrees": _summary(angle_errors),
@@ -320,13 +321,17 @@ def main(argv=None):
                           "first_failure": result["first_failure"]}), flush=True)
     report = {"evaluation": "free_neural_rollout_integrity_and_active_coverage", "format_version": 1,
               "checkpoint": str(args.world.resolve()), "training_steps": metadata.get("training_steps", 0),
-              "quality_status": "Empirical evaluation only; no trained accuracy, five-minute stability or target FPS is guaranteed.",
+              "quality_status": "Empirical evaluation only; trained accuracy, requested-duration stability and target FPS require measurement.",
               "device": args.device, "transition_mode": getattr(model.config, "transition_mode", "residual_v0"),
               "endless": bool(getattr(model.config, "endless", False)),
               "renderer_mode": getattr(model.config, "renderer_mode", "direct"),
               "episodes": episodes, "episode_count": len(episodes),
+              "target_seconds": args.seconds,
+              "target_steps": max(1, math.ceil(args.seconds/(1/float(getattr(model.config, "simulation_hz", 30))))),
               "integrity_pass_count": sum(e["integrity_pass"] for e in episodes),
               "qualifying_active_session_count": sum(e["qualifying_active_session"] for e in episodes),
+              "state_integrity_active_requested_pass_count": sum(e["state_integrity_active_requested_pass"] for e in episodes),
+              "requested_active_pass_count": sum(e["requested_active_pass"] for e in episodes),
               "state_integrity_active_300s_pass_count": sum(e["state_integrity_active_300s_pass"] for e in episodes),
               "300s_active_pass_count": sum(e["300s_active_pass"] for e in episodes),
               "generalization_note": "Current seeds vary trajectories/animation on a fixed arena; new-map generalization is not tested."}

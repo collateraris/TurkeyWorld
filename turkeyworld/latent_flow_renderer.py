@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .flow_renderer import FlowBlock
 from .vqgan import VQGAN, VQGANConfig
@@ -183,15 +184,18 @@ class LatentFlowRenderer(LatentVelocityNetwork):
     def forward(self, noisy, time, base_latents, state, self_condition=None):
         return self.velocity(noisy, time, base_latents, state, self_condition)
 
-    def loss(self, target_rgb, base_rgb, state, noise=None, time=None, target_endpoint=None):
+    def loss(self, target_rgb, base_rgb, state, noise=None, time=None, target_endpoint=None, *, pixel_weights=None,
+             detach_base=False):
         """Continuous-latent velocity regression, including same-noise RGB reflow."""
         self._check_codec()
         with torch.no_grad():
             target = self.normalize_latents(self.codec.encode(
                 target_rgb if target_endpoint is None else target_endpoint)['quantized'])
-        # Frozen encoder/quantizer still differentiates with respect to the
-        # generated base RGB condition through its straight-through latents.
-        base = self.normalize_latents(self.codec.encode(base_rgb)['quantized'])
+        # Base may learn solely from its direct RGB objective. Detaching here
+        # preserves the exact conditional flow forward values while preventing
+        # denoising loss from overwhelming reconstruction of the condition.
+        condition_rgb = base_rgb.detach() if detach_base else base_rgb
+        base = self.normalize_latents(self.codec.encode(condition_rgb)['quantized'])
         noise = self._noise(torch.randn_like(target) if noise is None else noise, target.shape[0], target.device)
         if time is None:
             values = torch.randn(target.shape[0], device=target.device)
@@ -208,16 +212,26 @@ class LatentFlowRenderer(LatentVelocityNetwork):
                 first = self.velocity(noisy, time, base, state).float()
                 previous = noisy+(1-fraction)*first
         prediction = self.velocity(noisy, time, base, state, previous).float()
-        velocity_loss = F.mse_loss(prediction, target-noise)
         endpoint = noisy+(1-fraction)*prediction
-        endpoint_loss = F.l1_loss(endpoint, target)
+        if pixel_weights is not None:
+            from .object_losses import weighted_mse, weighted_image_l1
+            velocity_loss = weighted_mse(prediction, target-noise, pixel_weights)
+            endpoint_loss = weighted_image_l1(endpoint, target, pixel_weights)
+        else:
+            velocity_loss = F.mse_loss(prediction, target-noise)
+            endpoint_loss = F.l1_loss(endpoint, target)
         return velocity_loss+.1*endpoint_loss, {
             'flow_velocity': velocity_loss.detach(), 'flow_endpoint': endpoint_loss.detach(),
             'flow_latent_std': target.detach().std(unbiased=False),
         }
 
-    def latent_sample(self, base_rgb, state, noise=None, steps=None):
-        """Return continuous normalized latents, before unscaling/quantization."""
+    def latent_sample(self, base_rgb, state, noise=None, steps=None, *, checkpoint_velocity=False):
+        """Return continuous normalized latents, before unscaling/quantization.
+
+        Optional activation recomputation checkpoints each ODE velocity call
+        during gradient-enabled training. Evaluation/no-grad keep the ordinary
+        deterministic sampler, including the teacher's full Heun endpoint.
+        """
         self._check_codec()
         steps = self.steps if steps is None else steps
         if not isinstance(steps, int) or steps < 1:
@@ -225,20 +239,28 @@ class LatentFlowRenderer(LatentVelocityNetwork):
         base = self.normalize_latents(self.codec.encode(base_rgb)['quantized'])
         current = self._noise(noise, base_rgb.shape[0], base_rgb.device)
         previous, dt = None, 1/steps
+        recompute = bool(checkpoint_velocity and self.training and torch.is_grad_enabled())
+
+        def evaluate_velocity(*inputs):
+            output = (checkpoint(self.velocity, *inputs, use_reentrant=False, preserve_rng_state=True)
+                      if recompute else self.velocity(*inputs))
+            return output.float()
+
         for index in range(steps):
             time = torch.full((current.shape[0],), index*dt, device=current.device)
-            velocity = self.velocity(current, time, base, state, previous).float()
+            velocity = evaluate_velocity(current, time, base, state, previous)
             proposal = current+dt*velocity
             previous = current+(1-index*dt)*velocity
             if self.kind == 'teacher':
-                end_velocity = self.velocity(proposal, time+dt, base, state, previous).float()
+                end_velocity = evaluate_velocity(proposal, time+dt, base, state, previous)
                 current = current+.5*dt*(velocity+end_velocity)
             else:
                 current = proposal
         return current
 
-    def sample(self, base_rgb, state, noise=None, steps=None):
-        continuous = self.latent_sample(base_rgb, state, noise=noise, steps=steps)
+    def sample(self, base_rgb, state, noise=None, steps=None, *, checkpoint_velocity=False):
+        continuous = self.latent_sample(base_rgb, state, noise=noise, steps=steps,
+                                        checkpoint_velocity=checkpoint_velocity)
         terminal = self.codec.quantize(self.denormalize_latents(continuous))['quantized']
         return self.codec.decode(terminal)
 

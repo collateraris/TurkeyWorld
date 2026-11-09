@@ -699,10 +699,10 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
                      resume=None, on_chunk=None, seed=73, return_directory=None, *,
                      schedule=CURRICULUM_SCHEDULE, amp_dtype=None, capture_trace=False,
                      aligned_supervision=False, gradient_accumulation_steps=1):
-    """Run the actual 14,888-transition curriculum for either teacher or student.
+    """Run the requested curriculum for either teacher or student.
 
-    A 9000-step task is selected only from a recording that really contains
-    that many transitions. Short return probes alternate with long recordings
+    Each task is selected only from recordings with enough transitions for
+    its horizon. Short return probes alternate with long recordings
     for the short horizons. Validation probes are generated but never sampled.
     ``on_chunk`` receives ``resume_state``, real cumulative metrics, transition
     counts, current horizon and a measured ETA. Only optimizer flushes have a
@@ -822,6 +822,8 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
             "tasks": reports, "return_corpus": corpus_report,
             "declaration": {"schedule": list(schedule), "dataset_fingerprint": fingerprint,
                             "autonomous_9000_step_task_completed": not interrupted and 9000 in schedule and task_index == len(plan),
+                            "target_rollout_steps": max(schedule),
+                            "autonomous_target_rollout_completed": not interrupted and task_index == len(plan),
                             "teacher_forced_future_inputs": 0, "chunk_size": chunk_size,
                             "aligned_auxiliary_supervision": bool(aligned_supervision),
                             'gradient_accumulation_steps': gradient_accumulation_steps,

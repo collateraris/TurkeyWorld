@@ -4,11 +4,13 @@
 
 TurkeyWorld combines a playable first-person reference game with an experimental
 action-conditioned neural world model. The current experiment trains a compact
-V-JEPA 2-AC adaptation with a **500M Flow Matching teacher**, then a **22.48M
-Rectified Flow student** intended for interactive play. The next stage trains a
-shared VQGAN codec from scratch before continuing both models in its latent space.
+V-JEPA 2-AC adaptation with a **175M Flow Matching teacher** (174,910,616
+parameters including the frozen codec). A **22.48M Rectified Flow student** is
+planned for later approval. The active deterministic
+experiment initializes the world model and neural renderer from scratch, reusing
+the existing trained, frozen VQGAN codec.
 
-**Five minutes of correct neural gameplay is a qualification target, not an
+**Two minutes of correct neural gameplay is a qualification target, not an
 achieved result implied by a checkpoint.** Training progress, image similarity,
 and autonomous gameplay checks are reported separately. The original game is
 playable independently of any trained neural weights.
@@ -28,7 +30,7 @@ $twPython = Join-Path $PWD '.venv\Scripts\python.exe'
 `requirements.txt` contains NumPy, Pillow, and pygame. `requirements-ml.txt` adds
 PyTorch. GPU training requires a CUDA-capable PyTorch installation; verify the
 CUDA check before passing `--device cuda`. CPU execution is supported for small
-tests and inference, but the 500M training experiment is designed for a GPU.
+tests and inference, but the active 175M training experiment is designed for a GPU.
 
 ```powershell
 & $twPython -m turkeyworld.play --size 128 --display-size 1024
@@ -106,7 +108,14 @@ reduces training activation memory. Migration code is in
 
 ## Data: targets, provenance, and collection
 
-The current target is **5,000,000 base RGB training transitions**:
+This section records the preserved earlier corpus and its collection commands.
+The active deterministic run uses a separate corpus at
+`training_runs/simple_spawn_32k_phases_20261109/data`, with 1,000 RGB train clips,
+512 RGB validation clips, and no long recordings;
+its preparation command is documented in the shared-codec training section.
+Older enemy-policy recordings cannot be mixed into that new corpus.
+
+The earlier target was **5,000,000 base RGB training transitions**:
 156,250 clips × 32 transitions. An additional 256 model-visited clips contribute
 8,192 transitions, giving a planned short-training total of **5,008,192**.
 The fixed RGB validation split contains 512 clips, or 16,384 transitions.
@@ -172,7 +181,7 @@ The current prepared corpus already includes
 its completed 256-clip manifest; rerunning the same collection validates and
 reuses matching files.
 
-The active 500M run shares the same physical corpus through a Windows directory
+The preserved 500M reserve run shares the same physical corpus through a Windows directory
 junction. Create the directories and junction only if they are absent:
 
 ```powershell
@@ -235,7 +244,7 @@ frames must jointly reach PSNR ≥40 dB, SSIM ≥0.99, and MAE ≤1/255, with fi
 outputs and at least three active codes. Qualification requires **three
 consecutive passing checks**, measured in FP32. Completion time remains unknown
 until the gate passes. A codec checkpoint alone does not qualify the world model
-for five minutes of play or establish its FPS.
+for the two-minute gameplay target or establish its FPS.
 
 The user can explicitly stop codec training and continue with its current
 reconstruction quality. This records `quality_acceptance.mode="user_requested"`
@@ -253,7 +262,8 @@ A direct world-training resume with this export also requires
 `--accept-current-codec`. User acceptance freezes the codec for continuation;
 it does not mark its reconstruction targets or the gameplay target as passed.
 
-After qualification, `codec_ready.json` records the frozen export
+In the preserved 500M codec-continuation workflow, after qualification,
+`codec_ready.json` records the frozen export
 `checkpoints/codec_for_renderer.pt`. With `--continue-world`, the controller
 migrates and resumes the preserved 500M world checkpoint in
 `training_runs/vjepa500_vqgan_20261109`. Both Teacher Flow Matching and Student
@@ -271,31 +281,201 @@ worker and releases the codec's GPU training resources. The dashboard follows
 `active_run.json` automatically. A `stop_training` file in the codec run stops
 the currently active world worker too; remove stop markers before resuming.
 
-To resume an already migrated latent world job directly:
+Collect the new V3 corpus in a separate terminal: 1,000 RGB train clips and
+512 RGB validation clips, with no long episodes. Its plan is 32,000 train
+transitions; it does not import the earlier V2 reserve:
+
+```powershell
+& $twPython -m turkeyworld.data_expansion `
+  training_runs/simple_spawn_32k_phases_20261109/data `
+  --rgb-train 1000 --rgb-val 512 --clip-frames 32 --rgb-time-span 120 `
+  --long-train 0 --long-val 0 --long-frames 3600 --size 128 --hz 30 --workers 8 `
+  --behavior-version deterministic_enemy_v3_simple_spawn
+```
+
+`--rgb-time-span 120` samples seeded game-time offsets across 0–120 seconds
+before warmup, covering all eight phases of the 24-second spawn cycle. The
+first stored frame follows warmup and can therefore have a time above 120
+seconds: the current corpus reaches 124.97 seconds in train and 125.7 in val.
+Warmup does not count as autonomous survival. After initialization, each clip
+follows the real continuous engine. A clip still contains only 32 transitions;
+this is not a 120-second autonomous recording.
+
+Once the collector has created its data directory, prepare the fresh run in
+the training terminal. The runner reads `RUN_DIR/data`; it has no `--data-dir`
+option. An existing correct junction is checked and left unchanged. A different
+existing path stops this setup rather than replacing files.
+
+```powershell
+$twRunDirectory = Join-Path $PWD 'training_runs/vjepa175_simple_spawn_32k_20261109'
+$twCorpusDirectory = (Resolve-Path -LiteralPath 'training_runs/simple_spawn_32k_phases_20261109/data').Path
+New-Item -ItemType Directory -Path $twRunDirectory -Force | Out-Null
+$twDataLink = Join-Path $twRunDirectory 'data'
+if (Test-Path -LiteralPath $twDataLink) {
+  $twExistingLink = Get-Item -LiteralPath $twDataLink -Force
+  if ($twExistingLink.LinkType -ne 'Junction' -or @($twExistingLink.Target)[0] -ne $twCorpusDirectory) {
+    throw 'Existing run/data is not the expected corpus junction; check it before continuing.'
+  }
+} else {
+  New-Item -ItemType Junction -Path $twDataLink -Target $twCorpusDirectory | Out-Null
+}
+$twMaskSource = (Resolve-Path -LiteralPath 'training_runs/vjepa500_simple_spawn_32k_20261109/object_masks').Path
+$twMaskLink = Join-Path $twRunDirectory 'object_masks'
+if (Test-Path -LiteralPath $twMaskLink) {
+  $twExistingMasks = Get-Item -LiteralPath $twMaskLink -Force
+  if ($twExistingMasks.LinkType -ne 'Junction' -or @($twExistingMasks.Target)[0] -ne $twMaskSource) {
+    throw 'Existing object_masks is not the expected annotation junction; check before continuing.'
+  }
+} else {
+  New-Item -ItemType Junction -Path $twMaskLink -Target $twMaskSource | Out-Null
+}
+```
+
+The new run reuses the same data and existing offline annotations through these
+two junctions. Matching masks/backgrounds are validated and reused by the cache
+command below; no source clips or extra training examples are generated.
+
+Once at least 1,000 complete train clips and the separate 512-clip validation
+split are ready, create the immutable 32,000-transition training selection:
+
+```powershell
+& $twPython -m turkeyworld.training_subset `
+  --source training_runs/simple_spawn_32k_phases_20261109/data/rgb/train `
+  --output training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --transitions 32000 --seed 173 --behavior-version deterministic_enemy_v3_simple_spawn
+```
+
+The manifest pins 1,000 clips of 32 transitions and their fingerprint. Reuse
+this same file when resuming. Before enabling object-aware training and NPC
+negatives, build or upgrade the train/val visible-NPC sidecars offline. The
+`--include-backgrounds` option also stores the matching Source render without NPCs:
+
+```powershell
+& $twPython -m turkeyworld.object_mask_cache `
+  --data-root training_runs/vjepa175_simple_spawn_32k_20261109/data `
+  --output training_runs/vjepa175_simple_spawn_32k_20261109/object_masks `
+  --training-subset-manifest training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --workers 8 --include-backgrounds
+```
+
+Then start or resume the existing scratch run within the same persisted
+6,000-update Teacher budget:
 
 ```powershell
 & $twPython -m turkeyworld.train_vq_world `
-  --run-dir training_runs/vjepa500_vqgan_20261109 `
+  --run-dir training_runs/vjepa175_simple_spawn_32k_20261109 `
+  --teacher-size 175m_vqgan `
   --codec-checkpoint training_runs/vqgan_20261109/checkpoints/codec_for_renderer.pt `
   --control-run-dir training_runs/vqgan_20261109 `
-  --accept-current-codec --batch 1 --gradient-accumulation-steps 8 --preview-every 10
+  --accept-current-codec --batch 1 --gradient-accumulation-steps 16 --preview-every 10 `
+  --from-scratch --train-renderer-during-pretrain --target-seconds 120 `
+  --adversarial-during-pretrain --pretrain-adversarial-weight .005 `
+  --pretrain-adversarial-feature-weight .01 --pretrain-adversarial-warmup 32 `
+  --pretrain-adversarial-ramp 128 `
+  --detach-flow-base --gan-npc-negatives `
+  --npc-negative-weight 1.0 --npc-negative-min-fraction .005 `
+  --object-aware-rendering --npc-region-boost 4 `
+  --object-mask-directory training_runs/vjepa175_simple_spawn_32k_20261109/object_masks `
+  --minimum-train-clips 1000 `
+  --training-subset-manifest training_runs/vjepa175_simple_spawn_32k_20261109/training_subset_32k.json `
+  --optimizer-update-budget 6000
 ```
 
-Teacher and Student use microbatch 1 with **8 gradient accumulation steps**:
-the effective batch is 8 fragments per optimizer update. In short training
+The new 175M Teacher run starts world dynamics, the base camera, Flow Matching,
+GAN, both optimizers, and EMA from scratch. No weights or optimizer state are
+imported from the stopped 500M experiment. Only the locally trained VQGAN
+codec is reused frozen: 4,763,731 parameters, trained for 11,586 updates and
+accepted by the user with its strict quality gate still recorded as failed.
+
+Teacher inference contains **174,910,616 parameters**, of which **170,146,885**
+are trainable. The world module has 100,167,843 parameters: encoder 57,137,664,
+predictor 38,405,632, and readouts 4,624,547. Base has 3,892,386 and Flow has
+66,086,656. The external EMA encoder has 57,137,664 parameters and is not part
+of inference; D is also counted separately. World width is 512 with 18 encoder
+and 12 predictor blocks. Flow keeps width 256/depth 6 plus the width 512/depth 12
+adapter and 12 Heun steps. Student remains planned; no Student training or
+two-minute qualification is implied by this configuration.
+
+World dynamics and the neural renderer train jointly from the beginning.
+`--detach-flow-base` prevents Flow loss from updating Base: its supervision
+is object-weighted RGB L 1 and edge loss. There is no separate Base-only
+warmup phase. Sampled RGB L 1 has weight 0.5 and differentiates through the
+12-step Heun sampler with activation checkpointing. GAN uses detached base/state
+conditioning. The new D begins at update zero, trains 32 updates with generator
+adversarial weight zero, then ramps over 128 D updates to adversarial weight
+0.005 and feature-matching weight 0.01. Later resumes keep this 175M run’s own
+weights, optimizer moments, EMA, D counter, and persisted 0→6,000 budget.
+
+Object conditioning uses analytic projected NPC extents. Exact visible-NPC
+mask sidecars weight RGB/CFM loss with boost 4, normalized to mean one.
+The existing masks and Source-without-NPC backgrounds are reused through the
+new run’s object_masks junction. Their preparation verifies engine replay
+offline; training and inference do not invoke the engine. Original NPZ files,
+the fixed 32k subset, and its fingerprint remain unchanged. Future GT is used
+only for supervision and does not correct the autoregressive rollout.
+
+`--gan-npc-negatives` adds the matching Source without NPCs as another negative
+beside actual sampled RGB; Source is the positive. All use the same detached
+base/state condition. The extra negative has weight 1.0 and is skipped when
+visible-NPC area is below 0.5%, including naturally empty or fully occluded views.
+The protocol is `joint_dynamics_flow_matching_gan_objects_separate_v2`.
+Presence-score gaps are diagnostics, not detection accuracy or a quality pass.
+The previous 500M checkpoints, optimizers, and reports remain preserved.
+
+Its separate corpus at `training_runs/simple_spawn_32k_phases_20261109/data` contains
+only the requested 32,000 train transitions and separate validation split.
+Dataset preparation reports actual completion separately. This initialization
+does not establish image-quality or gameplay qualification. The preserved RGB
+workflow below describes the earlier migration and renderer-freezing policy.
+
+The active Teacher loader uses only **32,000 train transitions / 1,000 clips**
+from the pinned manifest. Its separate validation set remains **512 clips /
+16,384 transitions**. Source policy `deterministic_enemy_v3_simple_spawn` uses
+eight fixed spawn anchors, advances its phase every three seconds, and repeats
+after 24 seconds. Existing safety checks and fallback placement still apply.
+The old V2 run at `training_runs/vjepa500_deterministic_scratch_20261109` stopped
+at step 20 and remains preserved, with its separate source reserve at
+`training_runs/deterministic_20261109/data`. This new V3 world/renderer starts
+from scratch and does not reuse V2 world weights or recordings; the trained
+VQGAN codec remains reused frozen.
+The neural model still learns deterministic transitions and an argmax spawn
+choice; that policy label does not establish that its learned predictions match
+the Source rules. The dashboard reports the actual policy version.
+
+The active gameplay target is **120 seconds: 3,600 autonomous transitions at
+30 Hz**. A later authorized long curriculum can use horizons
+32/128/512/2048/3600, but this corpus currently generates no long episodes.
+Earlier runs remain preserved separately.
+
+Adding sampled RGB L1 and GAN changes total loss again; its absolute value is
+not directly comparable with earlier dynamics/Flow-Matching-only totals. The monitor shows
+the actual `flow` term and `loss_without_flow` separately, and uses
+`loss_protocol` to keep the new objective's curve separate from older records.
+
+The Teacher segment uses microbatch 1 with **16 gradient accumulation steps**:
+the effective batch is 16 fragments per optimizer update. In short training
 phases the main counter counts optimizer updates. Long-rollout progress counts
 actual trajectory transitions; its global optimizer counter is shown separately.
 The preview interval and learning curves count optimizer updates; the monitor also
-shows the current microstep, such as 7/8, and total fragments consumed.
+shows the current microstep, such as 3/16, and total fragments consumed.
 Train loss is averaged over the accumulated group. Long TBPTT episodes flush
 their final group at the episode boundary, so that update can contain fewer
-than 8 fragments. `--gradient-accumulation-steps 1` preserves the earlier mode.
+than 16 fragments. `--gradient-accumulation-steps 1` preserves the earlier mode.
+
+This segment fits the fixed subset before evaluating broader generalization.
+Existing stability regularizers remain enabled. The additional-update budget
+is anchored to this fresh run's step zero: the current segment runs from step 0
+to step 6,000. Restarting resumes that same persisted budget. At exhaustion the
+checkpoint is saved and status becomes **`awaiting_user`**. Further Teacher
+training, subset expansion, later long/quality stages, and Student do not start
+automatically; continuation requires the user's decision. Budget completion
+does not mark quality or gameplay as passed.
 
 ETA uses the measured time for a complete optimizer update, including its
 accumulated fragments. Accumulation increases work per update rather than
 providing a corresponding increase in sample throughput. JEPA covariance and
 variance regularizers are evaluated per microbatch, so their statistics differ
-from a single simultaneous batch of 8.
+from a single simultaneous batch of 16.
 
 The codec reconstruction panel permits its Source input. The later
 `free_rollout` world preview receives initial context and controls only;
@@ -303,14 +483,14 @@ future ground-truth images and states remain evaluation targets.
 
 ## Train the preserved RGB 500M →22.48M experiment
 
-The current 500M workflow is a **checkpoint migration and continued-training
+This archived RGB workflow is a **checkpoint migration and continued-training
 workflow**. If `checkpoints/teacher_vjepa500_initial.pt` does not exist, it
 requires a trained 250M source checkpoint. The source checkpoints and generated
 datasets are not tracked in Git. The 500M CLI does not currently provide a
 single-command random-initialization bootstrap for a fresh checkout.
 Reference gameplay and base engine-data generation work without these weights.
 
-After the shared data path is ready, run this in a separate terminal:
+Archived RGB migration command, retained for the earlier checkpoints:
 
 ```powershell
 $twPython = Join-Path $PWD '.venv\Scripts\python.exe'
@@ -322,6 +502,8 @@ $twPython = Join-Path $PWD '.venv\Scripts\python.exe'
   --context 2 --horizon 4 --chunk 16 `
   --student-steps 16000 --repair-steps 2000
 ```
+
+## Current training and qualification
 
 Training separates two streams. The **main stream** runs autoregressively on
 its own predictions. Recorded future states and EMA visual latents supervise
@@ -339,9 +521,14 @@ discriminator, hinge loss, feature matching, and lazy R1. The auxiliary image
 query uses a known target pose for training; autonomous image-quality checks
 still evaluate the model's own future trajectory.
 
-The stage sequence is:
+The eventual pipeline is outlined below. The current invocation is limited to
+the fixed-subset Teacher segment; later phases require a new user decision:
 
-1. **World dynamics:** 6,000 updates with the renderer frozen and no GAN.
+1. **Joint world dynamics, Flow Matching and GAN:** 6,000 optimizer updates from zero with
+   world core, neural base camera, map features, and Flow Matching learning
+   together from scratch in the new 175M run. The trained VQGAN is frozen.
+   The new GAN uses the warmup/ramp above from its own step zero. Resuming this
+   run preserves its completed updates and the 0→6,000 budget.
    A held-out dynamics gate measures autonomous position/motion error, hit
    F1/recall, attack F1, collisions, and positive-example coverage. The current
    gate panel has 128 windows, or 512 future transitions.
@@ -350,19 +537,21 @@ The stage sequence is:
    gate remains recorded as failed; the best world checkpoint is restored
    before handing the teacher to the remaining pipeline.
 3. **If the dynamics gate passes:** train the long teacher curriculum with
-   horizons 32/128/512/2048/9000, totaling 14,888 transitions. TBPTT detaches
+   horizons 32/128/512/2048/3600, totaling **9,488 transitions**:
+   32×8 + 128×4 + 512×2 + 2048×2 + 3600×1. TBPTT detaches
    graphs while carrying the numerical state and visual memory unchanged.
 4. **Teacher RGB refinement:** when the world gate passed, tune full Flow
    Matching sampling with GAN until the visual target or visual plateau.
    The fixed held-out image panel contains 64 windows: 2 context frames and 4
    own future predictions each, totaling 256 evaluated future images.
 5. **Freeze the selected teacher:** restore its actual selected weights and
-   run independent `explore` and `mixed` evaluations of 9,000 transitions each.
+   run independent `explore` and `mixed` evaluations of **3,600 transitions /
+   120 seconds each**.
 6. **Student:** 16,000 updates using the selected 22.48M V-JEPA/RF profile,
    teacher distillation, and on-the-fly reflow every fourth update. Reflow
    uses the same initial noise for teacher endpoints and student targets.
 7. **Student long curriculum and qualification:** if the two independent
-   five-minute checks fail, continue with 2,000 short updates, another long
+   two-minute checks fail, continue with 2,000 short updates, another long
    curriculum, and two fresh-seed evaluations. Repeat until qualification
    passes. The teacher remains frozen throughout student repairs.
 
@@ -383,7 +572,7 @@ The key implementation files are [train_500m.py](turkeyworld/train_500m.py),
 
 ```powershell
 & $twPython -m training_dashboard.local_server `
-  --run-dir training_runs/vjepa500_20261109 --port 8765
+  --run-dir training_runs/vqgan_20261109 --port 8765
 ```
 
 Open **http://127.0.0.1:8765**. The dashboard shows current model training and
@@ -400,19 +589,19 @@ not count as a passing quality check. The displayed generation step stays the
 actual saved step when a new cadence is configured before the next image.
 Future Source is displayed for comparison and does not correct the rollout.
 An optimizer update may represent several simulated transitions in TBPTT;
-gradient accumulation is 8, so ten full updates process 80 fragments. The codec reconstruction preview retains its
+gradient accumulation is 16, so ten full updates process 160 fragments. The codec reconstruction preview retains its
 separate 500-update validation cadence.
 
 Request a graceful stop at the next safe checkpoint boundary:
 
 ```powershell
-New-Item -ItemType File -Path training_runs/vjepa500_20261109/stop_training -Force
+New-Item -ItemType File -Path training_runs/vqgan_20261109/stop_training -Force
 ```
 
-To resume, remove the request and repeat the same training command:
+To resume, remove the request and repeat the active `train_vq_world` command above:
 
 ```powershell
-Remove-Item -LiteralPath training_runs/vjepa500_20261109/stop_training
+Remove-Item -LiteralPath training_runs/vqgan_20261109/stop_training
 ```
 
 Weights, optimizer, EMA, phase progress, and carried long-rollout state are
@@ -430,11 +619,11 @@ has written a valid PID file. The training runner itself does not create
 
 ```powershell
 & $twPython -m turkeyworld.power_guard `
-  --pid-file training_runs/vjepa500_20261109/training.pid
+  --pid-file training_runs/vjepa175_simple_spawn_32k_20261109/training.pid
 ```
 
 The terminal commands above run in the foreground. Keep that terminal open
-when locking the screen. To launch the default experiment as a hidden background
+when locking the screen. To launch the active experiment as a hidden background
 worker, use the following **instead of starting a second foreground trainer**:
 
 ```powershell
@@ -443,9 +632,24 @@ from pathlib import Path
 import subprocess
 import sys
 
-run_dir = Path("training_runs/vjepa500_20261109")
+run_dir = Path("training_runs/vjepa175_simple_spawn_32k_20261109")
 run_dir.mkdir(parents=True, exist_ok=True)
-command = [sys.executable, "-m", "turkeyworld.train_500m", "--run-dir", str(run_dir)]
+command = [sys.executable, "-m", "turkeyworld.train_vq_world", "--run-dir", str(run_dir),
+           "--teacher-size", "175m_vqgan",
+           "--codec-checkpoint", "training_runs/vqgan_20261109/checkpoints/codec_for_renderer.pt",
+           "--control-run-dir", "training_runs/vqgan_20261109", "--accept-current-codec",
+           "--from-scratch", "--train-renderer-during-pretrain", "--target-seconds", "120",
+           "--adversarial-during-pretrain", "--pretrain-adversarial-weight", ".005",
+           "--pretrain-adversarial-feature-weight", ".01", "--pretrain-adversarial-warmup", "32",
+           "--pretrain-adversarial-ramp", "128",
+           "--detach-flow-base", "--gan-npc-negatives",
+           "--npc-negative-weight", "1.0", "--npc-negative-min-fraction", ".005",
+           "--object-aware-rendering", "--npc-region-boost", "4",
+           "--object-mask-directory", str(run_dir / "object_masks"),
+           "--minimum-train-clips", "1000", "--batch", "1",
+           "--gradient-accumulation-steps", "16", "--preview-every", "10",
+           "--training-subset-manifest", str(run_dir / "training_subset_32k.json"),
+           "--optimizer-update-budget", "6000"]
 with (run_dir / "worker_stdout.log").open("ab") as output, (run_dir / "worker_stderr.log").open("ab") as errors:
     worker = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
                               creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
@@ -454,41 +658,46 @@ print("Training PID:", worker.pid)
 '@ | & $twPython -
 ```
 
-This uses the runner defaults and the existing source/data prerequisites.
-Add explicit CLI arguments to `command` if overriding the defaults. Logs and
+This is the background form of the active scratch-training command above.
+It requires the retained codec export and the checked `run_dir/data` junction
+prepared above. Logs and
 the PID remain in the run directory; use the same `stop_training` request for
 a graceful stop. A locked screen is separate from closing a process or console.
 
-Useful run artifacts include:
+Useful 175M run artifacts include the following as their phases are authorized
+and executed; future Teacher/Student artifacts are not claimed to exist yet:
 
 - `status.json`, `metrics.jsonl`, `preview.png`, and `student_plan.json`.
-- `checkpoints/teacher_vjepa500_initial.pt`, `teacher500_world*.pt`,
-  `teacher500_vjepa_temporal.pt`, and `teacher_quality_500m*.pt`.
-- `teacher_handoff_vjepa500.json` and
-  `checkpoints/teacher_for_student_vjepa500.pt`.
-- `checkpoints/student_vjepa500_distill.pt` and `student_vjepa_temporal.pt`.
-- `dynamics_gate_*.json`, `teacher_world_progress500.json`, and
+- `checkpoints/teacher_vjepa175vq_initial.pt`, `teacher175vq_world*.pt`,
+  `teacher175vq_vjepa_temporal.pt`, and `teacher_quality_175vqm*.pt`.
+- `teacher_handoff_vjepa175vq.json` and
+  `checkpoints/teacher_for_student_vjepa175vq.pt`.
+- `checkpoints/student_vjepa175vq_distill.pt` and `student_vjepa_temporal.pt`.
+- `dynamics_gate_*.json`, `teacher_world_progress175vq.json`, and
   `student_continuation_vjepa.json`.
 - `teacher_vjepa_evaluation*.json` and `student_vjepa_evaluation*.json`.
 
-## Timing, neural playback, and the five-minute check
+## Timing, neural playback, and the two-minute check
 
-An RTX4090 training benchmark with batch 1 measured approximately **5.08 s** per
+An archived RTX4090 training benchmark with batch 1 measured approximately **5.08 s** per
 500M world update and **5.89 s** for full Heun/GAN training, with a peak of
-**13.83 GiB**. The initial 6,000-update phase has a provisional **8–10 hour** budget
-plus validation; actual run speed and dashboard ETA take precedence.
+**13.83 GiB**. Its earlier **8–10 hour** estimate for 6,000 updates does not
+predict the new joint objective with sixteen accumulated fragments per update.
+Current full-group measurements and dashboard ETA take precedence.
 CPU collection initially measured 30.37 clips/s, giving an approximately 80-minute
 estimate and 64 GiB of additional storage for the 5M-transition expansion.
-These are measurements/estimates from this experiment, not hardware promises.
+That CPU estimate refers to the earlier corpus; the deterministic corpus has
+its own actual preparation counts and ETA. These are archived measurements,
+not completion estimates for the new run.
 Neither they nor the earlier student benchmark establish FPS for the new 22.48M
-student. **Time until valid five-minute gameplay is unknown** because teacher
+student. **Time until valid two-minute gameplay is unknown** because teacher
 plateaus and repeated student repairs are not bounded by a completion deadline.
 
 When the corresponding checkpoint exists, launch neural playback with:
 
 ```powershell
 & $twPython -m turkeyworld.neural_play `
-  --world training_runs/vjepa500_20261109/checkpoints/student_vjepa_temporal.pt `
+  --world training_runs/vjepa175_simple_spawn_32k_20261109/checkpoints/student_vjepa_temporal.pt `
   --device cuda --display-size 1024
 ```
 
@@ -504,15 +713,15 @@ A standalone autonomous evaluation can be run after training:
 
 ```powershell
 & $twPython -m turkeyworld.evaluate_rollout `
-  --world training_runs/vjepa500_20261109/checkpoints/student_vjepa_temporal.pt `
-  --device cuda --seconds 300 --scenario mixed --seed 41000 `
+  --world training_runs/vjepa175_simple_spawn_32k_20261109/checkpoints/student_vjepa_temporal.pt `
+  --device cuda --seconds 120 --episodes 1 --scenario mixed --seed 41000 `
   --render-every 300 --min-render-psnr 35 --continue-on-failure `
-  --output training_runs/vjepa500_20261109/manual_evaluation.json
+  --output training_runs/vjepa175_simple_spawn_32k_20261109/manual_evaluation_120s.json
 ```
 
 One evaluation does not replace the pipeline's two independent checks.
 Qualification examines integrity, meaningful movement, active NPCs, shots,
-hits, kills, respawns, and image validity. Merely executing 9,000 ticks, surviving
+hits, kills, respawns, and image validity. Merely executing 3,600 ticks, surviving
 while frozen, or displaying plausible images does not qualify. Oracle checks
 measure errors without correcting the model. Existing seeds vary trajectories
 on a fixed arena; generalization to new maps is not established.

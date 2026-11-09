@@ -39,6 +39,7 @@ node_modules/
 /training_dashboard/dist/
 /training_dashboard/.openai/.local/
 /training_dashboard/.wrangler/
+/dashboard-*.tar.gz
 
 # Local configuration, credentials, logs and temporary files
 .env

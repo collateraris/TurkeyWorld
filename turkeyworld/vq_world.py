@@ -24,6 +24,34 @@ from .vqgan import VQGAN, VQGANConfig
 
 STUDENT_VQ_PARAMETERS = 22_475_096
 TEACHER_VQ_PARAMETERS = 504_857_752
+TEACHER175_VQ_PARAMETERS = 174_910_616
+TEACHER175_VQ_PROFILE = {
+    'vjepa_width': 512, 'vjepa_encoder_depth': 18, 'vjepa_predictor_depth': 12,
+    'vjepa_heads': 8, 'vjepa_context_frames': 4, 'vjepa_readout_mlp_ratio': 5,
+    'vjepa_gradient_checkpointing': True,
+}
+
+
+def teacher175_vq_config(codec_config, **overrides):
+    """Fresh ~175M complete teacher, including the shared frozen1488-entry codec.
+
+    The100.17M world retains a512D18-layer encoder and12-layer predictor. The
+    existing Base renderer and full CFM256x6+512x12 velocity network are kept,
+    since image generation is part of the teacher's parameter budget. This is
+    a configuration factory, not a migration or pretrained-weight loader.
+    """
+    codec = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config)
+    codec = asdict(VQGANConfig(**codec))
+    values = dict(kind='teacher', architecture='vjepa2_ac', image_size=128, endless=True,
+        renderer_mode='flow_matching', flow_steps=12, renderer_codec='vqgan',
+        renderer_codec_config=codec, flow_width=256, flow_depth=6, flow_heads=8,
+        flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
+        **TEACHER175_VQ_PROFILE)
+    values.update(overrides)
+    if (values['kind'] != 'teacher' or values['architecture'] != 'vjepa2_ac'
+            or values['renderer_codec'] != 'vqgan' or values['renderer_mode'] != 'flow_matching'):
+        raise ValueError('The175M profile requires a V-JEPA teacher, CFM and shared VQGAN')
+    return WorldModelConfig(**values)
 
 
 def student_vq_config(codec_config, **overrides):
