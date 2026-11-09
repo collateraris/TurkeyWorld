@@ -20,13 +20,16 @@ class LatentWorldExperiment(MassiveExperiment):
     STUDENT_PROFILE_NAME = 'vjepa_vq_rf_22m'
 
     def __init__(self, args):
-        self.codec_info = validate_frozen_codec(args.codec_checkpoint)
+        self.codec_options = {'accept_user_requested': True} if getattr(args, 'accept_current_codec', False) else {}
+        self.codec_info = validate_frozen_codec(args.codec_checkpoint, **self.codec_options)
         super().__init__(args)
         self.state.update(model='Compact V-JEPA 2-AC 500M / shared VQGAN / latent CFM → RF',
             teacher_size='500m_vqgan', codec_validation=self.codec_info['quality_gate'],
             codec_ready=self.codec_info,
             codec_training={'from_scratch': True, 'pretrained_codec_weights_loaded': False,
                 'parameters': self.codec_info['generator_parameters'], 'frozen': True,
+                'accepted_by_user': self.codec_info.get('accepted_by_user', False),
+                'quality_gate_passed': self.codec_info['quality_gate'].get('passed', False),
                 'consecutive_passes': self.codec_info['quality_gate']['consecutive_passes'],
                 'required_passes': self.codec_info['quality_gate']['required_passes'],
                 'current': self.codec_info['training_steps']},
@@ -47,7 +50,7 @@ class LatentWorldExperiment(MassiveExperiment):
 
     def create_initial_teacher(self, initial):
         return migrate_teacher_to_vq(self.args.source, self.args.codec_checkpoint, initial,
-            resume_output=self.root/'checkpoints'/'teacher500vq_world.pt')
+            resume_output=self.root/'checkpoints'/'teacher500vq_world.pt', **getattr(self, 'codec_options', {}))
 
     def check_stop(self, model, optimizer, phase, step, metrics):
         control = getattr(self.args, 'control_run_dir', None)
@@ -64,9 +67,12 @@ def main(argv=None):
         teacher_size='500m_vqgan')
     parser.add_argument('--codec-checkpoint', required=True, type=Path)
     parser.add_argument('--control-run-dir', type=Path)
+    parser.add_argument('--accept-current-codec', action='store_true',
+        help='Use a frozen codec explicitly accepted by the user without claiming its quality gate passed')
     args = parser.parse_args(argv)
     if min(args.pretrain_steps, args.world_repair_steps, args.world_patience, args.student_steps,
-           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.context, args.horizon) < 1:
+           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.context, args.horizon,
+           args.gradient_accumulation_steps, args.preview_every) < 1:
         parser.error('Counts must be positive')
     experiment = LatentWorldExperiment(args)
     atomic_json(experiment.root/'training.pid', os.getpid())

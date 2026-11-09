@@ -300,6 +300,8 @@ def main(argv=None):
     parser.add_argument('--student-steps', type=int, default=16000)
     parser.add_argument('--repair-steps', type=int, default=2000)
     parser.add_argument('--batch', type=int, default=1)
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--preview-every', type=int, default=10)
     parser.add_argument('--cache-mb', type=int, default=512)
     parser.add_argument('--visited-clips', type=int, default=256)
     parser.add_argument('--lr', type=float, default=5e-5)
@@ -324,7 +326,8 @@ def main(argv=None):
         adversarial_r1_interval=16, adversarial_lr=1e-4)
     args = parser.parse_args(argv)
     if min(args.pretrain_steps, args.world_repair_steps, args.world_patience, args.student_steps,
-           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.horizon, args.context) < 1:
+           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.horizon, args.context,
+           args.gradient_accumulation_steps, args.preview_every) < 1:
         parser.error('Counts must be positive')
     experiment = ExpandedExperiment(args)
     from .power_guard import KeepAwake

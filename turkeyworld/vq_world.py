@@ -51,16 +51,33 @@ def codec_fingerprint(codec):
     return digest.hexdigest()
 
 
-def _load_codec(path, require_qualified):
+def _quality_qualified(saved):
+    gate = saved.get('quality_gate', {})
+    required, consecutive = gate.get('required_passes', 3), gate.get('consecutive_passes', 0)
+    return (saved.get('stage') == 'frozen_vqgan_codec' and gate.get('passed') is True
+        and gate.get('frozen') is True and isinstance(required, int) and required >= 3
+        and isinstance(consecutive, int) and consecutive >= required)
+
+
+def _user_accepted(saved):
+    acceptance, gate = saved.get('quality_acceptance', {}), saved.get('quality_gate', {})
+    checks = gate.get('checks', {})
+    integrity = ('all_frames_finite', 'all_frames_in_range', 'quantization_finite',
+                 'valid_code_indices', 'codebook_broad_usage')
+    return (saved.get('stage') == 'frozen_vqgan_codec' and gate.get('frozen') is True
+        and acceptance.get('mode') == 'user_requested' and acceptance.get('accepted') is True
+        and bool(acceptance.get('reason')) and bool(acceptance.get('accepted_at'))
+        and isinstance(gate.get('passed'), bool)
+        and acceptance.get('quality_gate_passed') is gate.get('passed')
+        and all(checks.get(key) is True for key in integrity))
+
+
+def _load_codec(path, require_qualified, accept_user_requested=False):
     saved = torch.load(path, map_location='cpu', weights_only=False)
     if not isinstance(saved, dict) or 'codec_config' not in saved or 'model' not in saved:
         raise ValueError('A trained codec checkpoint with its configuration and weights is required')
     if require_qualified:
-        gate = saved.get('quality_gate', {})
-        required, consecutive = gate.get('required_passes', 3), gate.get('consecutive_passes', 0)
-        if (saved.get('stage') != 'frozen_vqgan_codec' or gate.get('passed') is not True
-                or gate.get('frozen') is not True or not isinstance(required, int) or required < 3
-                or not isinstance(consecutive, int) or consecutive < required):
+        if not (_quality_qualified(saved) or (accept_user_requested and _user_accepted(saved))):
             raise ValueError('Codec must pass and freeze after at least three consecutive quality checks')
     config = VQGANConfig(**saved['codec_config'])
     codec = VQGAN(config).eval().requires_grad_(False)
@@ -82,14 +99,16 @@ def _load_codec(path, require_qualified):
     return saved, codec, actual
 
 
-def validate_frozen_codec(checkpoint, *, require_qualified=True):
+def validate_frozen_codec(checkpoint, *, require_qualified=True, accept_user_requested=False):
     """Validate the compact codec alone, without loading a world checkpoint."""
-    saved, codec, fingerprint = _load_codec(checkpoint, require_qualified)
+    saved, codec, fingerprint = _load_codec(checkpoint, require_qualified, accept_user_requested)
     return {'checkpoint': str(Path(checkpoint).resolve()), 'codec_config': codec.get_config(),
         'codec_fingerprint': fingerprint, 'quality_gate': saved.get('quality_gate'),
         'latent_normalization': saved['latent_normalization'],
         'generator_parameters': sum(parameter.numel() for parameter in codec.parameters()),
-        'training_steps': int(saved.get('training_steps', 0)), 'qualified': bool(require_qualified)}
+        'training_steps': int(saved.get('training_steps', 0)), 'qualified': _quality_qualified(saved),
+        'quality_acceptance': saved.get('quality_acceptance'),
+        'accepted_by_user': bool(accept_user_requested and _user_accepted(saved))}
 
 
 def _pretrain_parameters(model):
@@ -156,7 +175,7 @@ def _save_new(path, payload):
 
 
 def migrate_teacher_to_vq(source_world_checkpoint500, frozen_codec_checkpoint, output_initial,
-                           resume_output=None, *, require_qualified=True):
+                           resume_output=None, *, require_qualified=True, accept_user_requested=False):
     """Retain the world core and warm-start compatible latent-renderer tensors.
 
     An incompatible resume request produces the initial artifact only, with an
@@ -169,7 +188,7 @@ def migrate_teacher_to_vq(source_world_checkpoint500, frozen_codec_checkpoint, o
     targets = [output]+([] if resume is None else [resume])
     if len(set(targets)) != len(targets) or any(path in (source_path, codec_path) or path.exists() for path in targets):
         raise FileExistsError('VQ migration requires distinct new output paths, separate from both sources')
-    saved_codec, codec, fingerprint = _load_codec(codec_path, require_qualified)
+    saved_codec, codec, fingerprint = _load_codec(codec_path, require_qualified, accept_user_requested)
     original, source = load_world_checkpoint(source_path, 'cpu')
     if (original.config.kind != 'teacher' or original.config.architecture != 'vjepa2_ac'
             or original.config.renderer_codec != 'pixel' or original.config.renderer_mode != 'flow_matching'):
@@ -216,7 +235,9 @@ def migrate_teacher_to_vq(source_world_checkpoint500, frozen_codec_checkpoint, o
     fresh = sorted(set(new)-set(retained)-set(interpolated))
     projected = [name for name in old if name not in retained and name not in interpolated]
     report = {'source_checkpoint': str(source_path), 'codec_checkpoint': str(codec_path),
-        'codec_fingerprint': fingerprint, 'codec_quality_verified': bool(require_qualified),
+        'codec_fingerprint': fingerprint, 'codec_quality_verified': _quality_qualified(saved_codec),
+        'codec_quality_accepted_by_user': bool(accept_user_requested and _user_accepted(saved_codec)),
+        'codec_quality_acceptance': saved_codec.get('quality_acceptance'),
         'source_generator_parameters': source_count, 'generator_parameters': count,
         'codec_parameters': sum(parameter.numel() for parameter in codec.parameters()),
         'retained_tensor_count': len(retained), 'retained_core_tensor_count': len(core_names),

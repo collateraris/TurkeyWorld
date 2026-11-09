@@ -237,6 +237,22 @@ consecutive passing checks**, measured in FP32. Completion time remains unknown
 until the gate passes. A codec checkpoint alone does not qualify the world model
 for five minutes of play or establish its FPS.
 
+The user can explicitly stop codec training and continue with its current
+reconstruction quality. This records `quality_acceptance.mode="user_requested"`
+and `quality_gate_passed=false`; the dashboard shows a separate amber acceptance
+status and retains the actual validation results. Automatic qualification still
+requires the three passing checks. To finalize the stopped run this way:
+
+```powershell
+& $twPython -m turkeyworld.finalize_vqgan `
+  --run-dir training_runs/vqgan_20261109 `
+  --data-dir training_runs/vjepa250_20261109/data --accept-current-quality
+```
+
+A direct world-training resume with this export also requires
+`--accept-current-codec`. User acceptance freezes the codec for continuation;
+it does not mark its reconstruction targets or the gameplay target as passed.
+
 After qualification, `codec_ready.json` records the frozen export
 `checkpoints/codec_for_renderer.pt`. With `--continue-world`, the controller
 migrates and resumes the preserved 500M world checkpoint in
@@ -261,8 +277,25 @@ To resume an already migrated latent world job directly:
 & $twPython -m turkeyworld.train_vq_world `
   --run-dir training_runs/vjepa500_vqgan_20261109 `
   --codec-checkpoint training_runs/vqgan_20261109/checkpoints/codec_for_renderer.pt `
-  --control-run-dir training_runs/vqgan_20261109
+  --control-run-dir training_runs/vqgan_20261109 `
+  --accept-current-codec --batch 1 --gradient-accumulation-steps 8 --preview-every 10
 ```
+
+Teacher and Student use microbatch 1 with **8 gradient accumulation steps**:
+the effective batch is 8 fragments per optimizer update. In short training
+phases the main counter counts optimizer updates. Long-rollout progress counts
+actual trajectory transitions; its global optimizer counter is shown separately.
+The preview interval and learning curves count optimizer updates; the monitor also
+shows the current microstep, such as 7/8, and total fragments consumed.
+Train loss is averaged over the accumulated group. Long TBPTT episodes flush
+their final group at the episode boundary, so that update can contain fewer
+than 8 fragments. `--gradient-accumulation-steps 1` preserves the earlier mode.
+
+ETA uses the measured time for a complete optimizer update, including its
+accumulated fragments. Accumulation increases work per update rather than
+providing a corresponding increase in sample throughput. JEPA covariance and
+variance regularizers are evaluated per microbatch, so their statistics differ
+from a single simultaneous batch of 8.
 
 The codec reconstruction panel permits its Source input. The later
 `free_rollout` world preview receives initial context and controls only;
@@ -358,10 +391,17 @@ ongoing data generation separately, including real counts, phase-specific loss
 curves, dynamics failures/coverage, parameter counts, EMA/discriminator size,
 checkpoints, and independent gameplay results. Missing metrics remain missing.
 
-**Every 500 global optimizer updates**, `preview.png` is refreshed with the
-initial context, future Source images, and the model's own predictions. Future
-Source is displayed for comparison and does not correct the rollout. An
-optimizer update may represent several simulated transitions in TBPTT.
+In the current latent world run, **every 10 global optimizer updates**, a light
+four-window `preview.png` refreshes the **«Что показывает модель»** panel with
+initial context, future Source images, and the model's own predictions.
+`--preview-every 10` sets this cadence. Full quality validation on 256 held-out
+frames and plateau checks remain **every 500 optimizer updates**. A preview does
+not count as a passing quality check. The displayed generation step stays the
+actual saved step when a new cadence is configured before the next image.
+Future Source is displayed for comparison and does not correct the rollout.
+An optimizer update may represent several simulated transitions in TBPTT;
+gradient accumulation is 8, so ten full updates process 80 fragments. The codec reconstruction preview retains its
+separate 500-update validation cadence.
 
 Request a graceful stop at the next safe checkpoint boundary:
 

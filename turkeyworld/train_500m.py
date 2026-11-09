@@ -32,6 +32,8 @@ def build_parser():
     parser.add_argument('--student-steps', type=int, default=16000)
     parser.add_argument('--repair-steps', type=int, default=2000)
     parser.add_argument('--batch', type=int, default=1)
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--preview-every', type=int, default=10)
     parser.add_argument('--cache-mb', type=int, default=512)
     parser.add_argument('--visited-clips', type=int, default=256)
     parser.add_argument('--minimum-train-clips', type=int, default=8192)
@@ -62,7 +64,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if min(args.pretrain_steps, args.world_repair_steps, args.world_patience, args.student_steps,
-           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.context, args.horizon) < 1:
+           args.repair_steps, args.batch, args.cache_mb, args.chunk, args.context, args.horizon,
+           args.gradient_accumulation_steps, args.preview_every) < 1:
         parser.error('Counts must be positive')
     experiment = MassiveExperiment(args)
     try:

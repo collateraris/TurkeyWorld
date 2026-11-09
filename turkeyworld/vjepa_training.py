@@ -136,7 +136,7 @@ class VJEPAExperiment(Experiment):
         self.state.update(model='Compact V-JEPA 2-AC 125M / Flow Matching → Rectified Flow',
             teacher_world_architecture='vjepa2_ac_compact', teacher_size='125m',
             prediction_preview=None, estimated_total_range_seconds=None, eta_seconds=None,
-            prediction_every=500, target_rollout_steps=9000,
+            prediction_every=self.preview_interval(), target_rollout_steps=9000,
             first_cycle_estimate={'range_seconds': [14400, 21600],
                 'scope': 'First teacher plateau handoff plus16000 student updates and long evaluations; excludes repair rounds',
                 'teacher_seconds_per_update': 2.76, 'student_seconds_per_update': .405,
@@ -149,6 +149,32 @@ class VJEPAExperiment(Experiment):
         self.state['teacher_plateau'] = {'enabled': True, 'patience': args.plateau_patience,
             'min_relative_improvement': args.plateau_delta, 'check_every': 500, 'bad_checks': 0}
         self.state['model_parameters'] = {'target_teacher_total': 125000000}
+        accumulation = self.accumulation_steps()
+        batch_size = getattr(args, 'batch', 1)
+        self.state['training_protocol'].update(gradient_accumulation_steps=accumulation,
+            microbatch_size=batch_size, effective_batch_size=batch_size*accumulation,
+            step_unit='optimizer_updates', loss_aggregation='mean_of_microbatches')
+
+    def accumulation_steps(self):
+        value = getattr(self.args, 'gradient_accumulation_steps', 1)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError('gradient_accumulation_steps must be a positive integer')
+        return value
+
+    def preview_interval(self):
+        value = getattr(self.args, 'preview_every', 500)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError('preview_every must be a positive integer')
+        return value
+
+    def publish_accumulation(self, microstep, status, *, group_size=None, microbatch_size=None):
+        batch = getattr(self.args, 'batch', 1) if microbatch_size is None else microbatch_size
+        accumulation = self.accumulation_steps()
+        self.state['training_batch'] = {'microbatch_size': batch,
+            'gradient_accumulation_steps': accumulation, 'effective_batch_size': batch*accumulation,
+            'microstep': microstep, 'group_size': group_size or accumulation,
+            'optimizer_step': self.global_step, 'status': status,
+            'fragments_seen': getattr(self, 'fragments_seen', self.global_step*getattr(self.args, 'batch', 1))}
 
     def _publish_model_sizes(self, model):
         super()._publish_model_sizes(model)
@@ -157,7 +183,13 @@ class VJEPAExperiment(Experiment):
             self.state['model_parameters']['ema_target_total'] = self.ema.parameter_count
 
     def save(self, model, optimizer, phase, step, metrics, extra=None):
+        batch_state = self.state.get('training_batch', {})
+        if batch_state.get('status') == 'accumulating' and batch_state.get('microstep', 0):
+            raise ValueError('Checkpoint requires a completed optimizer update, not pending microbatch gradients')
         additional = {**self.extra, 'global_training_step': self.global_step}
+        additional['training_counters'] = {'optimizer_updates': self.global_step,
+            'fragments_seen': getattr(self, 'fragments_seen', self.global_step*getattr(self.args, 'batch', 1)),
+            'gradient_accumulation_steps': self.accumulation_steps(), 'pending_microbatches': 0}
         if self.ema is not None:
             additional['ema_target_encoder'] = self.ema.state_dict()
         additional.update(extra or {})
@@ -172,6 +204,11 @@ class VJEPAExperiment(Experiment):
             if phase.startswith('student') and saved.get('teacher_fingerprint') != self.state.get('teacher_fingerprint'):
                 return 0
             self.global_step = max(self.global_step, int(saved.get('global_training_step', 0)))
+            counters = saved.get('training_counters', {})
+            if counters.get('pending_microbatches', 0):
+                raise ValueError('Checkpoint contains an incomplete gradient accumulation group')
+            self.fragments_seen = max(getattr(self, 'fragments_seen', 0),
+                int(counters.get('fragments_seen', self.global_step*getattr(self.args, 'batch', 1))))
             preview_path = self.root/'preview.json'
             if preview_path.exists():
                 previous_preview = json.loads(preview_path.read_text(encoding='utf-8'))
@@ -182,6 +219,17 @@ class VJEPAExperiment(Experiment):
                 self.ema.load_state_dict(saved['ema_target_encoder'])
             self.extra = {name: saved[name] for name in ('teacher_plateau', 'teacher_handoff_reason', 'teacher_selection', 'quality_streak', 'phase_complete',
                           'long_curriculum_state') if name in saved}
+            quality_path = self.root/f'{model.config.kind}_vjepa_quality_report.json'
+            if quality_path.exists():
+                previous_quality = json.loads(quality_path.read_text(encoding='utf-8'))
+                checked_step = int(previous_quality.get('global_training_step', previous_quality.get('step', -1)))
+                specification = previous_quality.get('panel', {})
+                if (previous_quality.get('kind') == 'free_rollout' and 0 <= checked_step <= self.global_step
+                        and previous_quality.get('thresholds') == self.quality_thresholds()
+                        and json.dumps(specification.get('model_config'), sort_keys=True) == json.dumps(asdict(model.config), sort_keys=True)):
+                    self.state['visual_quality'] = previous_quality
+                    self.state['validation_progress'] = {'status': 'complete', 'step': checked_step,
+                        'frames': previous_quality['summary']['frames'], 'seconds': previous_quality['seconds']}
         return step
 
     def check_stop(self, model, optimizer, phase, step, metrics):
@@ -204,7 +252,7 @@ class VJEPAExperiment(Experiment):
         if preview:
             contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'])
             self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-                step=self.global_step, every=500)
+                step=self.global_step, every=self.preview_interval())
         self.state['visual_quality'] = report
         self.state['validation_progress'] = {'status': 'complete', 'step': self.global_step, 'frames': 256,
                                               'seconds': report['seconds']}
@@ -220,9 +268,38 @@ class VJEPAExperiment(Experiment):
         self.metric({'stage': self.state['stage'], 'step': self.global_step, 'validation': report['summary']})
         return report
 
+    def prediction_preview_report(self, model):
+        """A small real free rollout; never advances the quality/plateau clocks."""
+        from .vjepa_validation import evaluate_autoregressive, save_autoregressive_preview
+        panel = self.panel[:4]
+        if not panel:
+            raise ValueError('A held-out panel is required for world prediction previews')
+        interval = self.preview_interval()
+        self.state.update(global_training_step=self.global_step, prediction_every=interval,
+            prediction_progress={'status': 'running', 'step': self.global_step,
+                'frames': len(panel)*self.args.horizon})
+        atomic_json(self.root/'status.json', self.state)
+        report, contact = evaluate_autoregressive(model, self.validation, panel,
+            context=self.args.context, horizon=self.args.horizon, batch_size=1,
+            thresholds=self.quality_thresholds(), seed=self.args.seed,
+            step=self.global_step, preview_every=interval)
+        contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
+            scope='training_preview', quality_gate_evaluated=False)
+        self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
+            step=self.global_step, every=interval)
+        self.state['prediction_progress'] = {'status': 'complete', 'step': self.global_step,
+            'frames': len(panel)*self.args.horizon, 'seconds': report['seconds']}
+        atomic_json(self.root/'status.json', self.state)
+        return report
+
     def preview_if_due(self, model):
-        if self.global_step and self.global_step % 500 == 0:
-            self.validation_report(model)
+        if not self.global_step:
+            return None
+        if self.global_step % 500 == 0:
+            return self.validation_report(model)
+        if self.global_step % self.preview_interval() == 0:
+            self.prediction_preview_report(model)
+        return None
 
     def record_teacher_best(self, model, optimizer, phase, step, metrics, report):
         best = self.save(model, optimizer, phase+'_best', step, metrics)
@@ -269,37 +346,68 @@ class VJEPAExperiment(Experiment):
                  'Студент: V-JEPA / Rectified Flow / дистилляция')
         self.update(phase, completed, steps, label, global_training_step=self.global_step,
                     message='Обучение на собственных состояниях; будущие RGB используются только как цели')
+        if (self.preview_interval() < 500 and
+                (self.state.get('prediction_preview') or {}).get('every') != self.preview_interval()):
+            self.prediction_preview_report(model)
         model.train()
         started, initial_step, metrics = time.perf_counter(), completed, {}
         step = completed
+        accumulation = self.accumulation_steps()
+        if not hasattr(self, 'fragments_seen'):
+            self.fragments_seen = self.global_step*self.args.batch
         while steps is None or step < steps:
             self.check_stop(model, optimizer, phase, step, metrics)
             step += 1
-            batch = data.batch(self.args.batch, context=self.args.context, horizon=self.args.horizon, rng=self.rng)
             optimizer.zero_grad(set_to_none=True)
-            with self.amp(cache_enabled=False):
-                loss_function = getattr(self, 'loss_function', short_rollout_loss)
-                loss, metrics, endpoint = loss_function(model, self.ema, batch, context=self.args.context,
-                    render=not pretrain, teacher=teacher, distill_endpoint=teacher is not None and step % 4 == 0)
-                generated = None
-                if not pretrain:
-                    generated = model.flow_renderer.sample(endpoint['base'][:1], endpoint['state'][:1])
-                    loss = loss + .5*F.l1_loss(generated.float(), endpoint['target'][:1])
-            if generated is not None:
-                gan_loss, gan_metrics = self._adversarial_loss(generated, endpoint['target'][:1],
-                    endpoint['base'][:1], endpoint['state'][:1])
-                loss = loss+gan_loss
-                metrics.update(gan_metrics)
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f'Nonfinite {phase} loss at {step}')
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            from .gradient_accumulation import MetricMean
+            averaged = MetricMean()
+            for microstep in range(accumulation):
+                batch = data.batch(self.args.batch, context=self.args.context, horizon=self.args.horizon, rng=self.rng)
+                with self.amp(cache_enabled=False):
+                    loss_function = getattr(self, 'loss_function', short_rollout_loss)
+                    loss, micro_metrics, endpoint = loss_function(model, self.ema, batch, context=self.args.context,
+                        render=not pretrain, teacher=teacher, distill_endpoint=teacher is not None and step % 4 == 0)
+                    generated = None
+                    if not pretrain:
+                        generated = model.flow_renderer.sample(endpoint['base'][:1], endpoint['state'][:1])
+                        loss = loss + .5*F.l1_loss(generated.float(), endpoint['target'][:1])
+                if generated is not None:
+                    options = {'accumulation_steps': accumulation, 'microstep': microstep} if accumulation > 1 else {}
+                    gan_loss, gan_metrics = self._adversarial_loss(generated, endpoint['target'][:1],
+                        endpoint['base'][:1], endpoint['state'][:1], **options)
+                    loss = loss+gan_loss
+                    micro_metrics.update(gan_metrics)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f'Nonfinite {phase} loss at {step}, microbatch {microstep+1}')
+                (loss/accumulation).backward()
+                micro_metrics.update(train_loss=float(loss.detach()), optimization_loss=float(loss.detach()))
+                averaged.add(micro_metrics)
+                self.fragments_seen += self.args.batch
+                self.publish_accumulation(microstep+1, 'accumulating')
+                if accumulation > 1:
+                    self.state.update(updated_at=now(), elapsed_seconds=round(time.time()-self.started, 1),
+                        loss=averaged.mean()['train_loss'], current=step-1, global_training_step=self.global_step)
+                    atomic_json(self.root/'status.json', self.state)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
             optimizer.step()
             self.ema.update(model.core.encoder)
             self.global_step += 1
-            metrics['train_loss'] = metrics['optimization_loss'] = float(loss.detach())
+            self.publish_accumulation(accumulation, 'updated')
+            metrics = averaged.mean()
+            for name in ('step', 'completed_updates', 'optimizer_updated', 'accumulation_microstep', 'accumulation_steps'):
+                key = 'adversarial_'+name
+                if key in micro_metrics:
+                    metrics[key] = micro_metrics[key]
+            metrics.update(gradient_accumulation_steps=accumulation, microbatch_size=self.args.batch,
+                effective_batch_size=self.args.batch*accumulation, fragments_seen=self.fragments_seen,
+                loss_aggregation='mean_of_microbatches')
+            if accumulation > 1:
+                self.update(phase, step, steps, label, global_training_step=self.global_step, loss=metrics['train_loss'])
+            control = getattr(self.args, 'control_run_dir', None)
+            if (self.root/'stop_training').exists() or (control and (control/'stop_training').exists()):
+                self.check_stop(model, optimizer, phase, step, metrics)
             due = self.global_step % 500 == 0
-            report = self.validation_report(model) if due else None
+            report = self.preview_if_due(model)
             if quality and report is not None:
                 self.observe_teacher_validation(model, optimizer, phase, step, metrics, report)
             model.train()
@@ -393,30 +501,47 @@ class VJEPAExperiment(Experiment):
         completed = self.restore(model, optimizer, phase)
         if self.extra.get('phase_complete'):
             return
+        if not hasattr(self, 'fragments_seen'):
+            self.fragments_seen = self.global_step*getattr(self.args, 'batch', 1)
         def callback(progress):
             nonlocal completed
-            completed += 1
-            self.global_step += 1
-            self.ema.update(model.core.encoder)
-            self.extra['long_curriculum_state'] = progress['resume_state']
+            inner = progress.get('chunk', {})
+            updated = inner.get('optimizer_updated', True)
+            self.fragments_seen += 1
+            if updated:
+                completed += 1
+                self.global_step += 1
+                self.ema.update(model.core.encoder)
+                self.extra['long_curriculum_state'] = progress['resume_state']
+            self.publish_accumulation(inner.get('accumulation_microstep', 1),
+                'updated' if updated else 'accumulating',
+                group_size=inner.get('accumulation_group_size', self.accumulation_steps()), microbatch_size=1)
             metrics = progress['metrics']
-            self.preview_if_due(model)
+            if updated and inner.get('optimizer_group_loss') is not None:
+                metrics = {**metrics, 'loss': inner['optimizer_group_loss'],
+                    'train_loss': inner['optimizer_group_loss'], 'loss_aggregation': 'mean_of_tbptt_chunks'}
+            if updated:
+                self.preview_if_due(model)
             model.train()
             self.update(phase, progress['completed_transitions'], progress['total_transitions'],
                 ('Учитель' if kind == 'teacher' else 'Студент')+': автономные последовательности до 9 000 переходов',
                 global_training_step=self.global_step, rollout_horizon=progress['horizon'],
                 loss=metrics.get('loss'), eta_seconds=progress.get('eta_seconds'),
                 message='TBPTT обрезает граф, но сохраняет собственные состояния и память без исправлений')
-            if completed % self.args.log_every == 0:
-                self.metric({'stage': phase, 'step': completed, 'global_training_step': self.global_step, **metrics})
-            if completed == 1 or completed % self.args.save_every == 0 or self.global_step % 500 == 0:
+            if updated and completed % self.args.log_every == 0:
+                self.metric({'stage': phase, 'step': completed, 'global_training_step': self.global_step,
+                    'gradient_accumulation_steps': self.accumulation_steps(), 'microbatch_size': 1,
+                    'effective_batch_size': self.accumulation_steps(), 'fragments_seen': self.fragments_seen, **metrics})
+            if updated and (completed == 1 or completed % self.args.save_every == 0 or self.global_step % 500 == 0):
                 self.save(model, optimizer, phase, completed, metrics)
-            self.check_stop(model, optimizer, phase, completed, metrics)
+            if updated:
+                self.check_stop(model, optimizer, phase, completed, metrics)
+        options = {'gradient_accumulation_steps': self.accumulation_steps()} if self.accumulation_steps() > 1 else {}
         report = train_curriculum(model, self.root/'data'/'long'/'train', optimizer,
             device=self.device, chunk_size=self.args.chunk, resume=self.extra.get('long_curriculum_state'),
             on_chunk=callback, seed=self.args.seed, return_directory=self.root/'data'/'memory',
             amp_dtype=torch.bfloat16 if self.device.type == 'cuda' else None,
-            aligned_supervision=getattr(self.args, 'aligned_supervision', False))
+            aligned_supervision=getattr(self.args, 'aligned_supervision', False), **options)
         public_report = {key: value for key, value in report.items() if key != 'resume_state'}
         atomic_json(self.root/f'{kind}_vjepa_long_training.json', public_report)
         self.extra.update(phase_complete=True, long_curriculum_state=report['resume_state'])
@@ -631,6 +756,8 @@ def main(argv=None):
     parser.add_argument('--student-steps', type=int, default=16000)
     parser.add_argument('--repair-steps', type=int, default=2000)
     parser.add_argument('--batch', type=int, default=2)
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--preview-every', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--ema', type=float, default=.996)
     parser.add_argument('--context', type=int, default=2)
@@ -654,7 +781,7 @@ def main(argv=None):
     if args.source is None:
         args.source = args.run_dir/'checkpoints'/'teacher_quality_75m.pt'
     if min(args.pretrain_steps, args.student_steps, args.repair_steps, args.batch, args.context, args.horizon, args.chunk,
-           args.log_every, args.save_every, args.quality_passes) < 1:
+           args.log_every, args.save_every, args.quality_passes, args.gradient_accumulation_steps, args.preview_every) < 1:
         parser.error('Training counts must be positive')
     experiment = VJEPAExperiment(args)
     try:

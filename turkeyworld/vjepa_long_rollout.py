@@ -282,13 +282,16 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
                                 resume=None, on_chunk=None, grad_clip=1., amp_dtype=None,
                                 collision_weight=1., memory_weight=2., motion_weight=5.,
                                 event_weight=1., state_weight=10., render_every=0,
-                                render_weight=1., capture_trace=False, aligned_supervision=False):
+                                render_weight=1., capture_trace=False, aligned_supervision=False,
+                                gradient_accumulation_steps=1):
     """Train/evaluate a continuous own-prediction rollout, with resumable TBPTT.
 
     ``horizon`` counts transitions from ``prefix_start``. An explicit horizon
     exceeding the recording raises, rather than quietly claiming 9000 steps.
-    Callback payloads contain ``resume`` with detached CPU state/memory/offset,
-    cumulative metrics and RNG state. Returning False stops after that chunk.
+    Callback payloads contain a checkpointable ``resume`` only after an optimizer
+    flush (or in evaluation). Every chunk detaches its graph; optimizer groups
+    average chunk losses, including correctly sized final partial groups.
+    Returning False within a group defers stopping until its next safe flush.
     Restoring a resume never reinitializes from source state, images or memory.
     The caller owns model/optimizer checkpoint restoration before resuming.
     """
@@ -296,6 +299,8 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
     count = len(actions)
     if not 0 <= prefix_start < count or chunk_size < 1 or not math.isfinite(grad_clip) or grad_clip <= 0:
         raise ValueError("Invalid prefix, chunk size or gradient limit")
+    if not isinstance(gradient_accumulation_steps, int) or gradient_accumulation_steps < 1:
+        raise ValueError('Gradient accumulation steps must be a positive integer')
     horizon = count - prefix_start if horizon is None else int(horizon)
     if horizon < 1 or prefix_start + horizon > count:
         raise ValueError("Requested autonomous horizon does not fit the continuous episode")
@@ -329,6 +334,13 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
     names = ("state", "motion", "memory", "events", "target", "attack", "spawn", "collision", "image", "loss")
     sums = {name: 0. for name in names}
     if resume is not None:
+        saved_accumulation = int(resume.get('gradient_accumulation_steps', 1))
+        if (saved_accumulation != gradient_accumulation_steps
+                or int(resume.get('accumulation_microstep', 0)) != 0
+                or (saved_accumulation > 1 and 'chunk_size' in resume and int(resume['chunk_size']) != chunk_size)):
+            raise ValueError('Resume accumulation protocol differs or contains partial gradients')
+        if gradient_accumulation_steps > 1 and resume.get('horizon') != horizon:
+            raise ValueError('Resume accumulation protocol uses a different horizon')
         if bool(resume.get('aligned_supervision', False)) != bool(aligned_supervision):
             raise ValueError('Resume supervision protocol differs from this rollout')
         if resume.get("format_version") != 1 or resume.get("episode_key") != signature or resume.get("prefix_start") != prefix_start:
@@ -366,6 +378,9 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
     training = optimizer is not None
     model.train(training)
     optimizer_steps = map_calls = 0
+    accumulation_microstep, accumulation_group_size = 0, 0
+    accumulation_group_loss = 0.
+    accumulation_groups = []
     trace, boundaries = [], []
     interrupted = False
     stop_requested = False
@@ -373,8 +388,12 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
     previous_end_state = previous_end_memory = None
 
     def resume_payload():
+        if accumulation_microstep:
+            raise ValueError('Partial accumulated gradients cannot be checkpointed')
         return {"format_version": 1, "episode_key": signature, "prefix_start": prefix_start,
                 "aligned_supervision": bool(aligned_supervision),
+                'gradient_accumulation_steps': gradient_accumulation_steps,
+                'accumulation_microstep': 0, 'chunk_size': chunk_size,
                 "offset": offset, "horizon": horizon, "state": _detached(current, cpu=True),
                 "memory": _detached(memory, cpu=True), "predicted_states": torch.cat(history).clone(),
                 "auxiliary_memory": _detached(auxiliary_memory, cpu=True),
@@ -394,8 +413,12 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
             boundaries.append(boundary)
             entry = {"offset": offset, "input_state": _detached(current, cpu=True),
                      "input_memory": _detached(memory, cpu=True)} if capture_trace else None
-            if training:
+            if training and accumulation_microstep == 0:
+                remaining_chunks = math.ceil((horizon-offset)/chunk_size)
+                accumulation_group_size = min(gradient_accumulation_steps, remaining_chunks)
+                accumulation_group_loss = 0.
                 optimizer.zero_grad(set_to_none=True)
+            optimizer_updated = False
             model.train(training)
             context = torch.enable_grad() if training else torch.no_grad()
             autocast = torch.autocast(device.type, dtype=amp_dtype) if amp_dtype is not None else nullcontext()
@@ -457,11 +480,15 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError("Non-finite autonomous rollout loss; carried state was not reset")
                 if training:
-                    loss.backward()
-                    nn.utils.clip_grad_norm_([parameter for parameter in model.parameters() if parameter.requires_grad], grad_clip,
-                                             error_if_nonfinite=True)
-                    optimizer.step()
-                    optimizer_steps += 1
+                    accumulation_group_loss += float(loss.detach())/accumulation_group_size
+                    (loss/accumulation_group_size).backward()
+                    accumulation_microstep += 1
+                    if accumulation_microstep == accumulation_group_size:
+                        nn.utils.clip_grad_norm_([parameter for parameter in model.parameters() if parameter.requires_grad], grad_clip,
+                                                 error_if_nonfinite=True)
+                        optimizer.step()
+                        optimizer_steps += 1
+                        optimizer_updated = True
             for key, value in normalized.items():
                 sums[key] += float(value.detach()) * length
             sums["loss"] += float(loss.detach()) * length
@@ -473,14 +500,25 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
             if entry is not None:
                 entry.update(output_state=_detached(current, cpu=True), output_memory=_detached(memory, cpu=True))
                 trace.append(entry)
+            reported_microstep = accumulation_microstep
+            if optimizer_updated:
+                accumulation_groups.append(accumulation_group_size)
+                accumulation_microstep = 0
+            checkpoint_safe = not training or optimizer_updated
             if on_chunk is not None:
                 payload = {"offset": offset, "steps": length, "horizon": horizon,
                            "optimizer_steps": optimizer_steps, "metrics": {key: value / offset for key, value in sums.items()},
+                           'optimizer_updated': optimizer_updated, 'checkpoint_safe': checkpoint_safe,
+                           'accumulation_microstep': reported_microstep,
+                           'accumulation_steps': gradient_accumulation_steps,
+                           'accumulation_group_size': accumulation_group_size if training else 0,
+                           'optimizer_group_loss': accumulation_group_loss if optimizer_updated else None,
                            "chunk_metrics": {**{key: float(value.detach()) for key, value in normalized.items()}, "loss": float(loss.detach())},
-                           "resume": resume_payload(), "boundary": boundary,
+                           "resume": resume_payload() if checkpoint_safe else None, "boundary": boundary,
                            "state": current, "memory": memory}
                 if on_chunk(payload) is False:
                     stop_requested = True
+                if stop_requested and checkpoint_safe:
                     interrupted = offset < horizon
                     break
     finally:
@@ -495,6 +533,9 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
                             "rollout_steps": offset, "steps_this_call": offset - started_offset,
                             "chunk_size": chunk_size, "chunk_boundaries": boundaries,
                             "optimizer_steps": optimizer_steps, "map_encoder_calls": map_calls,
+                            'gradient_accumulation_steps': gradient_accumulation_steps,
+                            'accumulation_group_sizes': accumulation_groups,
+                            'pending_accumulation_microsteps': accumulation_microstep,
                             "ground_truth_initializations_this_call": initializations,
                             "source_image_initializations_this_call": initializations,
                             "future_state_feedback": False, "future_image_feedback": False,
@@ -657,20 +698,22 @@ def _corpus_files(directory, *, endless):
 def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_size=32,
                      resume=None, on_chunk=None, seed=73, return_directory=None, *,
                      schedule=CURRICULUM_SCHEDULE, amp_dtype=None, capture_trace=False,
-                     aligned_supervision=False):
+                     aligned_supervision=False, gradient_accumulation_steps=1):
     """Run the actual 14,888-transition curriculum for either teacher or student.
 
     A 9000-step task is selected only from a recording that really contains
     that many transitions. Short return probes alternate with long recordings
     for the short horizons. Validation probes are generated but never sampled.
     ``on_chunk`` receives ``resume_state``, real cumulative metrics, transition
-    counts, current horizon and a measured ETA. Returning False pauses at the
-    just-completed, checkpointable graph boundary.
+    counts, current horizon and a measured ETA. Only optimizer flushes have a
+    checkpointable resume_state; a mid-group stop request waits for that flush.
     """
     from .long_train import load_episode
     schedule = tuple(int(horizon) for horizon in schedule)
     if not schedule or min(schedule) < 1 or chunk_size < 1:
         raise ValueError("Curriculum horizons and chunk size must be positive")
+    if not isinstance(gradient_accumulation_steps, int) or gradient_accumulation_steps < 1:
+        raise ValueError('Gradient accumulation steps must be a positive integer')
     long_directory = Path(long_directory).resolve()
     return_directory = Path(return_directory).resolve() if return_directory else long_directory.parents[1] / "return"
     endless = bool(getattr(model.config, "endless", False))
@@ -695,6 +738,10 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
         plan.append({"kind": kind, "path": chosen["path"], "horizon": horizon, "prefix_start": prefix})
     total = sum(schedule)
     if resume is not None:
+        if (int(resume.get('gradient_accumulation_steps', 1)) != gradient_accumulation_steps
+                or int(resume.get('accumulation_microstep', 0)) != 0
+                or (gradient_accumulation_steps > 1 and 'chunk_size' in resume and int(resume['chunk_size']) != chunk_size)):
+            raise ValueError('Curriculum resume accumulation protocol differs or contains partial gradients')
         if (resume.get("format_version") != 1 or resume.get("dataset_fingerprint") != fingerprint
                 or resume.get("seed") != seed or tuple(resume.get("schedule", ())) != schedule
                 or resume.get("plan") != plan):
@@ -713,10 +760,13 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
     last_progress_metrics = None
     reports = []
     interrupted = False
+    optimizer_steps = 0
 
     def wrapper_resume(index, inner):
         return {"format_version": 1, "dataset_fingerprint": fingerprint, "seed": seed,
                 "schedule": list(schedule), "plan": plan, "task_index": index,
+                'gradient_accumulation_steps': gradient_accumulation_steps,
+                'accumulation_microstep': 0, 'chunk_size': chunk_size,
                 "task_resume": inner, "finished_metric_sums": dict(finished_sums)}
 
     while task_index < len(plan):
@@ -728,11 +778,18 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
             done = completed_before + progress["offset"]
             metrics = {key: (finished_sums.get(key, 0.) + value * progress["offset"]) / max(1, done)
                        for key, value in progress["metrics"].items()}
-            last_state = wrapper_resume(task_index, progress["resume"])
+            last_state = wrapper_resume(task_index, progress['resume']) if progress['checkpoint_safe'] else None
             last_progress_metrics = metrics
             advanced = done - start_completed
             eta = (time.perf_counter() - started) / advanced * (total - done) if advanced > 0 else None
             payload = {"resume_state": last_state, "metrics": metrics,
+                       'optimizer_updated': progress['optimizer_updated'],
+                       'checkpoint_safe': progress['checkpoint_safe'],
+                       'accumulation_microstep': progress['accumulation_microstep'],
+                       'accumulation_steps': gradient_accumulation_steps,
+                       'accumulation_group_size': progress['accumulation_group_size'],
+                       'optimizer_group_loss': progress['optimizer_group_loss'],
+                       'optimizer_steps': optimizer_steps+progress['optimizer_steps'],
                        "completed_transitions": done, "total_transitions": total,
                        "horizon": task["horizon"], "eta_seconds": eta,
                        "task_index": task_index, "task_count": len(plan), "episode_kind": task["kind"],
@@ -742,7 +799,8 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
         report = train_autoregressive_episode(model, episode, optimizer, horizon=task["horizon"],
             prefix_start=task["prefix_start"], chunk_size=chunk_size, device=device,
             resume=task_resume, on_chunk=callback, amp_dtype=amp_dtype, capture_trace=capture_trace,
-            aligned_supervision=aligned_supervision)
+            aligned_supervision=aligned_supervision, gradient_accumulation_steps=gradient_accumulation_steps)
+        optimizer_steps += report['declaration']['optimizer_steps']
         reports.append({"task": task, "metrics": report["metrics"], "memory_metrics": report["memory_metrics"],
                         "declaration": report["declaration"]})
         if report["declaration"]["interrupted"]:
@@ -766,5 +824,7 @@ def train_curriculum(model, long_directory, optimizer=None, device=None, chunk_s
                             "autonomous_9000_step_task_completed": not interrupted and 9000 in schedule and task_index == len(plan),
                             "teacher_forced_future_inputs": 0, "chunk_size": chunk_size,
                             "aligned_auxiliary_supervision": bool(aligned_supervision),
+                            'gradient_accumulation_steps': gradient_accumulation_steps,
+                            'optimizer_steps': optimizer_steps,
                             "validation_episodes_used_for_training": 0, "interrupted": interrupted,
                             "seconds": time.perf_counter() - started}}

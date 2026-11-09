@@ -89,11 +89,19 @@ def recover_migration(initial, resume, lineage, source, fingerprint):
 
 def continue_world_after_codec(codec_path, args):
     # Validate before touching the former world job or creating any process.
-    info = validate_frozen_codec(codec_path)
+    accepted = bool(getattr(args, 'accept_current_codec', False))
+    codec_options = {'accept_user_requested': True} if accepted else {}
+    info = validate_frozen_codec(codec_path, **codec_options)
     control = args.run_dir.resolve()
     source_root = args.world_source_run.resolve()
     world = Path(getattr(args, 'world_run_dir', None) or
         control.parent/'vjepa500_vqgan_20261109').resolve()
+    previous_config_path = world/'experiment_config500vq.json'
+    previous_config = json.loads(previous_config_path.read_text(encoding='utf-8')) if previous_config_path.exists() else {}
+    accumulation = getattr(args, 'gradient_accumulation_steps', None)
+    accumulation = previous_config.get('gradient_accumulation_steps', 1) if accumulation is None else accumulation
+    if not isinstance(accumulation, int) or isinstance(accumulation, bool) or accumulation < 1:
+        raise ValueError('gradient_accumulation_steps must be a positive integer')
     if world in (control, source_root):
         raise ValueError('Latent world run needs a separate run directory')
     if (control/'stop_training').exists():
@@ -126,7 +134,7 @@ def continue_world_after_codec(codec_path, args):
                 Path(report['source_checkpoint']).resolve() != source):
             raise ValueError('Existing world run uses a different frozen codec')
     else:
-        report = migrate_teacher_to_vq(source, codec_path, initial, resume_output=resume)
+        report = migrate_teacher_to_vq(source, codec_path, initial, resume_output=resume, **codec_options)
         atomic_json(lineage, report)
     panel = source_root/'validation_panel500.json'
     frozen_panel = world/'validation_panel500vq.json'
@@ -150,6 +158,19 @@ def continue_world_after_codec(codec_path, args):
     command = [sys.executable, '-X', 'utf8', '-u', '-m', 'turkeyworld.train_vq_world',
         '--run-dir', str(world), '--source', str(source), '--codec-checkpoint', str(Path(codec_path).resolve()),
         '--control-run-dir', str(control), '--device', args.device]
+    if accepted:
+        command.append('--accept-current-codec')
+    if accumulation > 1:
+        command.extend(['--gradient-accumulation-steps', str(accumulation)])
+    if getattr(args, 'preview_every', None) is not None:
+        if args.preview_every < 1:
+            raise ValueError('preview_every must be positive')
+        command.extend(['--preview-every', str(args.preview_every)])
+    elif 'preview_every' in previous_config:
+        command.extend(['--preview-every', str(previous_config['preview_every'])])
+    for name, default in (('log_every', 10), ('save_every', 250)):
+        if previous_config.get(name, default) != default:
+            command.extend(['--'+name.replace('_', '-'), str(previous_config[name])])
     env = os.environ.copy()
     env.update(OMP_NUM_THREADS='4', MKL_NUM_THREADS='4')
     workspace = Path(__file__).resolve().parent.parent
@@ -157,6 +178,8 @@ def continue_world_after_codec(codec_path, args):
         'stage': 'initializing', 'stage_label': 'Запуск учителя с общим замороженным VQGAN',
         'codec_ready': info, 'codec_validation': info['quality_gate'],
         'codec_training': {'frozen': True, 'from_scratch': True,
+            'accepted_by_user': info.get('accepted_by_user', False),
+            'quality_gate_passed': info['quality_gate'].get('passed', False),
             'consecutive_passes': info['quality_gate']['consecutive_passes'],
             'required_passes': info['quality_gate']['required_passes']},
         'evaluation': {'status': 'pending', 'target_seconds': 300, 'passed': False}, 'updated_at': now()})
@@ -178,3 +201,28 @@ def continue_world_after_codec(codec_path, args):
         'migration': report, 'created_at': now()})
     launch_pending.unlink(missing_ok=True)
     return world
+
+
+def main(argv=None):
+    import argparse
+    import torch
+    from .power_guard import KeepAwake
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--run-dir', required=True, type=Path, help='Codec supervisor run')
+    parser.add_argument('--data-dir', required=True, type=Path)
+    parser.add_argument('--world-source-run', required=True, type=Path)
+    parser.add_argument('--world-run-dir', type=Path)
+    parser.add_argument('--codec-checkpoint', required=True, type=Path)
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--accept-current-codec', action='store_true')
+    parser.add_argument('--gradient-accumulation-steps', type=int)
+    parser.add_argument('--preview-every', type=int)
+    args = parser.parse_args(argv)
+    torch.set_num_threads(4)
+    with KeepAwake():
+        world = continue_world_after_codec(args.codec_checkpoint, args)
+    print(json.dumps({'world_run_dir': str(world) if world else None}), flush=True)
+
+
+if __name__ == '__main__':
+    main()

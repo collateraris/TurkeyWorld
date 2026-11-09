@@ -291,10 +291,10 @@ class Experiment:
                                      "warmup_steps": trainer.config["warmup_steps"],
                                      "ramp_steps": trainer.config["ramp_steps"]}
 
-    def _adversarial_loss(self, predicted, real, condition, state):
+    def _adversarial_loss(self, predicted, real, condition, state, **accumulation):
         if self._adversarial_trainer is None:
             return predicted.new_zeros(()), {}
-        loss, metrics = self._adversarial_trainer.generator_loss(predicted, real, condition, state)
+        loss, metrics = self._adversarial_trainer.generator_loss(predicted, real, condition, state, **accumulation)
         self.state["adversarial"] = {**metrics, "active": bool(metrics.get("enabled")), "enabled": True}
         flattened = {"adversarial_" + key: value for key, value in metrics.items()
                      if isinstance(value, (int, float))}
