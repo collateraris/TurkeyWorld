@@ -34,6 +34,8 @@ def normalize_world_config(config):
     result.setdefault("simulation_hz", 30.0)
     result.setdefault("endless", False)
     result.setdefault("renderer_mode", "direct")
+    result.setdefault("spatial_entities", False)
+    result.setdefault("spatial_combat", False)
     result.setdefault("flow_steps", 0)
     for name in ("flow_width", "flow_depth", "flow_heads", "flow_adapter_width", "flow_adapter_depth", "flow_adapter_heads"):
         result.setdefault(name, 0)

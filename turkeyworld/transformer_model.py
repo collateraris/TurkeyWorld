@@ -79,6 +79,34 @@ class TokenReadBlock(nn.Module):
         return tokens + self.ff(self.ff_norm(tokens))
 
 
+class SpatialRenderRead(nn.Module):
+    """A separate nine-participant visual read, initially an exact zero residual.
+
+    Keeping this outside the existing scene attention avoids changing its
+    softmax denominator when spatial rendering is enabled during migration.
+    """
+    def __init__(self, width, heads):
+        super().__init__()
+        self.heads = heads
+        self.query_norm = nn.LayerNorm(width)
+        self.context_norm = nn.LayerNorm(width)
+        self.attention = nn.MultiheadAttention(width, heads, dropout=0., batch_first=True)
+        nn.init.zeros_(self.attention.out_proj.weight)
+        nn.init.zeros_(self.attention.out_proj.bias)
+
+    def forward(self, queries, participants, query_weights):
+        # The camera/player key is always available. NPC keys have exact zero
+        # visual weight behind/outside the camera, without deleting state tokens.
+        bias = torch.where(query_weights > 0, query_weights.clamp_min(1e-5).log(),
+                           torch.full_like(query_weights, -float('inf')))
+        bias = bias[:, None].expand(-1, self.heads, -1, -1)
+        bias = bias.reshape(queries.shape[0]*self.heads, queries.shape[1], participants.shape[1])
+        keys = self.context_norm(participants)
+        residual = self.attention(self.query_norm(queries), keys, keys,
+                                  attn_mask=bias.to(queries.dtype), need_weights=False)[0]
+        return queries+residual
+
+
 class CameraGeometry(nn.Module):
     """Learned opacity/depth and center-line object visibility features.
 
@@ -223,6 +251,17 @@ class CameraTransformerWorldModel(nn.Module):
         angles = xy[..., None] * frequencies
         position_features = torch.cat([xy, angles.sin().flatten(-2), angles.cos().flatten(-2)], -1)
         self.register_buffer("screen_coordinates", position_features, persistent=False)
+        # Instantiate after every legacy module so disabling the feature keeps
+        # both state_dict keys and the legacy initialization/RNG order unchanged.
+        if getattr(config, 'spatial_entities', False):
+            from .spatial_entities import SpatialEntityEncoder
+            self.spatial_encoder = SpatialEntityEncoder(width, map_channels=width)
+            self.spatial_render = SpatialRenderRead(width, heads)
+        if getattr(config, 'spatial_combat', False):
+            from .combat_objectives import COMBAT_COUNT_FEATURE_DIM
+            self.spatial_combat_counts = nn.Linear(COMBAT_COUNT_FEATURE_DIM, width)
+            nn.init.zeros_(self.spatial_combat_counts.weight)
+            nn.init.zeros_(self.spatial_combat_counts.bias)
 
     def encode_map(self, grid):
         features = self.map_encoder(grid)
@@ -292,6 +331,7 @@ class CameraTransformerWorldModel(nn.Module):
                 "target_logits": targets, "attack_logits": attacks, **spawn}
 
     def render_with_aux(self, state, features, map_features):
+        spatial_state = state
         if self.config.transition_mode == "event_v1":
             # Render is a function of explicit world/animation state and the
             # cached map. Different recurrent histories cannot repaint walls
@@ -319,14 +359,48 @@ class CameraTransformerWorldModel(nn.Module):
                                   gate, torch.ones(state.shape[0], 1, device=state.device, dtype=state.dtype)], 1)
         for block in self.render_blocks:
             queries = block(queries, context, key_weights=key_weights)
+        spatial = {}
+        if getattr(self.config, 'spatial_entities', False):
+            spatial_condition = (render_state_view(spatial_state)
+                                 if self.config.transition_mode == 'event_v1' else spatial_state)
+            # Preserve FP32 state coordinates through AMP; rounding them to the
+            # map activation dtype would erase small real motions before sampling.
+            participants = self.spatial_encoder(spatial_condition, map_features)
+            if getattr(self.config, 'spatial_combat', False):
+                from .combat_objectives import combat_count_features
+                counts = combat_count_features(spatial_state)
+                participants = participants+self.spatial_combat_counts(
+                    counts.to(self.spatial_combat_counts.weight.dtype)).to(participants.dtype)
+            projection_weights = self.spatial_render_weights(spatial_state, geometry)
+            queries = self.spatial_render(queries, participants, projection_weights)
+            spatial = {'spatial_tokens': participants, 'spatial_render_weights': projection_weights}
         patch = self.config.image_size // 16
         head = self.rgb32 if patch == 2 else (self.rgb64 if patch == 4
             else (self.rgb128 if patch == 8 else self.rgb256))
         pixels = head(self.render_norm(queries)).reshape(-1, 16, 16, 3, patch, patch)
         rgb = pixels.permute(0, 3, 1, 4, 2, 5).reshape(-1, 3, 16 * patch, 16 * patch).sigmoid()
-        return {"rgb": rgb, **geometry}
+        return {"rgb": rgb, **geometry, **spatial}
+
+    def spatial_render_weights(self, state, geometry):
+        """Per-patch overlap with projected NPC extents, without wall/oracle tests.
+
+        Patch overlap preserves edge sprites even if their center is outside
+        the FOV. Dead NPCs keep the same projection, while behind-camera NPCs
+        retain state/ID tokens with no direct appearance read from this branch.
+        """
+        projected = project_sprite_bounds(state, image_size=self.config.image_size)
+        boxes = projected['boxes'][:, None].float()
+        centres = (self.screen_coordinates[..., :2].float()+1)*.5
+        half_patch = 1/32
+        lower, upper = centres[:, :, None]-half_patch, centres[:, :, None]+half_patch
+        overlap = (torch.minimum(upper, boxes[..., 2:])-torch.maximum(lower, boxes[..., :2])).clamp_min(0)
+        coverage = overlap.prod(-1)*256
+        npc = coverage*geometry['render_gate'][:, None].float()
+        npc = npc*projected['sprite_frustum'][:, None].to(npc.dtype)
+        return torch.cat([torch.ones_like(npc[..., :1]), npc], -1)
 
     def renderer_parameter_count(self):
         names = ("render_condition.", "screen_position.", "render_blocks.", "render_norm.",
-                  "rgb32.", "rgb64.", "rgb128.", "rgb256.")
+                  "rgb32.", "rgb64.", "rgb128.", "rgb256.", "spatial_encoder.", "spatial_render.",
+                  "spatial_combat_counts.")
         return sum(p.numel() for name, p in self.named_parameters() if name.startswith(names))

@@ -35,13 +35,15 @@ class FinalizeVQGANTests(unittest.TestCase):
         model.eval()
         saved = {'stage': 'vqgan_codec', 'codec_config': asdict(config), 'model': model.state_dict(),
             'training_steps': 11586, 'quality_streak': 0, 'last_validation_fingerprint': 'fixed-heldout-panel',
-            'training_objective': {'vq_weight': 1., 'temporal_weight': .1}, 'optimizer': {'preserved': True}}
+            'training_objective': {'vq_weight': 1., 'temporal_weight': .1}, 'optimizer': {'preserved': True},
+            'world_plan': {'teacher_size': '175m_vqgan', 'from_scratch': True,
+                           'image_size': 32, 'target_seconds': 120., 'world_source_run': None}}
         last = checkpoints/'vqgan_last.pt'
         torch.save(saved, last)
         torch.save({'model': {'fake_best': torch.tensor(99.)}, 'training_steps': 5}, checkpoints/'vqgan_best.pt')
         (root/'experiment_config.json').write_text(json.dumps({'seed': 77, 'quality_passes': 3,
             'quality_psnr': 40., 'quality_ssim': .99, 'quality_mae': 1/255,
-            'quality_fraction': .95, 'validate_every': 500}), encoding='utf-8')
+            'quality_fraction': .95, 'validate_every': 100}), encoding='utf-8')
         panel = [[0, 1], [1, 2]]
         (root/'validation_panel.json').write_text(json.dumps(panel), encoding='utf-8')
         (root/'status.json').write_text(json.dumps({'status': 'stopped', 'codec_training': {'frozen': False}}), encoding='utf-8')
@@ -79,7 +81,10 @@ class FinalizeVQGANTests(unittest.TestCase):
             self.assertEqual(kwargs['step'], 11586)
             self.assertEqual(codec_fingerprint(model), fingerprint)
             records.append(('validation', kwargs))
-            return copy.deepcopy(report), {'fake_preview': True}
+            frames = np.zeros((4, 32, 32, 3), np.uint8)
+            return copy.deepcopy(report), {'source': frames, 'reconstruction': frames,
+                'difference': frames, 'metadata': {'step': 11586, 'every': 500,
+                    'kind': 'vqgan_codec_reconstruction', 'source_held_out': True}}
 
         return Data, evaluate
 
@@ -119,6 +124,9 @@ class FinalizeVQGANTests(unittest.TestCase):
             self.assertFalse(exported['quality_acceptance']['quality_gate_passed'])
             self.assertEqual(exported['codec_fingerprint'], fingerprint)
             self.assertEqual(exported['training_objective'], source['training_objective'])
+            self.assertEqual(exported['world_plan'], source['world_plan'])
+            self.assertEqual(ready['world_plan'], source['world_plan'])
+            self.assertEqual(ready['codec_config'], source['codec_config'])
             for name, value in exported['model'].items():
                 torch.testing.assert_close(value, source['model'][name], rtol=0, atol=0)
             self.assertEqual(hashlib.sha256((root/'checkpoints'/'vqgan_last.pt').read_bytes()).hexdigest(), original_sha)
@@ -127,6 +135,7 @@ class FinalizeVQGANTests(unittest.TestCase):
             train_options = next(entry[2] for entry in records if entry[:2] == ('open', 'train'))
             self.assertEqual(train_options['initial_file_limit'], 1024)
             self.assertEqual(train_options['growth_files'], 0)
+            self.assertTrue(all(entry[2]['require_native_size'] for entry in records if entry[0] == 'open'))
             normalization = exported['latent_normalization']
             self.assertEqual(normalization['source'], 'independent_training_calibration')
             self.assertEqual(normalization['seed'], 77+991)
@@ -142,6 +151,44 @@ class FinalizeVQGANTests(unittest.TestCase):
             self.assertEqual(status['stage'], 'vqgan_ready_user_accepted')
             self.assertFalse(status['codec_training']['quality_gate_passed'])
             self.assertTrue(status['codec_training']['accepted_by_user'])
+            self.assertEqual(status['prediction_every'], 100)
+            self.assertEqual(status['prediction_preview']['every'], 100)
+            self.assertNotIn('teacher', exported['quality_acceptance']['reason'].lower())
+            self.assertNotIn('2026', exported['quality_acceptance']['reason'])
+
+    def test_preview_file_and_status_both_preserve_actual100_update_cadence(self):
+        from turkeyworld.finalize_vqgan import finalize_current_vqgan
+        with tempfile.TemporaryDirectory() as folder:
+            root, _, _, _, fingerprint, _ = self.fixture(folder)
+            records = []
+            data, evaluate = self.patches(records, self.report(), fingerprint)
+            with patch('turkeyworld.finalize_vqgan.VQGANData', data), \
+                    patch('turkeyworld.finalize_vqgan.evaluate_vqgan', side_effect=evaluate):
+                finalize_current_vqgan(root, root/'data', device='cpu', accept_current_quality=True,
+                                       validation_batch=2, calibration_pairs=2)
+            preview = json.loads((root/'preview.json').read_text(encoding='utf-8'))
+            status = json.loads((root/'status.json').read_text(encoding='utf-8'))
+            self.assertEqual(preview['every'], 100)
+            self.assertEqual(preview['step'], 11586)
+            self.assertEqual(status['prediction_preview'], preview)
+            self.assertTrue((root/'preview.png').exists())
+            self.assertFalse(status['codec_validation']['passed'])
+
+    def test_finalization_refuses_old128_source_for_native32_codec(self):
+        from turkeyworld.finalize_vqgan import finalize_current_vqgan
+        with tempfile.TemporaryDirectory() as folder:
+            root, _, _, _, _, _ = self.fixture(folder)
+            directory = root/'data'/'rgb'/'val'
+            directory.mkdir(parents=True)
+            np.savez_compressed(directory/'episode.npz', frames=np.zeros((3, 128, 128, 3), np.uint8),
+                states=np.zeros((3, 90), np.float32), actions=np.zeros((2, 4), np.float32),
+                events=np.zeros((2, 4), np.float32), hit_ids=np.full(2, -1, np.int64),
+                attack_flags=np.zeros((2, 8), np.float32), map=np.zeros((16, 16), np.int8),
+                split=np.asarray('val'), dt=np.asarray(1/30))
+            with patch('turkeyworld.finalize_vqgan.evaluate_vqgan', side_effect=AssertionError('Wrong native size must fail first')):
+                with self.assertRaisesRegex(ValueError, 'native source RGB 32x32'):
+                    finalize_current_vqgan(root, root/'data', device='cpu', accept_current_quality=True)
+            self.assertFalse((root/'codec_ready.json').exists())
 
     def test_integrity_failure_keeps_actual_final_report_and_never_publishes_ready(self):
         from turkeyworld.finalize_vqgan import finalize_current_vqgan

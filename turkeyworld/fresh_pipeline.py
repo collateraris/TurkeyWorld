@@ -20,12 +20,22 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def build_commands(args, subset, masks):
+def build_commands(args, subset, masks, *, codec_info=None):
+    # A completed, supervisor-owned migration keeps the original launch config
+    # reproducible while making subsequent resumes use the upgraded teacher.
+    override_path = args.world_run_dir/'spatial_entities_migration.json'
+    spatial = json.loads(override_path.read_text(encoding='utf-8')) if override_path.exists() else {}
+    enabled = spatial.get('status') == 'complete' and spatial.get('spatial_entities') is True
+    target_seconds = spatial.get('target_seconds', 30) if enabled else 30
+    if enabled and (not isinstance(target_seconds, (int, float)) or not 0 < target_seconds <= 120
+                    or not float(target_seconds).is_integer()):
+        raise ValueError('Invalid spatial migration rollout duration')
+    target_seconds = int(target_seconds)
     prefix = [sys.executable, '-X', 'utf8', '-u', '-m']
     codec = prefix+['turkeyworld.train_vqgan', '--run-dir', str(args.codec_run_dir),
         '--data-dir', str(args.data_dir), '--device', args.device,
         '--image-size', str(args.image_size), '--teacher-size', '175m_vqgan',
-        '--target-seconds', '120', '--world-from-scratch', '--world-run-dir', str(args.world_run_dir),
+        '--target-seconds', str(target_seconds), '--world-from-scratch', '--world-run-dir', str(args.world_run_dir),
         '--batch', str(args.codec_batch), '--initial-files', '0', '--growth-files', '2048',
         '--disc-start', '250', '--disc-ramp', '500', '--validate-every', '100',
         '--save-every', '100', '--log-every', '10', '--validation-pairs', '64',
@@ -42,7 +52,7 @@ def build_commands(args, subset, masks):
         '--codec-checkpoint', str(args.codec_run_dir/'checkpoints/codec_for_renderer.pt'),
         '--control-run-dir', str(args.run_dir), '--image-size', str(args.image_size),
         '--teacher-size', '175m_vqgan', '--from-scratch', '--train-renderer-during-pretrain',
-        '--target-seconds', '120', '--batch', str(args.batch),
+        '--target-seconds', str(target_seconds), '--batch', str(args.batch),
         '--gradient-accumulation-steps', str(args.gradient_accumulation_steps),
         '--preview-every', '10', '--minimum-train-clips', '4000', '--visited-clips', '0',
         '--training-subset-manifest', str(subset), '--optimizer-update-budget', '6000',
@@ -52,7 +62,61 @@ def build_commands(args, subset, masks):
         '--object-aware-rendering', '--npc-region-boost', '4', '--object-mask-directory', str(masks),
         '--detach-flow-base', '--gan-npc-negatives', '--npc-negative-weight', '1',
         '--npc-negative-min-fraction', '.005', '--sr-checkpoint', str(args.sr_run_dir/'checkpoints/sr_for_game.pt')]
+    if codec_info is not None and codec_info.get('accepted_by_user') is True:
+        world.append('--accept-current-codec')
+    if enabled:
+        world.extend(['--spatial-entities', '--motion-curriculum'])
+        if spatial.get('sr_checkpoint'):
+            sr_path = Path(spatial['sr_checkpoint'])
+            if not sr_path.is_absolute() or not sr_path.is_file():
+                raise ValueError('Migrated SR checkpoint must be an existing absolute file')
+            world[world.index('--sr-checkpoint')+1] = str(sr_path)
+        combat_path = args.world_run_dir/'combat_conditioning_migration.json'
+        combat = json.loads(combat_path.read_text(encoding='utf-8')) if combat_path.exists() else {}
+        if combat.get('status') == 'complete' and combat.get('spatial_combat') is True:
+            if int(combat.get('target_seconds', target_seconds)) != target_seconds:
+                raise ValueError('Combat and spatial migration rollout durations differ')
+            world.append('--spatial-combat')
     return {'codec': codec, 'sr': sr, 'world': world}
+
+
+def validate_pipeline_codec(codec_path, ready_path, image_size):
+    """Honor an explicit frozen-codec acceptance without claiming qualification.
+
+    The ready JSON requests the exceptional path; the checkpoint's real frozen
+    weights, integrity checks and acceptance metadata must independently pass
+    the normal validator. A boolean in a sidecar alone grants no exception.
+    """
+    from .vq_world import validate_frozen_codec
+    codec_path, ready_path = Path(codec_path).resolve(), Path(ready_path)
+    ready = json.loads(ready_path.read_text(encoding='utf-8')) if ready_path.exists() else {}
+    if not isinstance(ready, dict):
+        raise ValueError('Malformed codec-ready metadata')
+    acceptance = ready.get('quality_acceptance')
+    requested = ready.get('accepted_by_user') is True
+    if acceptance is not None:
+        if not isinstance(acceptance, dict):
+            raise ValueError('Malformed codec user acceptance')
+        requested = requested or acceptance.get('accepted') is True
+    options = {}
+    if requested:
+        if (ready.get('accepted_by_user') is not True or not isinstance(acceptance, dict)
+                or acceptance.get('mode') != 'user_requested' or acceptance.get('accepted') is not True
+                or not isinstance(ready.get('quality_gate_passed'), bool)
+                or acceptance.get('quality_gate_passed') is not ready['quality_gate_passed']):
+            raise ValueError('Codec-ready file does not contain consistent explicit user acceptance')
+        options['accept_user_requested'] = True
+    info = validate_frozen_codec(codec_path, expected_image_size=image_size, **options)
+    if ready:
+        checkpoint = ready.get('checkpoint')
+        if (not isinstance(checkpoint, str) or Path(checkpoint).resolve() != codec_path
+                or ready.get('codec_fingerprint') != info['codec_fingerprint']):
+            raise ValueError('Codec-ready metadata belongs to a different frozen checkpoint')
+    if requested and (info.get('accepted_by_user') is not True
+            or info.get('quality_acceptance') != acceptance
+            or info['quality_gate'].get('passed') is not ready['quality_gate_passed']):
+        raise ValueError('Codec checkpoint does not confirm the recorded user acceptance')
+    return info
 
 
 class PipelineStopped(Exception):
@@ -80,7 +144,7 @@ class FreshPipeline:
             'stage_label': 'Подготовка нового корпуса и этапов обучения с нуля',
             'current': 0, 'total': 128000, 'started_at': now(),
             'image_size': args.image_size, 'output_size': args.image_size*16,
-            'evaluation': {'status': 'pending', 'target_seconds': 120, 'passed': False},
+            'evaluation': {'status': 'pending', 'target_seconds': 30, 'passed': False},
             'pipeline': {'codec_from_scratch': True, 'sr_from_scratch': True,
                 'world_from_scratch': True, 'renderer_from_scratch': True, 'discriminator_from_scratch': True,
                 'stage_order': ['codec', 'sr', 'world'], 'old_weights_reused': False,
@@ -143,7 +207,6 @@ class FreshPipeline:
             raise RuntimeError(stage_status.get('error', f'{name} worker failed'))
 
     def run(self):
-        from .vq_world import validate_frozen_codec
         args = self.args
         self.publish(self.root, os.getpid())
         while True:
@@ -166,7 +229,13 @@ class FreshPipeline:
         codec_path = args.codec_run_dir/'checkpoints/codec_for_renderer.pt'
         if not codec_path.exists() or self.live_worker(args.codec_run_dir):
             self.worker('codec', args.codec_run_dir, commands['codec'])
-        validate_frozen_codec(codec_path, expected_image_size=args.image_size)
+        codec_info = validate_pipeline_codec(codec_path, args.codec_run_dir/'codec_ready.json', args.image_size)
+        commands = build_commands(args, subset, masks, codec_info=codec_info)
+        atomic_json(self.root/'codec_handoff.json', codec_info)
+        self.update(codec_ready=codec_info, codec_validation=codec_info['quality_gate'],
+            pipeline={**self.state['pipeline'], 'codec_fingerprint': codec_info['codec_fingerprint'],
+                'codec_qualified': codec_info['qualified'],
+                'codec_quality_accepted_by_user': codec_info.get('accepted_by_user', False)})
         self.state['completed_stages'] = ['codec']
         sr_path = args.sr_run_dir/'checkpoints/sr_for_game.pt'
         if not sr_path.exists() or self.live_worker(args.sr_run_dir):
@@ -217,7 +286,8 @@ def main(argv=None):
     if min(args.batch, args.gradient_accumulation_steps, args.codec_batch, args.sr_batch, args.sr_steps) < 1:
         p.error('Batch sizes, accumulation and training steps must be positive')
     existing_pid = args.run_dir/'training.pid'
-    if existing_pid.exists() and process_alive(int(existing_pid.read_text())):
+    if (existing_pid.exists() and int(existing_pid.read_text()) != os.getpid()
+            and process_alive(int(existing_pid.read_text()))):
         p.error('This pipeline controller is already running')
     pipeline = FreshPipeline(args)
     atomic_json(pipeline.root/'training.pid', os.getpid())

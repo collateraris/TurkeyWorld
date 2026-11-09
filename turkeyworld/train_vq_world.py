@@ -19,10 +19,13 @@ from .vq_world import (STUDENT_VQ_PARAMETERS, TEACHER_VQ_PARAMETERS,
     migrate_teacher_to_vq, student_vq_config, validate_frozen_codec)
 
 
-def teacher_vq_config(codec_config, teacher_size='500m_vqgan'):
+def teacher_vq_config(codec_config, teacher_size='500m_vqgan', spatial_entities=False, spatial_combat=False):
     if teacher_size == '175m_vqgan':
         from .vq_world import teacher175_vq_config
-        return teacher175_vq_config(codec_config)
+        config = teacher175_vq_config(codec_config)
+        config.spatial_entities = bool(spatial_entities)
+        config.spatial_combat = bool(spatial_combat)
+        return config
     if teacher_size != '500m_vqgan':
         raise ValueError('Unknown shared-codec teacher profile')
     from .vjepa2_ac import VJEPA500_PROFILE
@@ -34,7 +37,7 @@ def teacher_vq_config(codec_config, teacher_size='500m_vqgan'):
         renderer_codec='vqgan', renderer_codec_config=codec,
         vjepa_patch_size=codec['image_size']//8 if codec['image_size'] <= 128 else 16,
         flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
-        **VJEPA500_PROFILE)
+        spatial_entities=bool(spatial_entities), spatial_combat=bool(spatial_combat), **VJEPA500_PROFILE)
 
 
 class LatentWorldExperiment(MassiveExperiment):
@@ -45,6 +48,10 @@ class LatentWorldExperiment(MassiveExperiment):
     def __init__(self, args):
         self.teacher_budget = None
         self.training_subset = None
+        self.spatial_entities = bool(getattr(args, 'spatial_entities', False))
+        self.spatial_combat = bool(getattr(args, 'spatial_combat', False))
+        if self.spatial_combat and not self.spatial_entities:
+            raise ValueError('Spatial combat conditioning requires nine spatial entity states')
         self.codec_options = {'accept_user_requested': True} if getattr(args, 'accept_current_codec', False) else {}
         validation_options = dict(self.codec_options)
         if hasattr(args, 'image_size'):
@@ -127,6 +134,17 @@ class LatentWorldExperiment(MassiveExperiment):
                 'codec_fingerprint': self.codec_info['codec_fingerprint']})
         self.state['model_parameters'].update(teacher_total=self.teacher_parameter_count(),
             codec_total=self.codec_info['generator_parameters'])
+        if self.spatial_entities:
+            self.state['spatial_conditioning'] = {'enabled': True, 'slots': 9, 'player_slots': 1,
+                'enemy_slots': 8, 'coordinates': 'continuous_map_xy', 'local_motion': True,
+                'local_map_patch': [3, 3], 'npc_direction': 'observed_velocity_with_validity_flag',
+                'runtime_state_source': 'own_predictions', 'source_engine_feedback': False}
+        if self.spatial_combat:
+            self.state['spatial_conditioning'].update(combat=True, spawn=True,
+                flow_participant_tokens=9, health_conditioning=True,
+                wall_conditioning=True, map_resolution=[16, 16],
+                wall_features=['tile_coordinates', 'tile_bounds', 'surface_type', 'camera_relative_geometry'],
+                hit_progress='nominal_HP_derived_per_life_with_ladder_validity')
         # The500M parent estimate must not masquerade as an instantiated EMA.
         self.state['model_parameters'].pop('ema_target_total', None)
         if getattr(args, 'from_scratch', False):
@@ -170,7 +188,7 @@ class LatentWorldExperiment(MassiveExperiment):
             self.state['object_mask_cache'] = {key: masks[key] for key in
                 ('mask_kind', 'status', 'total_episodes', 'verified_source_frames', 'training_subset_fingerprint')}
             self.state['object_mask_cache']['path'] = str(args.object_mask_directory.resolve())
-            if getattr(args, 'gan_npc_negatives', False) and not masks.get('background_frames_available'):
+            if (getattr(args, 'gan_npc_negatives', False) or self.spatial_combat) and not masks.get('background_frames_available'):
                 raise ValueError('NPC GAN negatives require offline cache prepared with --include-backgrounds')
         label = ('Учитель: мир и нейрорендер с нуля; общий обученный VQGAN'
                  if getattr(args, 'from_scratch', False) else 'Учитель: продолжение динамики и переход к общему VQGAN')
@@ -178,19 +196,33 @@ class LatentWorldExperiment(MassiveExperiment):
 
     def teacher_parameter_count(self):
         codec = self.codec_info['codec_config']
-        if codec.get('image_size', 128) != 128:
+        if codec.get('image_size', 128) != 128 or getattr(self, 'spatial_entities', False):
             from .vq_world import vq_profile_parameter_count
-            return vq_profile_parameter_count(teacher_vq_config(codec, getattr(self, 'teacher_size', '500m_vqgan')))
+            return vq_profile_parameter_count(teacher_vq_config(codec, getattr(self, 'teacher_size', '500m_vqgan'),
+                spatial_entities=getattr(self, 'spatial_entities', False),
+                spatial_combat=getattr(self, 'spatial_combat', False)))
         if self.PROFILE == '175vq':
             from .vq_world import TEACHER175_VQ_PARAMETERS
             return TEACHER175_VQ_PARAMETERS
         return TEACHER_VQ_PARAMETERS
 
     def teacher_initialization_profile(self):
-        config = asdict(teacher_vq_config(self.codec_info['codec_config'], self.teacher_size))
+        config = asdict(teacher_vq_config(self.codec_info['codec_config'], self.teacher_size,
+                                        spatial_entities=getattr(self, 'spatial_entities', False),
+                                        spatial_combat=getattr(self, 'spatial_combat', False)))
+        # Preserve the canonical fingerprint of runs created before this opt-in field.
+        if not config.get('spatial_entities'):
+            config.pop('spatial_entities', None)
+        if not config.get('spatial_combat'):
+            config.pop('spatial_combat', None)
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
-        return {'teacher_size': self.teacher_size, 'teacher_parameters': self.teacher_parameter_count(),
-            'teacher_config_fingerprint': fingerprint}
+        result = {'teacher_size': self.teacher_size, 'teacher_parameters': self.teacher_parameter_count(),
+                  'teacher_config_fingerprint': fingerprint}
+        if getattr(self, 'spatial_entities', False):
+            result.update(spatial_entities=True, spatial_entity_count=9)
+        if getattr(self, 'spatial_combat', False):
+            result['spatial_combat'] = True
+        return result
 
     def training_data_options(self):
         if self.training_subset is None:
@@ -198,7 +230,7 @@ class LatentWorldExperiment(MassiveExperiment):
         options = {'episode_paths': self.training_subset['filenames']}
         if getattr(self.args, 'object_aware_rendering', False):
             options['object_masks_directory'] = self.args.object_mask_directory/'train'
-            if getattr(self.args, 'gan_npc_negatives', False):
+            if getattr(self.args, 'gan_npc_negatives', False) or self.spatial_combat:
                 options['counterfactual_backgrounds'] = True
         return options
 
@@ -280,8 +312,12 @@ class LatentWorldExperiment(MassiveExperiment):
 
     def create_initial_teacher(self, initial):
         if getattr(self.args, 'from_scratch', False):
-            config = teacher_vq_config(self.codec_info['codec_config'],
-                teacher_size=getattr(self, 'teacher_size', '500m_vqgan'))
+            options = {'teacher_size': getattr(self, 'teacher_size', '500m_vqgan')}
+            if getattr(self, 'spatial_entities', False):
+                options['spatial_entities'] = True
+            if getattr(self, 'spatial_combat', False):
+                options['spatial_combat'] = True
+            config = teacher_vq_config(self.codec_info['codec_config'], **options)
             model = NeuralWorldModel(config).eval()
             model.flow_renderer.load_codec(self.args.codec_checkpoint)
             count = sum(parameter.numel() for parameter in model.parameters())
@@ -355,6 +391,14 @@ def main(argv=None):
         help='Native source/world/Base/Flow RGB size; the frozen codec must have the same resolution')
     parser.add_argument('--control-run-dir', type=Path)
     parser.add_argument('--from-scratch', action='store_true')
+    parser.add_argument('--spatial-entities', action='store_true',
+        help='Nine explicit map-relative participant tokens and local forward/side motion conditioning')
+    parser.add_argument('--spatial-combat', action='store_true',
+        help='Per-NPC combat/spawn heads, nine Flow conditions and auxiliary image consequences')
+    parser.add_argument('--motion-curriculum', action='store_true',
+        help='Rebalance existing source windows from short movement cases to longer own-prediction rollouts')
+    parser.add_argument('--motion-max-horizon', type=int, choices=(1, 4, 8, 16, 29), default=29,
+        help='Maximum differentiable source horizon; longer autonomous qualification is evaluated separately')
     parser.add_argument('--teacher-size', choices=('175m_vqgan', '500m_vqgan'), default='500m_vqgan')
     parser.add_argument('--detach-flow-base', action='store_true')
     parser.add_argument('--gan-npc-negatives', action='store_true')

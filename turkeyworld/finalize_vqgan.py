@@ -23,7 +23,7 @@ from .vqgan_pipeline import process_alive
 from .vqgan_validation import DEFAULT_CODEC_THRESHOLDS, evaluate_vqgan, save_vqgan_preview
 
 
-ACCEPTANCE_REASON = 'User requested ending codec training and continuing teacher on 2026-11-09'
+ACCEPTANCE_REASON = 'User accepted the current codec quality and requested the next training stage'
 INTEGRITY_CHECKS = ('all_frames_finite', 'all_frames_in_range', 'quantization_finite',
                     'valid_code_indices', 'codebook_broad_usage')
 
@@ -68,7 +68,7 @@ def finalize_current_vqgan(run_dir, data_dir, *, device='cuda', accept_current_q
         'mae': original.get('quality_mae', DEFAULT_CODEC_THRESHOLDS['mae']),
         'required_fraction': original.get('quality_fraction', DEFAULT_CODEC_THRESHOLDS['required_fraction'])}
     validation = VQGANData(data_dir/'rgb'/'val', device=device, split='val', image_size=config.image_size,
-                          cache_bytes=128*1024**2, seed=seed)
+                          require_native_size=True, cache_bytes=128*1024**2, seed=seed)
     panel = _json(root/'validation_panel.json')
     if panel is None:
         panel = validation.fixed_panel(count=validation_pairs, seed=seed)
@@ -81,11 +81,14 @@ def finalize_current_vqgan(run_dir, data_dir, *, device='cuda', accept_current_q
                   user_requested_freeze=True, source_checkpoint=str(source_path))
     atomic_json(root/'codec_validation_final.json', report)
     atomic_json(root/'codec_validation.json', report)
+    preview_every = int(original.get('validate_every', 500))
+    preview.setdefault('metadata', {})['every'] = preview_every
     preview_metadata = save_vqgan_preview(preview, root/'preview.png', step=step)
     if not all(report.get('checks', {}).get(name) is True for name in INTEGRITY_CHECKS):
         raise ValueError('Current codec fails finite/range/quantization integrity; quality acceptance cannot bypass it')
     train = VQGANData(data_dir/'rgb'/'train', device=device, split='train', image_size=config.image_size,
-        cache_bytes=128*1024**2, seed=seed, initial_file_limit=train_initial_files, growth_files=0)
+        require_native_size=True, cache_bytes=128*1024**2, seed=seed,
+        initial_file_limit=train_initial_files, growth_files=0)
     calibration_seed = seed+991
     calibration_rng = np.random.default_rng(calibration_seed)
     total, squares, count, indices = None, None, 0, []
@@ -117,20 +120,22 @@ def finalize_current_vqgan(run_dir, data_dir, *, device='cuda', accept_current_q
         'model': state, 'training_steps': step, 'codec_fingerprint': final_fingerprint,
         'quality_gate': report, 'quality_acceptance': acceptance, 'latent_normalization': normalization,
         'training_objective': saved.get('training_objective'),
+        'world_plan': saved.get('world_plan'),
         'generator_parameters': sum(value.numel() for value in model.parameters()),
         'source_checkpoint': str(source_path), 'pretrained_codec_weights_loaded': False,
         'created_at': now()}, temporary)
     replace_file(temporary, output)
     ready = {'checkpoint': str(output), 'codec_fingerprint': final_fingerprint, 'training_steps': step,
+        'codec_config': model.get_config(), 'world_plan': saved.get('world_plan'),
         'quality_gate_passed': bool(report['passed']), 'quality_acceptance': acceptance,
         'accepted_by_user': True, 'consecutive_passes': consecutive, 'required_passes': required,
         'shared_teacher_and_student': True, 'created_at': now()}
     atomic_json(root/'codec_ready.json', ready)
     status = _json(root/'status.json', {})
     status.update(run_id=root.name, status='completed', stage='vqgan_ready_user_accepted',
-        stage_label='VQGAN остановлен по запросу пользователя; продолжаем обучение учителя',
+        stage_label='VQGAN принят пользователем; переходим к следующему этапу обучения',
         current=step, updated_at=now(), codec_ready=ready, codec_validation=report,
-        prediction_preview={**preview_metadata, 'every': original.get('validate_every', 500)},
+        prediction_every=preview_every, prediction_preview={**preview_metadata, 'every': preview_every},
         message='Кодек заморожен по запросу пользователя. Фактическая проверка качества сохранена без подмены результата.')
     status.setdefault('codec_training', {}).update(frozen=True, accepted_by_user=True,
         quality_gate_passed=bool(report['passed']), consecutive_passes=consecutive,

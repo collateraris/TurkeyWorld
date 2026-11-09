@@ -123,6 +123,31 @@ def weighted_mse(prediction, target, weights=None):
     return ((prediction-target).square()*weights).sum()/denominator
 
 
+def foreground_contrastive_loss(prediction, target, background, mask, margin_fraction=.25):
+    """Prefer actual NPC pixels over the same scene with NPCs removed.
+
+    This is a training-only, per-image foreground objective. Its adaptive
+    margin is a fraction of the real foreground/background difference. Empty
+    masks contribute exactly zero and no source/background receives gradients.
+    """
+    import math
+    if not math.isfinite(margin_fraction) or not 0 <= margin_fraction <= 1:
+        raise ValueError('Foreground contrast margin must lie in[0,1]')
+    foreground = _mask_tensor(mask)
+    prediction, target, weights = _loss_inputs(prediction, target, foreground)
+    background = background.detach().to(device=prediction.device, dtype=torch.float32)
+    if background.shape != prediction.shape or not bool(torch.isfinite(background).all()):
+        raise ValueError('Counterfactual background must match finite source RGB')
+    mass = weights.flatten(1).sum(-1)
+    denominator = mass.clamp_min(1.)
+    real_distance = ((prediction-target).abs()*weights).flatten(1).sum(-1)/denominator
+    empty_distance = ((prediction-background).abs()*weights).flatten(1).sum(-1)/denominator
+    reference_gap = ((target-background).abs()*weights).flatten(1).sum(-1)/denominator
+    valid = (mass > 0).to(prediction.dtype)
+    contrast = (real_distance-empty_distance+margin_fraction*reference_gap).clamp_min(0)
+    return (contrast*valid).sum()/valid.sum().clamp_min(1.)
+
+
 def weighted_image_loss(prediction, target, weights=None):
     """Preserve the source RGB objective: L1 + .1*(horizontal+vertical L1).
 

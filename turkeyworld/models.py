@@ -67,8 +67,16 @@ class WorldModelConfig:
     vjepa_mlp_ratio: int = 4
     vjepa_readout_mlp_ratio: int = 4
     vjepa_gradient_checkpointing: bool = False
+    spatial_entities: bool = False
+    spatial_combat: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.spatial_entities, bool):
+            raise ValueError('spatial_entities must be a boolean')
+        if not isinstance(self.spatial_combat, bool):
+            raise ValueError('spatial_combat must be a boolean')
+        if self.spatial_combat and not self.spatial_entities:
+            raise ValueError('spatial_combat requires spatial_entities=True')
         if self.kind not in {"teacher", "student"}:
             raise ValueError("kind must be teacher or student")
         if self.image_size not in {32, 64, 128, 256}:
@@ -221,6 +229,8 @@ class NeuralWorldModel(nn.Module):
                 from .latent_flow_renderer import LatentFlowRenderer
                 renderer = LatentFlowRenderer
                 codec['codec_config'] = self.config.renderer_codec_config
+                if self.config.spatial_combat:
+                    codec['spatial_conditioning'] = True
             self.flow_renderer = renderer(kind=self.config.kind,
                 image_size=self.config.image_size, mode=self.config.renderer_mode,
                 steps=self.config.flow_steps, width=self.config.flow_width,
@@ -289,6 +299,9 @@ class NeuralWorldModel(nn.Module):
         return self
 
     def encode_map(self, grid):
+        flow = getattr(self, 'flow_renderer', None)
+        if bool(getattr(flow, 'uses_wall_conditioning', False)):
+            flow.set_map_condition(grid)
         if self.config.architecture == 'vjepa2_ac':
             return self.vjepa_backend.encode_map(grid)
         if self.config.architecture == "camera_transformer":
@@ -389,7 +402,8 @@ class NeuralWorldModel(nn.Module):
         base = self.render_base(state, features, map_features)
         if self.config.renderer_mode == "direct":
             return base
-        return self.flow_renderer.sample(base, render_state_view(state))
+        condition = state if self.config.spatial_combat else render_state_view(state)
+        return self.flow_renderer.sample(base, condition)
 
     def render_with_aux(self, state, features, map_features):
         """Render RGB and, for the token model, learned depth/visibility features."""
@@ -398,8 +412,9 @@ class NeuralWorldModel(nn.Module):
         else:
             result = {"rgb": self.render_base(state, features, map_features)}
         if self.config.renderer_mode != "direct":
+            condition = state if self.config.spatial_combat else render_state_view(state)
             result = {**result, "base_rgb": result["rgb"],
-                      "rgb": self.flow_renderer.sample(result["rgb"], render_state_view(state))}
+                      "rgb": self.flow_renderer.sample(result["rgb"], condition)}
         return result
 
     def geometry(self, state, map_features):
@@ -464,6 +479,74 @@ class SingleFrameUpscaler(nn.Module):
         return (base + residual).clamp(0, 1)
 
 
+class SRResidualBlock(nn.Module):
+    """Dense EDSR-style LR residual branch: Conv/ReLU/Conv, without BN."""
+    def __init__(self, channels, res_scale=.1):
+        super().__init__()
+        self.res_scale = float(res_scale)
+        self.body = nn.Sequential(nn.Conv2d(channels, channels, 3, padding=1),
+                                  nn.ReLU(inplace=False),
+                                  nn.Conv2d(channels, channels, 3, padding=1))
+
+    def forward(self, value):
+        return value+self.res_scale*self.body(value)
+
+
+class EDSRUpscaler(nn.Module):
+    """Single-frame dense residual x4 SR, with two learned x2 shuffle stages.
+
+    The trunk stays on the native LR grid. A zero-initialized final RGB head
+    starts exactly from bilinear enlargement. Its first update learns that
+    head; subsequent updates reach both shuffle stages and the residual trunk.
+    Training uses an identity straight-through derivative for output clipping:
+    forward RGB stays in[0,1], while saturation cannot trap a wrong proposal.
+    This is a compact project adaptation, not a pretrained EDSR checkpoint.
+    """
+    def __init__(self, channels=64, blocks=16, scale=4, res_scale=.1):
+        super().__init__()
+        if (not isinstance(channels, int) or isinstance(channels, bool) or channels < 1
+                or not isinstance(blocks, int) or isinstance(blocks, bool) or blocks < 1
+                or scale != 4 or not math.isfinite(res_scale) or res_scale <= 0):
+            raise ValueError('EDSR requires positive channels/blocks/res_scale and exactly x4 scale')
+        self.config = {'architecture': 'edsr', 'channels': channels, 'blocks': blocks,
+                       'scale': scale, 'res_scale': float(res_scale)}
+        self.input = nn.Conv2d(3, channels, 3, padding=1)
+        self.body = nn.Sequential(*[SRResidualBlock(channels, res_scale) for _ in range(blocks)])
+        self.body_output = nn.Conv2d(channels, channels, 3, padding=1)
+        self.upsample = nn.Sequential(nn.Conv2d(channels, channels*4, 3, padding=1),
+            nn.PixelShuffle(2), nn.ReLU(inplace=False),
+            nn.Conv2d(channels, channels*4, 3, padding=1),
+            nn.PixelShuffle(2), nn.ReLU(inplace=False))
+        self.output = nn.Conv2d(channels, 3, 3, padding=1)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, low_rgb):
+        head = self.input(low_rgb)
+        trunk = head+self.body_output(self.body(head))
+        residual = self.output(self.upsample(trunk))
+        base = F.interpolate(low_rgb, scale_factor=4, mode='bilinear', align_corners=False)
+        proposed = base+residual
+        bounded = proposed.clamp(0, 1)
+        return bounded.detach()+(proposed-proposed.detach()) if self.training else bounded
+
+
+def build_upscaler(config=None, **overrides):
+    """Build an explicit SR architecture; omitted architecture preserves legacy.
+
+    Old checkpoints contain only channels/blocks/scale. Their original class,
+    tensor names, defaults and serialized config remain unchanged.
+    """
+    values = dict(config or {})
+    values.update(overrides)
+    architecture = values.pop('architecture', 'separable')
+    if architecture == 'edsr':
+        return EDSRUpscaler(**values)
+    if architecture in ('separable', 'legacy'):
+        return SingleFrameUpscaler(**values)
+    raise ValueError(f'Unknown SR architecture: {architecture}')
+
+
 def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | None = None):
     if model.config.architecture in {"camera_transformer", 'vjepa2_ac'}:
         backend = model.vjepa_backend if model.config.architecture == 'vjepa2_ac' else model.camera_backend
@@ -521,6 +604,6 @@ def load_sr_checkpoint(path, device="cpu"):
     checkpoint = _read_checkpoint(path, device)
     if checkpoint.get("stage") != "sr":
         raise ValueError("expected an SR checkpoint")
-    model = SingleFrameUpscaler(**checkpoint["config"]).to(device)
+    model = build_upscaler(checkpoint["config"]).to(device)
     model.load_state_dict(checkpoint["model"])
     return model.eval(), checkpoint

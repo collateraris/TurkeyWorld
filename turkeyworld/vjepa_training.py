@@ -199,6 +199,8 @@ class VJEPAExperiment(Experiment):
             additional['renderer_training'] = self.state['renderer_training']
         if self.state.get('initialization'):
             additional['initialization'] = self.state['initialization']
+        if self.state.get('motion_curriculum'):
+            additional['motion_curriculum'] = self.state['motion_curriculum']
         if self.state.get('enemy_policy'):
             additional['behavior_version'] = self.state['enemy_policy']['version']
         from .optimizer_migration import optimizer_parameter_names
@@ -243,7 +245,7 @@ class VJEPAExperiment(Experiment):
             if self.ema is not None and 'ema_target_encoder' in saved:
                 self.ema.load_state_dict(saved['ema_target_encoder'])
             self.extra = {name: saved[name] for name in ('teacher_plateau', 'teacher_handoff_reason', 'teacher_selection', 'quality_streak', 'phase_complete',
-                          'long_curriculum_state') if name in saved}
+                          'long_curriculum_state', 'motion_curriculum', 'combat_conditioning_migration') if name in saved}
             quality_path = self.root/f'{model.config.kind}_vjepa_quality_report.json'
             if quality_path.exists():
                 previous_quality = json.loads(quality_path.read_text(encoding='utf-8'))
@@ -409,6 +411,47 @@ class VJEPAExperiment(Experiment):
             self.state['loss_protocol'] = 'joint_dynamics_flow_matching_gan_objects_v1' if joint_adversarial else self.state['loss_protocol']+'_objects'
         if detach_flow_base or npc_negatives:
             self.state['loss_protocol'] = 'joint_dynamics_flow_matching_gan_objects_separate_v2'
+        if getattr(model.config, 'spatial_entities', False):
+            self.state['loss_protocol'] += '_spatial_local_v3'
+        if getattr(model.config, 'spatial_combat', False):
+            self.state['loss_protocol'] += '_combat_spawn_flow_v4'
+        motion_curriculum = None
+        if getattr(self.args, 'motion_curriculum', False):
+            if not getattr(model.config, 'spatial_entities', False):
+                raise ValueError('Local motion curriculum requires spatial entity conditioning')
+            from .motion_curriculum import MotionCurriculum
+            migration_path = self.root/'spatial_entities_migration.json'
+            migration = json.loads(migration_path.read_text(encoding='utf-8')) if migration_path.exists() else {}
+            previous_curriculum = self.extra.get('motion_curriculum', {})
+            start_step = int(migration.get('start_optimizer_step',
+                previous_curriculum.get('start_optimizer_step', self.global_step)))
+            if previous_curriculum and previous_curriculum.get('start_optimizer_step') != start_step:
+                raise ValueError('Motion curriculum start differs from the saved checkpoint')
+            combat_sampling = None
+            if getattr(model.config, 'spatial_combat', False):
+                from .combat_sampling import CombatSampling
+                combat_sampling = CombatSampling(data, self.args.context, cache_path=self.root/'combat_case_cache.json')
+                self.state['combat_sampling'] = combat_sampling.summary()
+            motion_curriculum = MotionCurriculum(data, self.args.context, start_step=start_step,
+                max_horizon=int(getattr(self.args, 'motion_max_horizon', 29)), combat_sampling=combat_sampling)
+            coverage = motion_curriculum.summary()
+            protocol = {'context': self.args.context, 'max_horizon': coverage['max_horizon'],
+                        'fingerprint': coverage['fingerprint'], 'version': coverage['version']}
+            if combat_sampling is not None:
+                combat_summary = combat_sampling.summary()
+                protocol['combat_sampling'] = {name: combat_summary[name] for name in ('fingerprint', 'version')}
+            if previous_curriculum and previous_curriculum.get('protocol') != protocol:
+                previous_protocol = previous_curriculum.get('protocol', {})
+                migration_info = self.extra.get('combat_conditioning_migration', {})
+                permitted = (combat_sampling is not None and 'combat_sampling' not in previous_protocol
+                    and migration_info.get('allowed_source_sampling_upgrade') is True
+                    and previous_protocol == {key: value for key, value in protocol.items() if key != 'combat_sampling'})
+                if not permitted:
+                    raise ValueError('Motion curriculum data, case definitions or horizon changed on resume')
+            atomic_json(self.root/'motion_case_coverage.json', coverage)
+            self.state['motion_curriculum'] = {**motion_curriculum.plan(self.global_step),
+                'start_optimizer_step': start_step, 'target_autonomous_steps': int(self.args.target_seconds)*30,
+                'future_ground_truth_feedback': False, 'source_corpus_expanded': False, 'protocol': protocol}
         self._publish_model_sizes(model)
         panel_hash = self.extra.get('teacher_plateau', {}).get('fingerprint', '')
         tracker = PlateauTracker.from_state(self.extra.get('teacher_plateau'), patience=self.args.plateau_patience,
@@ -439,7 +482,15 @@ class VJEPAExperiment(Experiment):
             from .gradient_accumulation import MetricMean
             averaged = MetricMean()
             for microstep in range(accumulation):
-                batch = data.batch(self.args.batch, context=self.args.context, horizon=self.args.horizon, rng=self.rng)
+                if motion_curriculum is None:
+                    batch = data.batch(self.args.batch, context=self.args.context, horizon=self.args.horizon, rng=self.rng)
+                else:
+                    plan = motion_curriculum.plan(self.global_step)
+                    indices = motion_curriculum.sample_indices(self.args.batch, self.global_step, self.rng)
+                    plan = motion_curriculum.plan(self.global_step)
+                    batch = data.batch(self.args.batch, context=self.args.context, horizon=plan['horizon'],
+                                       rng=self.rng, indices=indices)
+                    self.state['motion_curriculum'].update(plan)
                 with self.amp(cache_enabled=False):
                     loss_function = getattr(self, 'loss_function', short_rollout_loss)
                     image_options = {'object_region_boost': self.args.npc_region_boost} if object_aware else {}
@@ -471,7 +522,8 @@ class VJEPAExperiment(Experiment):
                     state = endpoint['state'].detach()
                     target = endpoint['target'].detach()
                     with self.amp(cache_enabled=False):
-                        generated = model.flow_renderer.sample(base, state, checkpoint_velocity=True)
+                        map_options = {'map_condition': endpoint['map_condition']} if getattr(model.config, 'spatial_combat', False) else {}
+                        generated = model.flow_renderer.sample(base, state, checkpoint_velocity=True, **map_options)
                         if endpoint.get('pixel_weights') is not None:
                             from .object_losses import weighted_image_l1
                             sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'])
@@ -488,6 +540,12 @@ class VJEPAExperiment(Experiment):
                     gan_loss, gan_metrics = self._adversarial_loss(generated, target, base, state,
                         accumulation_steps=accumulation, microstep=microstep, **negative_options)
                     refinement = sampled_rgb_loss+gan_loss
+                    if getattr(model.config, 'spatial_combat', False):
+                        from .object_losses import foreground_contrastive_loss
+                        foreground = .5*foreground_contrastive_loss(generated, target,
+                            endpoint['background'], endpoint['object_mask'])
+                        refinement = refinement+foreground
+                        micro_metrics['foreground_sampled'] = float(foreground.detach())
                     if not torch.isfinite(refinement):
                         raise FloatingPointError(f'Nonfinite sampled GAN loss at {step}, microbatch {microstep+1}')
                     (refinement/accumulation).backward()
@@ -500,6 +558,25 @@ class VJEPAExperiment(Experiment):
                         micro_metrics.update({'sampled_'+name: float(value) for name, value in region_error_metrics(
                             generated, target, endpoint['object_mask']).items()})
                     total_loss = total_loss+refinement.detach()
+                if getattr(model.config, 'spatial_combat', False):
+                    from .combat_render_training import combat_image_objective
+                    from .spawn_render_training import spawn_image_objective
+                    with self.amp(cache_enabled=False):
+                        combat_image, combat_metrics = combat_image_objective(model, endpoint['combat_payload'])
+                    if not bool(torch.isfinite(combat_image)):
+                        raise FloatingPointError('Nonfinite combat-image objective')
+                    (combat_image/accumulation).backward()
+                    total_loss = total_loss+combat_image.detach()
+                    micro_metrics.update(combat_metrics)
+                    del combat_image
+                    with self.amp(cache_enabled=False):
+                        spawn_image, spawn_metrics = spawn_image_objective(model, endpoint['combat_payload'])
+                    if not bool(torch.isfinite(spawn_image)):
+                        raise FloatingPointError('Nonfinite spawn-image objective')
+                    (spawn_image/accumulation).backward()
+                    total_loss = total_loss+spawn_image.detach()
+                    micro_metrics.update(spawn_metrics)
+                    del spawn_image
                 micro_metrics.update(train_loss=float(total_loss), optimization_loss=float(total_loss))
                 averaged.add(micro_metrics)
                 self.fragments_seen += self.args.batch
@@ -530,6 +607,9 @@ class VJEPAExperiment(Experiment):
                 effective_batch_size=self.args.batch*accumulation, fragments_seen=self.fragments_seen,
                 loss_aggregation='mean_of_microbatches')
             metrics['loss_protocol'] = self.state['loss_protocol']
+            if motion_curriculum is not None:
+                metrics.update(motion_phase=plan['phase'], motion_horizon=plan['horizon'],
+                    motion_curriculum_version=plan['version'], motion_case_weights=plan['case_weights'])
             if 'flow' in metrics:
                 metrics['loss_without_flow'] = metrics['train_loss']-metrics['flow']
             if accumulation > 1:
