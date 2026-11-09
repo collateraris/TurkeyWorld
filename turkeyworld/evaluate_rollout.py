@@ -61,16 +61,25 @@ def scripted_action(state, scenario, step, dt, waypoint):
     return np.array([forward, strafe, turn, float(fire)], dtype=np.float32), waypoint
 
 
-def build_action_tape(seed, scenario, steps, dt, shadow_reference=True):
+def build_action_tape(seed, scenario, steps, dt, shadow_reference=True, *, endless=False,
+                      initialize_rgb=False, initial_image_size=128):
     """Record all controls before the model starts; no model feedback exists."""
-    game = Game(seed=seed)
+    game = Game(seed=seed, endless=endless)
+    survival_policy = None
+    if endless and shadow_reference and scenario in {"explore", "combat", "mixed"}:
+        from .prepare_training_data import SurvivalPolicy
+        survival_policy = SurvivalPolicy(seed, 1/dt)
     tilemap, initial_state = game.map.copy(), game.state_vector().copy()
+    initial_rgb = game.render(size=initial_image_size, overlays=False) if initialize_rgb else None
     states = [initial_state.copy()] if shadow_reference else None
     reference_events, actions = [], []
     waypoint, terminal_step = 0, None
     controller_state = initial_state.copy()
     for index in range(steps):
-        action, waypoint = scripted_action(controller_state, scenario, index, dt, waypoint)
+        if survival_policy is not None:
+            action = survival_policy(game, index)
+        else:
+            action, waypoint = scripted_action(controller_state, scenario, index, dt, waypoint)
         actions.append(action)
         if shadow_reference:
             event = game.step(action, dt)
@@ -88,13 +97,18 @@ def build_action_tape(seed, scenario, steps, dt, shadow_reference=True):
             controller_state[:2] += np.array([c*command[0]-s*command[1],
                                               s*command[0]+c*command[1]])*(2.4*dt/16)
             controller_state[2:4] = [s, c]
-    return {"map": tilemap, "initial_state": initial_state,
+    tape = {"map": tilemap, "initial_state": initial_state,
             "actions": np.asarray(actions, dtype=np.float32),
             "reference_states": None if states is None else np.asarray(states, dtype=np.float32),
             "reference_events": None if not reference_events else np.asarray(reference_events, dtype=np.float32),
             "reference_terminal_step": terminal_step,
             "reference_completed": bool(shadow_reference),
+            "endless": bool(endless),
+            "controller": "survival_patrol_with_combat" if survival_policy is not None else "scenario_script",
             "tape_recorded_before_model_execution": True}
+    if initial_rgb is not None:
+        tape["initial_rgb"] = initial_rgb
+    return tape
 
 
 def _events_from_output(result):
@@ -118,7 +132,11 @@ def evaluate_episode(model, metadata, args, seed):
     dt = 1/float(getattr(model.config, "simulation_hz", 30))
     steps = max(1, math.ceil(args.seconds/dt))
     preparation_started = time.perf_counter()
-    tape = build_action_tape(seed, args.scenario, steps, dt, not args.no_shadow_reference)
+    endless = bool(getattr(model.config, "endless", False))
+    architecture = getattr(model.config, "architecture", "legacy_cnn")
+    tape = build_action_tape(seed, args.scenario, steps, dt, not args.no_shadow_reference,
+                             endless=endless, initialize_rgb=architecture == "vjepa2_ac",
+                             initial_image_size=model.config.image_size)
     preparation_seconds = time.perf_counter()-preparation_started
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
@@ -126,9 +144,10 @@ def evaluate_episode(model, metadata, args, seed):
     state_dtype = torch.float32 if getattr(model.config, "transition_mode", "residual_v0") == "event_v1" else dtype
     state = torch.tensor(tape["initial_state"], dtype=state_dtype, device=device)[None]
     grid = torch.tensor(tape["map"], dtype=torch.long, device=device)[None]
-    monitor = RolloutMonitor(tape["map"], args.scenario, steps, dt, args.max_failures)
-    render_oracle = Game(seed=seed) if args.render_every else None
+    monitor = RolloutMonitor(tape["map"], args.scenario, steps, dt, args.max_failures, endless=endless)
+    render_oracle = Game(seed=seed, endless=endless) if args.render_every else None
     model_times, check_times, render_psnr, pose_errors, angle_errors = [], [], [], [], []
+    render_times = []
     rendered, render_failures, render_oracle_rejections = 0, 0, 0
     matched_events, event_comparisons = 0, 0
     confusion = np.zeros((4, 4), dtype=np.int64)  # TP, FP, FN, TN for each event
@@ -140,7 +159,12 @@ def evaluate_episode(model, metadata, args, seed):
         torch.cuda.reset_peak_memory_stats(device)
     with torch.inference_mode():
         map_features = model.encode_map(grid)
-        memory = model.initial_memory(1, device, dtype)
+        if architecture == "vjepa2_ac":
+            initial_image = torch.as_tensor(tape["initial_rgb"], device=device).permute(2, 0, 1)[None]
+            initial_image = initial_image.to(dtype=dtype).div(255)
+            memory = model.initialize_from_image(initial_image, state, map_features)
+        else:
+            memory = model.initial_memory(1, device, dtype)
         synchronize()
         started = time.perf_counter()
         for index, action in enumerate(tape["actions"]):
@@ -179,7 +203,11 @@ def evaluate_episode(model, metadata, args, seed):
                 confusion[:, 3] += ~predicted_flags & ~reference_flags
             if args.render_every and ((index+1) % args.render_every == 0 or index == steps-1):
                 rendered += 1
+                synchronize()
+                render_started = time.perf_counter()
                 rgb = model.render(state, output["features"], map_features)
+                synchronize()
+                render_times.append(1000*(time.perf_counter()-render_started))
                 if not bool(torch.isfinite(rgb).all()):
                     render_failures += 1
                 else:
@@ -191,6 +219,12 @@ def evaluate_episode(model, metadata, args, seed):
                         render_psnr.append(float(-10*math.log10(max(1e-12, mse))))
                     except (ValueError, IndexError, OverflowError):
                         render_oracle_rejections += 1
+            progress_every = getattr(args, "progress_every", 300)
+            if progress_every and ((index+1) % progress_every == 0 or index == 0 or index == steps-1):
+                print(json.dumps({"evaluation_step": index+1, "requested_steps": steps,
+                                  "evaluation_seed": seed, "simulated_seconds": (index+1)*dt,
+                                  "integrity_failures": sum(monitor.counts.values()),
+                                  "respawns": monitor.respawn_count}), flush=True)
             if violations and (not args.continue_on_failure or not np.isfinite(current).all()):
                 break
         synchronize()
@@ -206,6 +240,10 @@ def evaluate_episode(model, metadata, args, seed):
                                "f1": 2*tp/(2*tp+fp+fn) if 2*tp+fp+fn else None,
                                "note": "Null F1 means no positive reference/prediction examples; true negatives alone do not prove combat accuracy."}
     report.update({"seed": seed, "scenario": args.scenario, "requested_seconds": args.seconds,
+                   "endless": endless, "controller": tape["controller"],
+                   "world_architecture": architecture,
+                   "engine_renders_for_initialization": int("initial_rgb" in tape),
+                   "renderer_mode": getattr(model.config, "renderer_mode", "direct"),
                    "simulation_hz": 1/dt, "requested_steps": steps,
                    "wall_seconds": wall_seconds, "tape_preparation_seconds": preparation_seconds,
                    "tape_recorded_before_model_execution": True,
@@ -224,7 +262,8 @@ def evaluate_episode(model, metadata, args, seed):
                    "paired_trajectory_heading_error_degrees": _summary(angle_errors),
                    "paired_event_bit_accuracy": matched_events/event_comparisons if event_comparisons else None,
                    "paired_events": event_metrics,
-                   "transition_time_ms": _summary(model_times), "checker_time_ms": _summary(check_times),
+                   "transition_time_ms": _summary(model_times), "render_time_ms": _summary(render_times),
+                   "checker_time_ms": _summary(check_times),
                    "peak_cuda_allocated_mib": torch.cuda.max_memory_allocated(device)/1024**2 if device.type == "cuda" else None,
                    "limitations": ["Integrity and selected-pose RGB measurements are finite empirical tests, not a proof of generalization.",
                                    "Paired trajectories can diverge after combat branches; long-horizon pixel equality is not required.",
@@ -250,6 +289,8 @@ def main(argv=None):
     parser.add_argument("--no-render", action="store_true", help="Alias for --render-every 0")
     parser.add_argument("--max-failures", type=int, default=50,
                         help="Maximum stored failure examples; counts always include every checked violation")
+    parser.add_argument("--progress-every", type=int, default=300,
+                        help="Print real evaluation progress every N steps; zero disables progress logging")
     parser.add_argument("--continue-on-failure", action="store_true",
                         help="Continue after finite invalid states; default stops at the first failed integrity step")
     parser.add_argument("--no-shadow-reference", action="store_true",
@@ -258,7 +299,7 @@ def main(argv=None):
                         help="Optional proposed minimum PSNR for EVERY sampled same-state RGB; no universal threshold is implied")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    if not math.isfinite(args.seconds) or args.seconds <= 0 or min(args.episodes, args.threads, args.max_failures) < 1 or args.render_every < 0:
+    if not math.isfinite(args.seconds) or args.seconds <= 0 or min(args.episodes, args.threads, args.max_failures) < 1 or args.render_every < 0 or args.progress_every < 0:
         parser.error("seconds/counts must be positive; render-every may be zero")
     if args.min_render_psnr is not None and not math.isfinite(args.min_render_psnr):
         parser.error("min-render-psnr must be finite")
@@ -281,6 +322,8 @@ def main(argv=None):
               "checkpoint": str(args.world.resolve()), "training_steps": metadata.get("training_steps", 0),
               "quality_status": "Empirical evaluation only; no trained accuracy, five-minute stability or target FPS is guaranteed.",
               "device": args.device, "transition_mode": getattr(model.config, "transition_mode", "residual_v0"),
+              "endless": bool(getattr(model.config, "endless", False)),
+              "renderer_mode": getattr(model.config, "renderer_mode", "direct"),
               "episodes": episodes, "episode_count": len(episodes),
               "integrity_pass_count": sum(e["integrity_pass"] for e in episodes),
               "qualifying_active_session_count": sum(e["qualifying_active_session"] for e in episodes),

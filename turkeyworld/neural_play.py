@@ -1,6 +1,7 @@
 """Play a loaded neural world checkpoint without ground-truth corrections.
 
 The reference engine supplies a map and initial 90-value state exactly once.
+V-JEPA models additionally encode one initial source RGB frame before rollout.
 Every subsequent transition and base image comes from the loaded world model.
 No trained checkpoints are bundled. A successful run proves executable shapes,
 not correct combat, stable five-minute gameplay or RTX 4090 performance.
@@ -43,6 +44,7 @@ def _arguments():
     p.add_argument("--warmup", type=int, default=3, help="Untimed warmup steps; their predicted state is discarded.")
     p.add_argument("--threads", type=int, default=4, help="CPU PyTorch thread count.")
     p.add_argument("--smooth", action="store_true", help="Bilinear rather than nearest classical resize.")
+    p.add_argument("--no-hud", action="store_true", help="Hide interactive HUD and crosshair; headless frames are always clean.")
     p.add_argument("--output", type=Path, help="Save the last neural frame as PNG.")
     p.add_argument("--stats", type=Path, help="Also write the JSON report to this path.")
     a = p.parse_args()
@@ -100,9 +102,13 @@ class NeuralRuntime:
                 self.sr.half()
         # This is the only interaction with the reference game. No engine step,
         # render, hit test or state correction is called during neural rollout.
-        initialization_game = Game(seed=args.seed)
+        initialization_game = Game(seed=args.seed, endless=self.model.config.endless)
         initial_map = initialization_game.map.copy()
         initial_state = initialization_game.state_vector().copy()
+        self.world_architecture = getattr(self.model.config, "architecture", "legacy_cnn")
+        initial_rgb = (initialization_game.render(size=self.model.config.image_size, overlays=False)
+                       if self.world_architecture == "vjepa2_ac" else None)
+        self.engine_renders_for_initialization = int(initial_rgb is not None)
         del initialization_game
         if initial_state.shape != (STATE_DIM,):
             raise ValueError(f"initial state must have {STATE_DIM} values")
@@ -110,6 +116,16 @@ class NeuralRuntime:
         grid = torch.as_tensor(initial_map, device=self.device, dtype=torch.long)[None]
         with torch.inference_mode():
             self.map_features = self.model.encode_map(grid)
+            if initial_rgb is not None:
+                image = torch.as_tensor(initial_rgb, device=self.device).permute(2, 0, 1)[None]
+                image = image.to(dtype=self.dtype).div(255)
+                initial_memory = self.model.initialize_from_image(image, self.initial_state, self.map_features)
+            else:
+                initial_memory = self.model.initial_memory(1, self.device, self.dtype)
+            if (not torch.is_tensor(initial_memory) or initial_memory.ndim < 2
+                    or initial_memory.shape[0] != 1 or not bool(torch.isfinite(initial_memory).all())):
+                raise ValueError("Initial neural memory must be a finite tensor with batch dimension1")
+            self.initial_memory = initial_memory.detach().clone()
         self.steps = 0
         self.samples = defaultdict(list)
         self.event_counts = dict.fromkeys(EVENT_NAMES, 0)
@@ -123,7 +139,7 @@ class NeuralRuntime:
     def reset_from_cached_initial_state(self):
         """Used once after warmup; does not query the original engine."""
         self.state = self.initial_state.clone()
-        self.memory = self.model.initial_memory(1, self.device, self.dtype)
+        self.memory = self.initial_memory.clone()
 
     def _resize(self, rgb):
         if self.sr is not None:
@@ -193,6 +209,7 @@ class NeuralRuntime:
             "precision": "fp16" if self.args.fp16 else "fp32",
             "persistent_state_precision": str(self.state.dtype),
             "world_checkpoint": str(self.args.world.resolve()),
+            "world_architecture": self.world_architecture,
             "world_training_steps": training_steps,
             "world_quality_status": self.world_metadata.get("quality_status", "Unverified checkpoint"),
             "untrained_world_checkpoint": training_steps == 0,
@@ -215,6 +232,7 @@ class NeuralRuntime:
             "timing_ms": timing,
             "warmup_steps_excluded": self.args.warmup,
             "engine_initializations": 1,
+            "engine_renders_for_initialization": self.engine_renders_for_initialization,
             "engine_steps_during_rollout": 0,
             "engine_renders_during_rollout": 0,
             "ground_truth_corrections": 0,
@@ -239,6 +257,30 @@ def _headless(runtime, args):
     return runtime.report(time.perf_counter() - started)
 
 
+def _draw_hud(screen, vector, font, *, endless):
+    """Display predicted counters without changing neural state or RGB targets."""
+    import pygame
+    width, height = screen.get_size()
+    hp = int(round(float(vector[4])*100))
+    ammo = "INF" if endless else str(int(round(float(vector[5])*99)))
+    kills = int(round(float(vector[-2])*ENTITY_SLOTS))
+    living = int((vector[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)[:, 5] >= .5).sum())
+    text = font.render(f"HP {hp}    AMMO {ammo}    ALIVE {living}    KILLS {kills}", True, (255, 239, 190))
+    pygame.draw.rect(screen, (15, 30, 33), (0, 0, width, font.get_height()+12))
+    screen.blit(text, (8, 6))
+    cx, cy = width//2, height//2
+    arm, gap = max(4, min(width, height)//128), 2
+    color = (250, 250, 220)
+    for start, end in [((cx-arm, cy), (cx-gap, cy)), ((cx+gap, cy), (cx+arm, cy)),
+                       ((cx, cy-arm), (cx, cy-gap)), ((cx, cy+gap), (cx, cy+arm))]:
+        pygame.draw.line(screen, color, start, end, max(1, width//512))
+    if hp <= 0:
+        message = font.render("GAME OVER | relaunch to restart", True, (255, 224, 130))
+        box = message.get_rect(center=(cx, cy+font.get_height()*2))
+        pygame.draw.rect(screen, (25, 30, 35), box.inflate(16, 12))
+        screen.blit(message, box)
+
+
 def _interactive(runtime, args):
     try:
         import pygame
@@ -246,11 +288,17 @@ def _interactive(runtime, args):
         raise SystemExit("Window mode requires pygame; install requirements.txt or use --headless") from exc
     pygame.init()
     screen = pygame.display.set_mode((args.display_size, args.display_size))
+    font = pygame.font.Font(None, max(16, min(32, args.display_size//30)))
+    show_hud = not getattr(args, "no_hud", False)
+    kind = runtime.model.config.kind.upper()
+    renderer = runtime.model.config.renderer_mode.replace("_", " ").upper()
+    gameplay = "ENDLESS" if runtime.model.config.endless else "CLASSIC"
     clock = pygame.time.Clock()
     screen.fill((0, 0, 0))
     pygame.display.flip()
     print("W/S: move | A/D: strafe | arrows or Q/E: turn | SPACE/LMB: fire | ESC: quit")
     print(f"Standalone neural rollout: {runtime.simulation_hz:g} Hz simulation; latest frame repeated for display; no resets or engine corrections.")
+    print("To restart after death, close the window and launch the same command again.")
     accumulator = 0.0
     displayed = 0
     max_backlog = 0.0
@@ -290,10 +338,13 @@ def _interactive(runtime, args):
             max_backlog = max(max_backlog, accumulator)
             if cached_surface is not None:
                 screen.blit(cached_surface, (0, 0))
+                if show_hud:
+                    vector = runtime.state[0].detach().float().cpu().numpy()
+                    _draw_hud(screen, vector, font, endless=runtime.model.config.endless)
                 pygame.display.flip()
                 displayed += 1
             pygame.display.set_caption(
-                f"TurkeyWorld NEURAL | updates {runtime.steps} | {runtime.simulation_hz:g} Hz target | display {clock.get_fps():.0f} FPS | no interpolation")
+                f"TurkeyWorld NEURAL | {kind} {renderer} | {gameplay} | updates {runtime.steps} | {runtime.simulation_hz:g} Hz target | display {clock.get_fps():.0f} FPS")
             clock.tick(args.fps)
     finally:
         pygame.quit()

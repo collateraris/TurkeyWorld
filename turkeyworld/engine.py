@@ -51,7 +51,10 @@ _ROWS = (
 
 
 class Game:
-    """Eight permanent enemy IDs, wall-blocked hitscan and persistent corpses.
+    """Eight enemy slots, wall-blocked hitscan and optional endless combat.
+
+    The default finite mode keeps permanent corpses for model training.
+    Endless play reuses dead slots and supplies unlimited ammunition.
 
     Action = [forward, strafe_right, turn_right, fire], with movement/turn
     in [-1,1], fire in [0,1]. Positive angle rotates clockwise on screen.
@@ -68,8 +71,12 @@ class Game:
     ATTACK_INTERVAL = 1.20
     PLAYER_RADIUS = 0.20
     ENEMY_RADIUS = 0.25
+    RESPAWN_DELAY = 3.0
+    SPAWN_DISTANCE = 4.0
 
-    def __init__(self, seed: int = 0, assets_dir: str | Path | None = None):
+    def __init__(self, seed: int = 0, assets_dir: str | Path | None = None,
+                 *, endless: bool = False):
+        self.endless = bool(endless)
         self.map = np.array([[int(c) for c in row] for row in _ROWS], dtype=np.uint8)
         self.map_height, self.map_width = self.map.shape
         self.assets_dir = Path(assets_dir) if assets_dir else Path(__file__).resolve().parents[1] / "assets"
@@ -89,10 +96,7 @@ class Game:
                   (3.5, 9.5), (12.5, 9.5), (6.5, 12.5), (12.5, 14.0)]
         self.enemies = []
         for ident, (x, y) in enumerate(spawns):
-            self.enemies.append({"id": ident, "x": x, "y": y, "vx": 0.0, "vy": 0.0,
-                                 "hp": 60.0, "alive": True, "attack_cooldown": 0.0,
-                                 "hurt_timer": 0.0, "death_timer": 0.0,
-                                 "animation_phase": float(self.rng.random())})
+            self.enemies.append(self._new_enemy(ident, x, y))
         self.kills = 0
         self.time = 0.0
         self.last_events = {name: False for name in EVENT_NAMES}
@@ -101,10 +105,17 @@ class Game:
 
     @property
     def done(self):
-        return self.player["hp"] <= 0 or self.kills == ENTITY_SLOTS
+        return self.player["hp"] <= 0 or (not self.endless and self.kills >= ENTITY_SLOTS)
+
+    def _new_enemy(self, ident, x, y):
+        return {"id": ident, "x": x, "y": y, "vx": 0.0, "vy": 0.0,
+                "hp": 60.0, "alive": True, "attack_cooldown": 0.0,
+                "hurt_timer": 0.0, "death_timer": 0.0,
+                "animation_phase": float(self.rng.random())}
 
     def get_state(self):
         return copy.deepcopy({"version": 1, "seed": self.seed, "time": self.time,
+                              "endless": self.endless,
                               "player": self.player, "enemies": self.enemies,
                               "kills": self.kills, "rng_state": self.rng.bit_generator.state})
 
@@ -126,6 +137,7 @@ class Game:
         if not np.isfinite(values).all():
             raise ValueError("State contains non-finite numbers")
         self.seed = int(candidate.get("seed", self.seed))
+        self.endless = bool(candidate.get("endless", False))
         self.time = float(candidate["time"])
         self.player = candidate["player"]
         self.enemies = candidate["enemies"]
@@ -178,9 +190,11 @@ class Game:
                      hp=float(np.clip(q[4], 0, 1) * 100) if alive else 0.0, alive=alive,
                      attack_cooldown=float(np.clip(q[6], 0, 1) * self.ATTACK_INTERVAL),
                      hurt_timer=float(np.clip(q[7], 0, 1) * self.HURT_DURATION),
-                     death_timer=float(np.clip(q[8], 0, 1) * self.DEATH_DURATION),
+                     death_timer=float(np.clip(q[8] * self.DEATH_DURATION, 0,
+                                               self.RESPAWN_DELAY if self.endless else self.DEATH_DURATION)),
                      animation_phase=float(q[9] % 1))
-        s["kills"] = sum(not e["alive"] for e in s["enemies"])
+        s["kills"] = (max(0, int(round(float(z[-2] * ENTITY_SLOTS)))) if self.endless
+                      else sum(not e["alive"] for e in s["enemies"]))
         s["time"] = max(0.0, float(z[-1] * 300))
         self.set_state(s)
 
@@ -250,6 +264,36 @@ class Game:
         self._flow_cell, self._flow = cell, field
         return field
 
+    def _respawn_enemies(self):
+        """Replace expired corpses at reachable, separated spawn locations."""
+        ready = [e for e in self.enemies
+                 if not e["alive"] and e["death_timer"] >= self.RESPAWN_DELAY - 1e-8]
+        if not ready:
+            return
+        field = self._navigation()
+        p = self.player
+        c, s = math.cos(p["angle"]), math.sin(p["angle"])
+        tangent = math.tan(math.radians(34))
+        for enemy in ready:
+            candidates, hidden = [], []
+            for iy, ix in np.argwhere((self.map == 0) & (field < 10000)):
+                x, y = float(ix) + 0.5, float(iy) + 0.5
+                dx, dy = x - p["x"], y - p["y"]
+                if dx * dx + dy * dy < self.SPAWN_DISTANCE ** 2:
+                    continue
+                if any(e["alive"] and (x - e["x"]) ** 2 + (y - e["y"]) ** 2 < 1.0
+                       for e in self.enemies):
+                    continue
+                candidates.append((x, y))
+                forward, lateral = dx * c + dy * s, -dx * s + dy * c
+                if (forward <= 0 or abs(lateral) > forward * tangent
+                        or not self._line_clear(p["x"], p["y"], x, y)):
+                    hidden.append((x, y))
+            locations = hidden or candidates
+            if locations:
+                x, y = locations[int(self.rng.integers(len(locations)))]
+                enemy.update(self._new_enemy(enemy["id"], x, y))
+
     def step(self, action, dt=1 / 30):
         a = np.asarray(action, dtype=np.float64)
         if a.shape != (ACTION_DIM,) or not np.isfinite(a).all():
@@ -267,11 +311,14 @@ class Game:
             e["hurt_timer"] = max(0.0, e["hurt_timer"] - dt)
             e["attack_cooldown"] = max(0.0, e["attack_cooldown"] - dt)
             if not e["alive"]:
-                e["death_timer"] = min(self.DEATH_DURATION, e["death_timer"] + dt)
+                e["death_timer"] = min(self.RESPAWN_DELAY if self.endless else self.DEATH_DURATION,
+                                       e["death_timer"] + dt)
                 e["vx"] = e["vy"] = 0.0
         if p["hp"] <= 0:
             self.last_events = events
             return events
+        if self.endless:
+            self._respawn_enemies()
         p["angle"] = float((p["angle"] + a[2] * 2.2 * dt + math.pi) % (2 * math.pi) - math.pi)
         c, s = math.cos(p["angle"]), math.sin(p["angle"])
         forward, strafe = a[0], a[1]
@@ -279,8 +326,9 @@ class Game:
         dx = (c * forward - s * strafe) * 2.4 * dt / magnitude
         dy = (s * forward + c * strafe) * 2.4 * dt / magnitude
         self._move(p, dx, dy, self.PLAYER_RADIUS)
-        if a[3] >= 0.5 and p["ammo"] > 0 and p["cooldown"] <= 1e-8:
-            p["ammo"] -= 1
+        if a[3] >= 0.5 and (self.endless or p["ammo"] > 0) and p["cooldown"] <= 1e-8:
+            if not self.endless:
+                p["ammo"] -= 1
             p["cooldown"] = self.FIRE_INTERVAL
             p["shot_flash"] = self.FLASH_DURATION
             events["shot"] = True
@@ -529,12 +577,17 @@ class Game:
             image = Image.fromarray(frame)
             draw = ImageDraw.Draw(image)
             draw.rectangle((0, 0, size, 17), fill=(15, 30, 33))
-            draw.text((4, 3), f"HP {int(p['hp']):3d}   AMMO {p['ammo']:2d}   TURKEYS {ENTITY_SLOTS - self.kills}", fill=(255, 239, 190))
+            if self.endless:
+                alive = sum(e["alive"] for e in self.enemies)
+                hud = f"HP {int(p['hp'])}  AMMO INF  ALIVE {alive}  KILLS {self.kills}"
+            else:
+                hud = f"HP {int(p['hp']):3d}   AMMO {p['ammo']:2d}   TURKEYS {ENTITY_SLOTS - self.kills}"
+            draw.text((4, 3), hud, fill=(255, 239, 190))
             arm = max(2, size // 64)
             draw.line((size // 2 - arm, cy, size // 2 + arm, cy), fill=(250, 250, 220))
             draw.line((size // 2, cy - arm, size // 2, cy + arm), fill=(250, 250, 220))
             if self.done:
-                label = "YOU WIN! R: restart" if self.kills == ENTITY_SLOTS else "GAME OVER  R: restart"
+                label = "GAME OVER  R: restart" if p["hp"] <= 0 else "YOU WIN! R: restart"
                 box_w = min(size, len(label) * 6 + 8)
                 draw.rectangle((size // 2 - box_w // 2, cy - 16, size // 2 + box_w // 2, cy + 7), fill=(25, 30, 35))
                 draw.text((size // 2 - box_w // 2 + 4, cy - 11), label, fill=(255, 224, 130))

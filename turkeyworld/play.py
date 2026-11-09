@@ -30,6 +30,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=60,
                         help="Window render-rate cap; simulation remains 30 Hz.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--classic", action="store_true",
+                        help="Use the original finite game: eight enemies, 99 rounds, no respawns.")
     parser.add_argument("--seconds", type=float, default=0.0,
                         help="Stop after this duration; 0 means unlimited in a window or 10 simulated seconds headlessly.")
     parser.add_argument("--headless", action="store_true",
@@ -81,7 +83,7 @@ def _demo_action(t: float) -> np.ndarray:
 
 
 def _headless(args: argparse.Namespace) -> None:
-    game = Game(seed=args.seed)
+    game = Game(seed=args.seed, endless=not args.classic)
     seconds = args.seconds or 10.0
     steps = max(1, math.ceil(seconds * SIM_HZ))
     event_counts: dict[str, int] = {}
@@ -112,6 +114,7 @@ def _headless(args: argparse.Namespace) -> None:
     player = state.get("player", {})
     report = {
         "mode": "reference_engine_cpu_classical_upscale",
+        "gameplay": "classic" if args.classic else "endless",
         "simulation_hz": SIM_HZ,
         "simulated_seconds": round(steps * SIM_DT, 3),
         "rendered_frames": steps,
@@ -141,14 +144,17 @@ def _interactive(args: argparse.Namespace) -> None:
                          "For a no-window run use --headless.") from exc
     pygame.init()
     screen = pygame.display.set_mode((args.display_size, args.display_size))
-    game = Game(seed=args.seed)
+    game = Game(seed=args.seed, endless=not args.classic)
+    gameplay = "classic" if args.classic else "endless"
     clock = pygame.time.Clock()
     accumulator = 0.0
     running = True
     started = previous = time.perf_counter()
     last_frame = None
     print("W/S: forward/back | A/D: strafe | arrows or Q/E: turn | SPACE/LMB: fire | R: restart | ESC: quit")
-    print("Reference engine; 30 Hz simulation; classical image resizing.")
+    print(f"Reference engine; {gameplay} mode; 30 Hz simulation; classical image resizing.")
+    if not args.classic:
+        print("Endless enemies: respawn after 3 seconds; up to 8 alive; unlimited ammo.")
     try:
         while running:
             now = time.perf_counter()
@@ -185,7 +191,7 @@ def _interactive(args: argparse.Namespace) -> None:
                 surface = scaler(surface, (args.display_size, args.display_size))
             screen.blit(surface, (0, 0))
             pygame.display.flip()
-            pygame.display.set_caption(f"TurkeyWorld reference | simulation 30 Hz | display {clock.get_fps():.0f} FPS | classical upscale")
+            pygame.display.set_caption(f"TurkeyWorld reference | {gameplay} | simulation 30 Hz | display {clock.get_fps():.0f} FPS | classical upscale")
             clock.tick(args.fps)
     finally:
         if last_frame is not None:

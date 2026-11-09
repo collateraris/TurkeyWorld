@@ -1,0 +1,3 @@
+-r requirements-ml.txt
+torchvision>=0.18
+lpips==0.1.4

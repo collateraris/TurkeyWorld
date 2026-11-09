@@ -168,6 +168,37 @@ def choose_segment(episodes, rng, horizon, burn_in, start_mode="random", event_f
     return episode, prefix, burn, {"mode": "ordinary_continuous", "event_index": None}
 
 
+def endless_auxiliary_losses(result, previous, target, simulation_hz):
+    """Scale GT-state motion to one physical tick and label actual respawns.
+
+    These targets belong to a separate recorded-state transition, never to a
+    drifted closed-loop state. Respawn teleports are excluded from NPC motion;
+    their floor-tile labels supervise the categorical spawn distribution.
+    """
+    dt = 1. / simulation_hz
+    prediction = result["state"]
+    player_motion = F.smooth_l1_loss(
+        (prediction[:, :2]-previous[:, :2]) * (16 / (2.4 * dt)),
+        (target[:, :2]-previous[:, :2]) * (16 / (2.4 * dt)))
+    old = previous[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target[:, GLOBAL_DIM:-2].reshape_as(old)
+    predicted = prediction[:, GLOBAL_DIM:-2].reshape_as(old)
+    continuing = (old[:, :, 5] > .5) & (expected[:, :, 5] > .5)
+    movement = F.smooth_l1_loss(
+        (predicted[:, :, :2]-old[:, :, :2]) * (16 / (1.2 * dt)),
+        (expected[:, :, :2]-old[:, :, :2]) * (16 / (1.2 * dt)), reduction="none")
+    npc_motion = (movement * continuing[:, :, None]).sum() / (continuing.sum() * 2).clamp_min(1)
+    spawn = prediction.new_zeros(())
+    if "spawn_logits" in result:
+        revived = (old[:, :, 5] < .5) & (expected[:, :, 5] > .5)
+        tiles = (expected[:, :, :2] * 16).long().clamp(0, 15)
+        labels = tiles[:, :, 0] + 16 * tiles[:, :, 1]
+        values = F.cross_entropy(result["spawn_logits"].reshape(-1, 256), labels.reshape(-1),
+                                 reduction="none").reshape(-1, ENTITY_SLOTS)
+        spawn = (values * revived).sum() / revived.sum().clamp_min(1)
+    return {"motion": player_motion+npc_motion, "spawn": spawn}
+
+
 def run_segment(model, episode, *, optimizer=None, teacher=None, device="cpu",
                 prefix_start=0, rollout=256, chunk=32, burn_in=32,
                 render_every=0, geometry_every=32, collision_weight=1.0,
@@ -216,8 +247,12 @@ def run_segment(model, episode, *, optimizer=None, teacher=None, device="cpu",
                     teach = teacher.transition(current_state, action, teacher_map, teacher_memory)
                     teacher_memory = teach["memory"]
                 current_state, memory, auxiliary_memory = result["state"], result["memory"], auxiliary["memory"]
-    metrics = {key: 0. for key in ["state", "events", "target", "attack", "collision",
-                                  "distill", "image", "depth", "visibility", "loss"]}
+    endless = bool(getattr(model.config, "endless", False))
+    metric_names = ["state", "events", "target", "attack", "collision",
+                    "distill", "image", "depth", "visibility", "loss"]
+    if endless:
+        metric_names += ["motion", "spawn"]
+    metrics = {key: 0. for key in metric_names}
     label_steps = image_steps = geometry_steps = optimizer_steps = detach_boundaries = 0
     boundaries, trace = [], []
     diagnostics = {name: torch.zeros((), dtype=torch.int64, device=device) for name in ["negative_hit_steps", "false_hit_events",
@@ -268,6 +303,11 @@ def run_segment(model, episode, *, optimizer=None, teacher=None, device="cpu",
                                                   none_class_weight, attack_pos_weight)
                 for name, loss in losses.items():
                     totals[name] = totals[name] + loss
+                if endless:
+                    auxiliary_losses = endless_auxiliary_losses(auxiliary, states[step:step + 1],
+                        states[step + 1:step + 2], model.config.simulation_hz)
+                    for name, loss in auxiliary_losses.items():
+                        totals[name] = totals[name] + loss
                 with torch.no_grad():
                     negative_hit = events[step, 1] < .5
                     predicted_hit = (auxiliary["events"][0, 1] > .5 if "events" in auxiliary else
@@ -326,6 +366,8 @@ def run_segment(model, episode, *, optimizer=None, teacher=None, device="cpu",
                     + normalized["attack"] + collision_weight * normalized["collision"]
                     + distill_weight * normalized["distill"] + normalized["image"]
                     + .2 * (normalized["depth"] + normalized["visibility"]))
+            if endless:
+                loss = loss + 5. * normalized["motion"] + .5 * normalized["spawn"]
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError("Non-finite TBPTT loss; checkpoint not overwritten")
             if training:
@@ -354,6 +396,10 @@ def run_segment(model, episode, *, optimizer=None, teacher=None, device="cpu",
         "state_carried_across_chunks": True, "memory_carried_across_chunks": True,
         "map_encoder_calls": map_encode_calls, "map_reencoded_each_chunk": True,
         "event_auxiliary_stream": "recorded_state_and_own_carried_memory",
+        "endless_auxiliary_losses": ({"stream": "recorded_state_and_own_carried_memory",
+                                      "motion_weight": 5., "spawn_weight": .5,
+                                      "npc_motion_excludes_respawn_teleports": True}
+                                     if endless else None),
         "rgb_available": episode.frames is not None, "rendered_supervision_steps": image_steps,
         "geometry_supervision_steps": geometry_steps, "chunk_boundaries": boundaries,
         "event_diagnostics": diagnostics,

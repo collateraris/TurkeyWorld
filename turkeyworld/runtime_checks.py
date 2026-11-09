@@ -92,7 +92,7 @@ def event_flags(events):
     return values >= .5
 
 
-def check_transition(tilemap, previous, current, action, events, dt=1/30):
+def check_transition(tilemap, previous, current, action, events, dt=1/30, *, endless=False):
     """Return violation dictionaries; all input arrays remain untouched.
 
     The 90-value normalized state contract is the game's public interface.
@@ -116,29 +116,81 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30):
         return failures
     height, width = tilemap.shape
     scale = np.array([width, height])
-    old, new = entities(previous), entities(current)
+    original_old, new = entities(previous), entities(current)
+    old = original_old.copy()
     p0, p1 = previous[:2]*scale, current[:2]*scale
-    npc0, npc1 = old[:, :2]*scale, new[:, :2]*scale
-    bounded_indices = [0, 1, 4, 5, 6, 7, 88]
+    npc1 = new[:, :2]*scale
+    original_alive = (original_old[:, 5] >= .5) & (original_old[:, 4] > .0005)
+    alive1 = new[:, 5] >= .5
+    revived = ~original_alive & alive1
+    valid_respawns = np.zeros(8, dtype=bool)
+    if endless:
+        # Construct a virtual pre-combat spawn state only for measurement. It
+        # never replaces a model prediction or feeds a correction into rollout.
+        occupied = [old[i, :2]*scale for i in range(8) if original_alive[i]]
+        floor_centers = np.argwhere(tilemap == 0)[:, ::-1].astype(float) + .5
+        for i in range(8):
+            ready = (not original_alive[i] and previous[4] > .0005
+                     and original_old[i, 8]*.6+dt >= 3.-1e-5)
+            if revived[i]:
+                center = np.floor(npc1[i])+.5
+                legal = True
+                if not ready:
+                    fail("respawn_eligibility", f"NPC{i} revived before three dead seconds or after player death")
+                    legal = False
+                if not circle_is_clear(tilemap, center, NPC_RADIUS):
+                    fail("respawn_wall", f"NPC{i} spawned on a blocked tile")
+                    legal = False
+                if np.linalg.norm(npc1[i]-center) > 1.2*dt+POSE_TOL:
+                    fail("respawn_center", f"NPC{i} spawn must begin at a floor tile center")
+                    legal = False
+                if np.linalg.norm(center-p0) < 4.-POSE_TOL:
+                    fail("respawn_player_distance", f"NPC{i} spawned within four tiles of the player")
+                    legal = False
+                if any(np.linalg.norm(center-point) < 1.-POSE_TOL for point in occupied):
+                    fail("respawn_spacing", f"NPC{i} spawned within one tile of another living NPC")
+                    legal = False
+                allowed_health = [60., 25.] if shot and hit else [60.]
+                if min(abs(new[i, 4]*100-value) for value in allowed_health) > HP_TOL:
+                    fail("respawn_health", f"NPC{i} must respawn with 60 HP, minus a possible same-tick shot")
+                    legal = False
+                if legal:
+                    valid_respawns[i] = True
+                    occupied.append(center)
+                    old[i] = np.array([*(center/scale), 0., 0., .60, 1., 0., 0., 0., 0.])
+            elif ready:
+                # A permanently dead slot cannot masquerade as endless play.
+                has_candidate = any(np.linalg.norm(center-p0) >= 4.-POSE_TOL
+                                    and all(np.linalg.norm(center-point) >= 1.-POSE_TOL for point in occupied)
+                                    for center in floor_centers)
+                if has_candidate:
+                    fail("missed_respawn", f"NPC{i} stayed dead despite an elapsed timer and a legal spawn tile")
+    elif revived.any():
+        fail("revival", "A dead persistent NPC slot became alive")
+    npc0 = old[:, :2]*scale
+    bounded_indices = [0, 1, 4, 5, 6, 7] + ([] if endless else [88])
     if np.any(current[bounded_indices] < -1e-5) or np.any(current[bounded_indices] > 1+1e-5):
         fail("player_range", "Player coordinates/HP/ammo/timers or kill count outside normalized range")
     if abs(np.linalg.norm(current[2:4])-1) > .002:
         fail("heading_norm", "Heading sin/cos is not a unit vector")
-    if np.any(new[:, [0, 1, 4, 5, 6, 7, 8, 9]] < -1e-5) or np.any(new[:, [0, 1, 4, 5, 6, 7, 8, 9]] > 1+1e-5):
+    npc_bounded = [0, 1, 4, 5, 6, 7, 9] + ([] if endless else [8])
+    if (np.any(new[:, npc_bounded] < -1e-5) or np.any(new[:, npc_bounded] > 1+1e-5)
+            or (endless and (np.any(new[:, 8] < -1e-5) or np.any(new[:, 8] > 5.+1e-5)))):
         fail("npc_range", "NPC position/HP/life/timers outside normalized range")
     if np.any(np.minimum(np.abs(new[:, 5]), np.abs(new[:, 5]-1)) > .001):
         fail("nonbinary_alive", "NPC alive flags must be discrete zero/one")
-    alive0, alive1 = old[:, 5] >= .5, new[:, 5] >= .5
+    alive0 = old[:, 5] >= .5
     if np.any((new[:, 4] > .0005) != alive1):
         fail("hp_alive_disagreement", "NPC HP zero and alive flag disagree")
-    if np.any(~alive0 & alive1):
+    if endless and np.any(revived & ~valid_respawns):
         fail("revival", "A dead persistent NPC slot became alive")
     if np.any((new[:, 4]-old[:, 4])*100 > HP_TOL):
         fail("npc_healing", "NPC HP increased although the game has no healing")
     if (current[4]-previous[4])*100 > HP_TOL:
         fail("player_healing", "Player HP increased without a respawn/healing mechanic")
     kills = current[88]*8
-    if abs(kills-round(kills)) > .01 or abs(kills-np.count_nonzero(~alive1)) > .01:
+    expected_kills = previous[88]*8+np.count_nonzero(alive0 & ~alive1) if endless else np.count_nonzero(~alive1)
+    if kills < -.01 or abs(kills-round(kills)) > .01 or abs(kills-expected_kills) > .01:
         fail("kill_count", "Kill count is fractional or disagrees with persistent dead slots")
     if abs((current[89]-previous[89])*300-dt) > .002:
         fail("clock", "Simulation clock does not advance by the configured fixed timestep")
@@ -175,9 +227,11 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30):
     ammo0, ammo1 = previous[5]*99, current[5]*99
     if abs(ammo1-round(ammo1)) > AMMO_TOL:
         fail("fractional_ammo", "Ammo count is not an integer")
-    if abs(ammo0-ammo1-float(shot)) > AMMO_TOL:
-        fail("shot_ammo", "A shot must spend exactly one round; no shot must preserve ammo")
-    eligible_shot = previous[4] > .0005 and action[3] >= .5 and ammo0 >= .5 and previous[6]*.22-dt <= 1e-5
+    expected_ammo_spend = 0. if endless else float(shot)
+    if abs(ammo0-ammo1-expected_ammo_spend) > AMMO_TOL:
+        fail("shot_ammo", "Endless ammo must remain constant" if endless else
+             "A shot must spend exactly one round; no shot must preserve ammo")
+    eligible_shot = previous[4] > .0005 and action[3] >= .5 and (endless or ammo0 >= .5) and previous[6]*.22-dt <= 1e-5
     if bool(shot) != bool(eligible_shot):
         fail("shot_eligibility", "Shot event disagrees with fire input, ammo, cooldown or player life")
     expected_cooldown = 1. if shot else max(0., previous[6]-dt/.22)
@@ -234,6 +288,11 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30):
     died = alive0 & ~alive1
     if bool(kill) != bool(died.any()) or np.count_nonzero(died) > 1 or (kill and not hit):
         fail("kill_event", "Kill event must agree with one HP-zero/alive transition")
+    if endless:
+        expected_death = np.where(~alive0, np.minimum(5., old[:, 8]+dt/.6), old[:, 8])
+        expected_death[died] = 0.
+        if np.any(np.abs(new[:, 8]-expected_death) > .002):
+            fail("npc_death_timer", "Death timers must advance continuously and reset only on a kill or legal respawn")
     hp_loss = (previous[4]-current[4])*100
     if bool(player_hit) != bool(hp_loss > HP_TOL):
         fail("player_hit_hp", "Player-hit event and player HP change disagree")
@@ -269,10 +328,11 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30):
 
 class RolloutMonitor:
     """Aggregate integrity and nontrivial active-session qualification."""
-    def __init__(self, tilemap, scenario, requested_steps, dt=1/30, max_examples=50):
+    def __init__(self, tilemap, scenario, requested_steps, dt=1/30, max_examples=50, *, endless=False):
         self.tilemap = np.asarray(tilemap)
         self.scenario, self.requested_steps, self.dt = scenario, requested_steps, dt
         self.max_examples = max_examples
+        self.endless = bool(endless)
         self.steps = 0
         self.counts, self.examples = Counter(), []
         self.first_failure = None
@@ -284,10 +344,14 @@ class RolloutMonitor:
         self.npc_path_tiles = np.zeros(8, dtype=float)
         self.reference_npc_path_tiles = np.zeros(8, dtype=float)
         self.latest_model_alive = np.ones(8, dtype=bool)
+        self.event_counts, self.reference_event_counts = Counter(), Counter()
+        self.respawn_count = self.reference_respawn_count = 0
+        self.model_player_alive = self.reference_player_alive = True
 
     def observe(self, previous, current, action, events, reference_previous=None, reference_current=None):
         self.steps += 1
-        violations = check_transition(self.tilemap, previous, current, action, events, self.dt)
+        violations = check_transition(self.tilemap, previous, current, action, events, self.dt,
+                                      endless=self.endless)
         for violation in violations:
             self.counts[violation["code"]] += 1
             entry = {"step": self.steps, "time_seconds": round(self.steps*self.dt, 6), **violation}
@@ -300,24 +364,41 @@ class RolloutMonitor:
             distance = float(np.linalg.norm((np.asarray(current)[:2]-np.asarray(previous)[:2])*scale))
             self.path_tiles += distance
             old_npcs, new_npcs = entities(previous), entities(current)
-            self.npc_path_tiles += np.linalg.norm((new_npcs[:, :2]-old_npcs[:, :2])*scale, axis=-1)
+            npc_motion = np.linalg.norm((new_npcs[:, :2]-old_npcs[:, :2])*scale, axis=-1)
+            revived = (old_npcs[:, 5] < .5) & (new_npcs[:, 5] >= .5)
+            if self.endless:
+                npc_motion[revived] = 0.  # Teleports do not count as neural AI response.
+            self.npc_path_tiles += npc_motion
+            self.respawn_count += int(revived.sum())
             self.latest_model_alive = new_npcs[:, 5] >= .5
+            self.model_player_alive = bool(current[4] > .0005)
+            for name, flag in zip(EVENT_NAMES, event_flags(events)):
+                self.event_counts[name] += int(flag)
             self.visited_cells.add(tuple(np.floor(np.asarray(current)[:2]*scale).astype(int)))
             commanded = bool(np.linalg.norm(np.asarray(action)[:2]) > .2)
             self.movement_commands += int(commanded)
             self.responsive_movement_steps += int(commanded and distance > .005)
             self.turn_commands += int(abs(action[2]) > .1)
             self.fire_commands += int(action[3] >= .5)
-            if self.terminal_step is None and (current[4] <= .0005 or current[88]*8 >= 7.99):
+            if self.terminal_step is None and (current[4] <= .0005 or
+                                               (not self.endless and current[88]*8 >= 7.99)):
                 self.terminal_step = self.steps
             if reference_current is not None:
                 ref_distance = float(np.linalg.norm((np.asarray(reference_current)[:2]-np.asarray(reference_previous)[:2])*scale))
                 self.reference_path_tiles += ref_distance
                 old_reference_npcs, new_reference_npcs = entities(reference_previous), entities(reference_current)
-                self.reference_npc_path_tiles += np.linalg.norm(
-                    (new_reference_npcs[:, :2]-old_reference_npcs[:, :2])*scale, axis=-1)
+                ref_motion = np.linalg.norm((new_reference_npcs[:, :2]-old_reference_npcs[:, :2])*scale, axis=-1)
+                ref_revived = (old_reference_npcs[:, 5] < .5) & (new_reference_npcs[:, 5] >= .5)
+                if self.endless:
+                    ref_motion[ref_revived] = 0.
+                self.reference_npc_path_tiles += ref_motion
+                self.reference_respawn_count += int(ref_revived.sum())
+                self.reference_player_alive = bool(reference_current[4] > .0005)
+                self.reference_event_counts['kill'] += int(round(max(0.,
+                    (reference_current[88]-reference_previous[88])*8)))
                 self.reference_movement_steps += int(commanded and ref_distance > .005)
-                if self.reference_terminal_step is None and (reference_current[4] <= .0005 or reference_current[88]*8 >= 7.99):
+                if self.reference_terminal_step is None and (reference_current[4] <= .0005 or
+                        (not self.endless and reference_current[88]*8 >= 7.99)):
                     self.reference_terminal_step = self.steps
         return violations
 
@@ -336,18 +417,30 @@ class RolloutMonitor:
         npc_response_pass = not frozen_npcs
         model_ended_early = self.terminal_step is not None and self.terminal_step < self.requested_steps
         reference_ended_early = source_terminal is not None and source_terminal < self.requested_steps
+        combat_pass = (not self.endless or
+                       (self.event_counts['shot'] >= min(10, max(2, self.requested_steps//30))
+                        and self.event_counts['hit'] >= 2 and self.event_counts['kill'] >= 1
+                        and self.respawn_count >= 1 and self.reference_respawn_count >= 1))
+        alive_pass = (not self.endless or (self.model_player_alive and self.reference_player_alive))
         qualifying = bool(active_scenario and completed and meaningful_motion
                           and npc_response_pass and not model_ended_early
-                          and reference_completed and not reference_ended_early)
+                          and reference_completed and not reference_ended_early
+                          and combat_pass and alive_pass)
         integrity = self.first_failure is None
         return {"completed_requested_steps": completed, "checked_steps": self.steps,
                 "checked_simulated_seconds": round(self.steps*self.dt, 6),
                 "integrity_pass": integrity, "qualifying_active_session": qualifying,
-                "behavioral_checks_pass": bool(meaningful_motion and npc_response_pass),
+                "behavioral_checks_pass": bool(meaningful_motion and npc_response_pass and combat_pass and alive_pass),
                 "state_integrity_active_300s_pass": bool(integrity and qualifying and self.steps*self.dt >= 300.-1e-6),
                 "first_failure": self.first_failure, "violation_counts": dict(self.counts),
                 "failure_examples": self.examples, "model_terminal_step": self.terminal_step,
                 "reference_terminal_step": source_terminal,
+                "endless": self.endless,
+                "combat_coverage": {"events": dict(self.event_counts),
+                                    "model_respawns": self.respawn_count,
+                                    "reference_respawns": self.reference_respawn_count,
+                                    "pass": combat_pass,
+                                    "note": "Endless qualification requires actual shots, hits, a kill and a respawn in both paired trajectories."},
                 "coverage": {"path_tiles": self.path_tiles, "reference_path_tiles": self.reference_path_tiles,
                              "movement_command_steps": self.movement_commands,
                              "responsive_movement_steps": self.responsive_movement_steps,
@@ -361,4 +454,4 @@ class RolloutMonitor:
                                        "frozen_alive_ids": frozen_npcs,
                                        "pass": npc_response_pass,
                                        "note": "Broad anti-freeze gate: living NPCs whose reference travelled at least1tile must travel at least10% as far; this does not prove correct AI/combat."},
-                "qualification_note": "Idle/turn/wall, early terminal episodes and frozen predictions cannot establish 300 seconds of active gameplay."}
+                "qualification_note": "Idle/turn/wall, early terminal episodes, frozen predictions and endless sessions without combat/respawns cannot establish 300 seconds of active gameplay."}

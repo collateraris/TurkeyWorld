@@ -44,16 +44,65 @@ class WorldModelConfig:
     architecture: str = "camera_transformer"
     transition_mode: str = "event_v1"
     simulation_hz: float = 30.0
+    endless: bool = False
+    renderer_mode: str = "direct"
+    flow_steps: int = 0
+    flow_width: int = 0
+    flow_depth: int = 0
+    flow_heads: int = 0
+    flow_mlp_ratio: int = 4
+    flow_mlp_hidden: int = 0
+    renderer_codec: str = 'pixel'
+    renderer_codec_config: dict | None = None
+    flow_adapter_width: int = 0
+    flow_adapter_depth: int = 0
+    flow_adapter_heads: int = 0
+    flow_adapter_mlp_ratio: int = 4
+    vjepa_width: int = 0
+    vjepa_encoder_depth: int = 0
+    vjepa_predictor_depth: int = 0
+    vjepa_heads: int = 0
+    vjepa_context_frames: int = 4
+    vjepa_patch_size: int = 16
+    vjepa_mlp_ratio: int = 4
+    vjepa_readout_mlp_ratio: int = 4
+    vjepa_gradient_checkpointing: bool = False
 
     def __post_init__(self):
         if self.kind not in {"teacher", "student"}:
             raise ValueError("kind must be teacher or student")
         if self.image_size not in {128, 256}:
             raise ValueError("image_size must be 128 or 256")
-        if self.architecture not in {"camera_transformer", "legacy_cnn"}:
-            raise ValueError("architecture must be camera_transformer or legacy_cnn")
+        if self.architecture not in {"camera_transformer", "legacy_cnn", "vjepa2_ac"}:
+            raise ValueError("architecture must be camera_transformer, legacy_cnn or vjepa2_ac")
         if self.transition_mode not in {"event_v1", "residual_v0"}:
             raise ValueError("transition_mode must be event_v1 or residual_v0")
+        if self.endless and self.transition_mode != "event_v1":
+            raise ValueError("endless mode requires event_v1 typed bookkeeping")
+        if self.renderer_mode not in {"direct", "flow_matching", "rectified_flow"}:
+            raise ValueError("renderer_mode must be direct, flow_matching or rectified_flow")
+        if self.renderer_codec not in {'pixel', 'vqgan'}:
+            raise ValueError('renderer_codec must be pixel or vqgan')
+        if self.renderer_codec == 'vqgan' and (self.renderer_mode == 'direct' or not self.renderer_codec_config):
+            raise ValueError('VQGAN rendering requires a flow renderer and explicit codec configuration')
+        if self.flow_mlp_hidden < 0:
+            raise ValueError('Flow hidden width must be nonnegative')
+        if self.flow_steps < 0:
+            raise ValueError("flow_steps must be nonnegative; zero selects the kind default")
+        if min(self.flow_width, self.flow_depth, self.flow_heads, self.flow_adapter_width,
+               self.flow_adapter_depth, self.flow_adapter_heads) < 0:
+            raise ValueError("flow dimensions must be nonnegative; zero selects defaults")
+        if min(self.flow_mlp_ratio, self.flow_adapter_mlp_ratio) < 1:
+            raise ValueError("flow MLP ratios must be positive")
+        if bool(self.flow_adapter_width) != bool(self.flow_adapter_depth):
+            raise ValueError("flow adapter width/depth must be enabled together")
+        if min(self.vjepa_width, self.vjepa_encoder_depth, self.vjepa_predictor_depth, self.vjepa_heads) < 0:
+            raise ValueError("V-JEPA dimensions must be nonnegative; zero selects compact kind defaults")
+        if min(self.vjepa_context_frames, self.vjepa_patch_size, self.vjepa_mlp_ratio,
+               self.vjepa_readout_mlp_ratio) < 1:
+            raise ValueError("V-JEPA context, patch and MLP sizes must be positive")
+        if self.architecture == 'vjepa2_ac' and (self.transition_mode != 'event_v1' or self.image_size % self.vjepa_patch_size):
+            raise ValueError("V-JEPA requires event_v1 and patches dividing the image size")
         if not math.isfinite(self.simulation_hz) or self.simulation_hz <= 0:
             raise ValueError("simulation_hz must be finite and positive")
 
@@ -63,7 +112,7 @@ class WorldModelConfig:
 
     @property
     def map_channels(self):
-        if self.architecture == "camera_transformer":
+        if self.architecture in {"camera_transformer", "vjepa2_ac"}:
             return 192 if self.kind == "teacher" else 128
         return 64 if self.kind == "teacher" else 32
 
@@ -161,6 +210,28 @@ class NeuralWorldModel(nn.Module):
     def __init__(self, config: WorldModelConfig | None = None):
         super().__init__()
         self.config = config or WorldModelConfig()
+        if self.config.renderer_mode != "direct":
+            from .flow_renderer import ConditionalFlowRenderer
+            renderer = ConditionalFlowRenderer
+            codec = {}
+            if self.config.renderer_codec == 'vqgan':
+                from .latent_flow_renderer import LatentFlowRenderer
+                renderer = LatentFlowRenderer
+                codec['codec_config'] = self.config.renderer_codec_config
+            self.flow_renderer = renderer(kind=self.config.kind,
+                image_size=self.config.image_size, mode=self.config.renderer_mode,
+                steps=self.config.flow_steps, width=self.config.flow_width,
+                depth=self.config.flow_depth, heads=self.config.flow_heads,
+                mlp_ratio=self.config.flow_mlp_ratio,
+                adapter_width=self.config.flow_adapter_width,
+                adapter_depth=self.config.flow_adapter_depth,
+                adapter_heads=self.config.flow_adapter_heads,
+                adapter_mlp_ratio=self.config.flow_adapter_mlp_ratio,
+                mlp_hidden=self.config.flow_mlp_hidden, **codec)
+        if self.config.architecture == 'vjepa2_ac':
+            from .vjepa2_ac import VJEPA2ACWorldBackend
+            self.vjepa_backend = VJEPA2ACWorldBackend(self.config)
+            return
         if self.config.architecture == "camera_transformer":
             from .transformer_model import CameraTransformerWorldModel
             self.camera_backend = CameraTransformerWorldModel(self.config)
@@ -175,6 +246,9 @@ class NeuralWorldModel(nn.Module):
         self.action_encoder = nn.Sequential(nn.Linear(ACTION_DIM, 64), nn.SiLU())
         self.recurrent = nn.GRUCell(256 + 256 + 128 + 64, h)
         self.delta_head = nn.Sequential(nn.Linear(h, h), nn.SiLU(), nn.Linear(h, STATE_DIM))
+        if self.config.endless:
+            self.spawn_head = nn.Sequential(nn.Linear(h, h), nn.SiLU(), nn.Linear(h, ENTITY_SLOTS * 256))
+            self.register_buffer("_spawn_walkable", torch.empty(0, dtype=torch.bool), persistent=False)
         if self.config.transition_mode == "residual_v0":
             self.event_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, EVENT_DIM))
         else:
@@ -200,19 +274,35 @@ class NeuralWorldModel(nn.Module):
         yy, xx = torch.meshgrid(torch.linspace(-1, 1, 16), torch.linspace(-1, 1, 16), indexing="ij")
         self.register_buffer("coordinates", torch.stack([xx, yy])[None], persistent=False)
 
+    def requires_grad_(self, requires_grad=True):
+        super().requires_grad_(requires_grad)
+        codec = getattr(getattr(self, 'flow_renderer', None), 'codec', None)
+        if codec is not None:
+            codec.eval().requires_grad_(False)
+        return self
+
     def encode_map(self, grid):
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.encode_map(grid)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.encode_map(grid)
-        return self.map_encoder(grid)
+        features = self.map_encoder(grid)
+        if self.config.endless:
+            self._spawn_walkable = (grid == 0).to(device=features.device)
+        return features
 
     def initial_memory(self, batch: int, device=None, dtype=None):
         """Neural memory follows weights in event_v1; world state stays FP32."""
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.initial_memory(batch, device, dtype)
         p = next(self.parameters())
         if self.config.transition_mode == "event_v1":
             dtype = p.dtype  # Persistent state is FP32; neural memory follows weights.
         return torch.zeros(batch, self.config.hidden, device=device or p.device, dtype=dtype or p.dtype)
 
     def transition(self, state, action, map_features, memory=None):
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.transition(state, action, map_features, memory, project_state)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.transition(state, action, map_features, memory, project_state)
         if state.ndim != 2 or state.shape[-1] != STATE_DIM:
@@ -249,13 +339,26 @@ class NeuralWorldModel(nn.Module):
         # alive, ammo, timers, counters and yaw cannot drift as free residuals.
         from .structured_state import structured_transition
         targets, attacks = self.hit_target_head(memory).float(), self.attack_head(memory).float()
+        spawn = {}
+        if self.config.endless:
+            from .spawn import decode_spawn_positions
+            logits = self.spawn_head(memory).float().reshape(-1, ENTITY_SLOTS, 256)
+            positions, valid = decode_spawn_positions(logits, authoritative_state, self._spawn_walkable,
+                                                      1. / self.config.simulation_hz)
+            spawn = {"spawn_logits": logits, "spawn_positions": positions, "spawn_valid": valid}
         result = structured_transition(authoritative_state, candidate, action.float(), targets, attacks,
-                                       dt=1. / self.config.simulation_hz, training=self.training)
+                                       dt=1. / self.config.simulation_hz, training=self.training,
+                                       endless=self.config.endless,
+                                       spawn_positions=spawn.get("spawn_positions"), spawn_valid=spawn.get("spawn_valid"))
         return {**result, "memory": memory, "features": self.feature_head(memory),
-                "target_logits": targets, "attack_logits": attacks}
+                "target_logits": targets, "attack_logits": attacks, **spawn}
 
-    def render(self, state, features, map_features):
-        if self.config.architecture == "camera_transformer":
+    def render_base(self, state, features, map_features):
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.render_with_aux(state, features, map_features)['rgb']
+        if self.config.architecture == 'vjepa2_ac':
+            result = self.vjepa_backend.render_with_aux(state, features, map_features)
+        elif self.config.architecture == "camera_transformer":
             return self.camera_backend.render_with_aux(state, features, map_features)["rgb"]
         if self.config.transition_mode == "event_v1":
             # All animation/flash/tint inputs are explicit state fields. GRU
@@ -273,17 +376,52 @@ class NeuralWorldModel(nn.Module):
         head = self.rgb128 if n_blocks == 3 else self.rgb256
         return torch.sigmoid(head(image))
 
+    def render(self, state, features, map_features):
+        """Render through the configured direct or conditional-flow decoder."""
+        base = self.render_base(state, features, map_features)
+        if self.config.renderer_mode == "direct":
+            return base
+        return self.flow_renderer.sample(base, render_state_view(state))
+
     def render_with_aux(self, state, features, map_features):
         """Render RGB and, for the token model, learned depth/visibility features."""
         if self.config.architecture == "camera_transformer":
-            return self.camera_backend.render_with_aux(state, features, map_features)
-        return {"rgb": self.render(state, features, map_features)}
+            result = self.camera_backend.render_with_aux(state, features, map_features)
+        else:
+            result = {"rgb": self.render_base(state, features, map_features)}
+        if self.config.renderer_mode != "direct":
+            result = {**result, "base_rgb": result["rgb"],
+                      "rgb": self.flow_renderer.sample(result["rgb"], render_state_view(state))}
+        return result
 
     def geometry(self, state, map_features):
         """Camera-conditioned learned auxiliaries; legacy renderer has none."""
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.geometry(state, map_features)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.geometry(state, map_features)
         return {}
+
+    @property
+    def core(self):
+        if self.config.architecture != 'vjepa2_ac':
+            raise AttributeError('This architecture has no V-JEPA core')
+        return self.vjepa_backend.core
+
+    def initialize_from_image(self, rgb, state, map_features=None):
+        if self.config.architecture == 'vjepa2_ac':
+            return self.vjepa_backend.initialize_from_image(rgb, state, map_features)
+        return self.initial_memory(state.shape[0], state.device)
+
+    def latent_features(self, memory):
+        if self.config.architecture != 'vjepa2_ac':
+            raise ValueError('Latent visual features require the V-JEPA architecture')
+        return self.vjepa_backend.latent_features(memory)
+
+    def initialize_from_latents(self, latents, state, map_features=None):
+        if self.config.architecture != 'vjepa2_ac':
+            raise ValueError('Visual latent initialization requires the V-JEPA architecture')
+        return self.vjepa_backend.initialize_from_latents(latents, state, map_features)
 
     def step(self, state, action, grid=None, memory=None, map_features=None, render=True):
         if map_features is None:
@@ -319,15 +457,21 @@ class SingleFrameUpscaler(nn.Module):
 
 
 def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | None = None):
-    if model.config.architecture == "camera_transformer":
-        backend = model.camera_backend
-        parts = {"map_encoder": sum(p.numel() for p in backend.map_encoder.parameters()),
+    if model.config.architecture in {"camera_transformer", 'vjepa2_ac'}:
+        backend = model.vjepa_backend if model.config.architecture == 'vjepa2_ac' else model.camera_backend
+        renderer = backend.renderer if model.config.architecture == 'vjepa2_ac' else backend
+        parts = {"map_encoder": sum(p.numel() for p in renderer.map_encoder.parameters()),
                  "renderer": backend.renderer_parameter_count(),
-                 "shared_camera_geometry": sum(p.numel() for p in backend.geometry_reader.parameters())}
+                 "shared_camera_geometry": sum(p.numel() for p in renderer.geometry_reader.parameters())}
+        if model.config.architecture == 'vjepa2_ac':
+            parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
+            parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
     else:
         parts = {"map_encoder": sum(p.numel() for p in model.map_encoder.parameters())}
         renderer_names = ("render_condition.", "render_input.", "render_blocks.", "rgb128.", "rgb256.")
         parts["renderer"] = sum(p.numel() for n, p in model.named_parameters() if n.startswith(renderer_names))
+    if model.config.renderer_mode != "direct":
+        parts["renderer"] += sum(p.numel() for p in model.flow_renderer.parameters())
     parts["world_total"] = sum(p.numel() for p in model.parameters())
     parts["dynamics_including_map"] = parts["world_total"] - parts["renderer"]
     parts["upscaler"] = 0 if upscaler is None else sum(p.numel() for p in upscaler.parameters())

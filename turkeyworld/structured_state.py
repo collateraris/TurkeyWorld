@@ -26,6 +26,7 @@ FLASH_DURATION = 0.10
 ATTACK_INTERVAL = 1.20
 HURT_DURATION = 0.15
 DEATH_DURATION = 0.60
+RESPAWN_DELAY = 3.0
 PLAYER_SPEED = 2.4
 NPC_SPEED_BOUND = 1.2
 TURN_SPEED = 2.2
@@ -47,7 +48,8 @@ def _straight_through(hard, soft, training):
 
 
 def structured_transition(previous, candidate, action, target_logits,
-                          attack_logits, dt=1 / 30, training=False):
+                          attack_logits, dt=1 / 30, training=False,
+                          endless=False, spawn_positions=None, spawn_valid=None):
     """Return a coherent 90D state and accepted events without a simulator.
 
     Args:
@@ -56,6 +58,9 @@ def structured_transition(previous, candidate, action, target_logits,
             animation phase, kills and time use the rules stated in this file.
         action: [B,4] = forward, strafe, turn, fire. Turn is integrated exactly;
             zero movement inputs preserve player XY regardless of candidate.
+            Endless mode also bounds each proposed XY component by the signed
+            command after turning. Walls may reduce a component; the network
+            cannot invent movement along an uncommanded or opposite axis.
         target_logits: [B,9]; classes 0..7 identify NPCs, class 8 means no hit.
             Argmax chooses a target; choosing an already dead target is rejected.
         attack_logits: [B,8]; >=0 proposes an attack. Range, life, terminal state
@@ -102,6 +107,25 @@ def structured_transition(previous, candidate, action, target_logits,
     )
     old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     proposed = candidate[:, GLOBAL_DIM:-2].reshape_as(old)
+    original_alive = (old[:, :, 5] >= 0.5) & (old[:, :, 4] > 0)
+    respawn = torch.zeros_like(original_alive)
+    if endless and spawn_positions is not None:
+        if spawn_positions.shape != (batch, ENTITY_SLOTS, 2):
+            raise ValueError("spawn_positions must have shape [B,8,2]")
+        if spawn_valid is None or spawn_valid.shape != (batch, ENTITY_SLOTS):
+            raise ValueError("spawn_valid must have shape [B,8]")
+        respawn = (~original_alive & spawn_valid.bool()
+                   & (old[:, :, 8] * DEATH_DURATION + dt >= RESPAWN_DELAY - 1e-6)
+                   & (previous[:, 4:5] > 0))
+        fresh = torch.cat([spawn_positions.to(dtype=dtype).clamp(0, 1),
+                           torch.zeros_like(old[:, :, 2:4]),
+                           torch.full_like(old[:, :, 4:5], .60),
+                           torch.ones_like(old[:, :, 5:6]), torch.zeros_like(old[:, :, 6:])], -1)
+        old = torch.where(respawn[:, :, None], fresh, old)
+        # A new slot starts at its decoded center; learned motion resumes on
+        # the following tick. It is never bounded from its previous corpse.
+        proposed = torch.cat([torch.where(respawn[:, :, None], old[:, :, :2], proposed[:, :, :2]),
+                              proposed[:, :, 2:]], -1)
     # Valid event_v1 states have exact binary life flags. These guards also
     # prevent malformed dead-flag/positive-HP inputs from resurrecting an ID.
     old_alive = (old[:, :, 5] >= 0.5) & (old[:, :, 4] > 0)
@@ -125,6 +149,25 @@ def structured_transition(previous, candidate, action, target_logits,
                           heading[:, 1] * turn_cos - heading[:, 0] * turn_sin], dim=-1)
     turned = turned / torch.linalg.vector_norm(turned, dim=-1, keepdim=True).clamp_min(1e-6)
     new_heading = torch.where(player_alive[:, None], turned, previous[:, 2:4])
+    if endless:
+        # A disclosed kinematic bound, not a collision query. The learned XY
+        # proposal still determines how much commanded movement is blocked.
+        # Per-axis limits already imply the Euclidean player speed limit.
+        movement = controls[:, :2]
+        magnitude = torch.linalg.vector_norm(movement, dim=-1, keepdim=True).clamp_min(1.)
+        forward, strafe = (movement / magnitude).unbind(-1)
+        commanded = torch.stack([new_heading[:, 1]*forward-new_heading[:, 0]*strafe,
+                                 new_heading[:, 0]*forward+new_heading[:, 1]*strafe], -1)
+        commanded = commanded * (PLAYER_SPEED * dt / MAP_EXTENT)
+        proposed_delta = candidate[:, :2].clamp(0, 1)-previous[:, :2]
+        zero = torch.zeros_like(commanded)
+        constrained = torch.maximum(torch.minimum(proposed_delta, torch.maximum(commanded, zero)),
+                                     torch.minimum(commanded, zero))
+        # Preserve gradients to an incorrectly signed/oversized NN proposal.
+        # Without this straight-through term clipping can strand it at zero.
+        player_delta = (proposed_delta + (constrained-proposed_delta).detach()
+                        if training else constrained)
+        player_xy = previous[:, :2]+player_delta*movement_requested[:, None].to(dtype)
 
     fire_cd = (previous[:, 6].clamp(0, 1) - dt / FIRE_INTERVAL).clamp_min(0)
     flash = (previous[:, 7].clamp(0, 1) - dt / FLASH_DURATION).clamp_min(0)
@@ -132,9 +175,9 @@ def structured_transition(previous, candidate, action, target_logits,
     # 1/99 from a float repeatedly strands the last bullet below its threshold.
     ammo_count = (previous[:, 5].clamp(0, 1) * 99).round()
     shot = ((controls[:, 3] >= 0.5) & player_alive &
-            (ammo_count >= 1) & (fire_cd <= 1e-6))
+            ((ammo_count >= 1) | bool(endless)) & (fire_cd <= 1e-6))
     shot_float = shot.to(dtype)
-    ammo = (ammo_count - shot_float) / 99
+    ammo = (ammo_count if endless else ammo_count - shot_float) / 99
     fire_cd = torch.where(shot, torch.ones_like(fire_cd), fire_cd)
     flash = torch.where(shot, torch.ones_like(flash), flash)
 
@@ -166,9 +209,10 @@ def structured_transition(previous, candidate, action, target_logits,
 
     hurt = (old[:, :, 7].clamp(0, 1) - dt / HURT_DURATION).clamp_min(0)
     hurt = torch.where(hard_hit_weights > 0, torch.ones_like(hurt), hurt)
+    death_limit = RESPAWN_DELAY / DEATH_DURATION if endless else 1.0
     death = torch.where(~old_alive,
-                        (old[:, :, 8].clamp(0, 1) + dt / DEATH_DURATION).clamp_max(1),
-                        old[:, :, 8].clamp(0, 1))
+                        (old[:, :, 8].clamp(0, death_limit) + dt / DEATH_DURATION).clamp_max(death_limit),
+                        old[:, :, 8].clamp(0, death_limit))
     death = torch.where(newly_dead, torch.zeros_like(death), death)
     phase = torch.where(npc_moving, torch.remainder(old[:, :, 9] + 2.6 * dt, 1), old[:, :, 9])
     attack_cd = (old[:, :, 6].clamp(0, 1) - dt / ATTACK_INTERVAL).clamp_min(0)
@@ -192,7 +236,8 @@ def structured_transition(previous, candidate, action, target_logits,
     entities = torch.cat([npc_xy, npc_velocity, npc_hp[:, :, None], alive.to(dtype)[:, :, None],
                           attack_cd[:, :, None], hurt[:, :, None], death[:, :, None],
                           phase[:, :, None]], dim=-1)
-    kills = (~alive).to(dtype).sum(dim=-1) / ENTITY_SLOTS
+    kills = (previous[:, -2].clamp_min(0) + newly_dead.to(dtype).sum(-1) / ENTITY_SLOTS
+             if endless else (~alive).to(dtype).sum(dim=-1) / ENTITY_SLOTS)
     # Time is normalized by 300 but deliberately NOT clipped at 300 seconds.
     elapsed = previous[:, -1].clamp_min(0) + dt / 300
     state = torch.cat([globals_, entities.flatten(1), kills[:, None], elapsed[:, None]], dim=-1)
@@ -216,6 +261,7 @@ def structured_transition(previous, candidate, action, target_logits,
         "accepted_attacks": accepted_attacks, "shot": shot, "hit": hit,
         "kill": kill, "player_hit": player_hit, "npc_damage": npc_damage,
         "player_damage": player_damage, "damage": npc_damage,
-        "newly_dead": newly_dead, "player_displacement": player_xy - previous[:, :2],
+        "newly_dead": newly_dead, "respawn_flags": respawn,
+        "player_displacement": player_xy - previous[:, :2],
         "npc_displacement": npc_delta,
     }

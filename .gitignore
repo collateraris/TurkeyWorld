@@ -1,0 +1,61 @@
+# Python caches, environments and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+*.egg-info/
+/build/
+/dist/
+
+# Generated training datasets, checkpoints and experiment output
+/data/
+/data_*/
+/datasets/
+/checkpoints/
+/training_runs/
+/runs/
+/reports/
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+events.out.tfevents.*
+
+# Downloaded local tools, dependencies and generated Site output
+/.tools/
+node_modules/
+/.site-workflow/
+/training_dashboard/dist/
+/training_dashboard/.openai/.local/
+/training_dashboard/.wrangler/
+
+# Local configuration, credentials, logs and temporary files
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.log
+*.pid
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Personal editor configuration
+.idea/
+.vscode/

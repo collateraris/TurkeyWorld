@@ -158,7 +158,7 @@ class CameraGeometry(nn.Module):
 
 class CameraTransformerWorldModel(nn.Module):
     """Token dynamics plus fixed-size recurrent memory and a patch renderer."""
-    def __init__(self, config):
+    def __init__(self, config, *, render_only=False):
         super().__init__()
         self.config = config
         self.width = width = 192 if config.kind == "teacher" else 128
@@ -167,31 +167,39 @@ class CameraTransformerWorldModel(nn.Module):
         hidden = config.hidden
         self.map_encoder = MapTokenEncoder(config.tile_types, width, heads, layers)
         self.geometry_reader = CameraGeometry(width)
-        self.player_token = nn.Sequential(nn.Linear(10, width), nn.GELU(), nn.Linear(width, width))
-        self.action_token = nn.Linear(4, width)
-        self.memory_token = nn.Linear(hidden, width)
-        self.scene_type_embeddings = nn.Parameter(torch.randn(11, width) * .02)
-        self.scene_blocks = nn.ModuleList([TokenReadBlock(width, heads) for _ in range(layers)])
-        self.recurrent = nn.GRUCell(width, hidden)
-        self.delta_head = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, STATE_DIM))
-        if config.transition_mode == "residual_v0":
-            self.event_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 4))
-        else:
-            from .models import initialize_event_heads
-            self.hit_target_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 9))
-            self.attack_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 8))
-            initialize_event_heads(self.hit_target_head, self.attack_head)
-        self.feature_head = nn.Sequential(nn.Linear(hidden, FEATURE_DIM), nn.SiLU())
-        nn.init.zeros_(self.delta_head[-1].weight)
-        nn.init.zeros_(self.delta_head[-1].bias)
+        if not render_only:
+            self.player_token = nn.Sequential(nn.Linear(10, width), nn.GELU(), nn.Linear(width, width))
+            self.action_token = nn.Linear(4, width)
+            self.memory_token = nn.Linear(hidden, width)
+            self.scene_type_embeddings = nn.Parameter(torch.randn(11, width) * .02)
+            self.scene_blocks = nn.ModuleList([TokenReadBlock(width, heads) for _ in range(layers)])
+            self.recurrent = nn.GRUCell(width, hidden)
+            self.delta_head = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, STATE_DIM))
+            if config.endless:
+                self.spawn_head = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(),
+                                                nn.Linear(hidden, ENTITY_SLOTS * 256))
+            if config.transition_mode == "residual_v0":
+                self.event_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 4))
+            else:
+                from .models import initialize_event_heads
+                self.hit_target_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 9))
+                self.attack_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 8))
+                initialize_event_heads(self.hit_target_head, self.attack_head)
+            self.feature_head = nn.Sequential(nn.Linear(hidden, FEATURE_DIM), nn.SiLU())
+            nn.init.zeros_(self.delta_head[-1].weight)
+            nn.init.zeros_(self.delta_head[-1].bias)
+        if config.endless:
+            self.register_buffer("_spawn_walkable", torch.empty(0, dtype=torch.bool), persistent=False)
 
         self.render_condition = nn.Sequential(nn.Linear(STATE_DIM + FEATURE_DIM, width), nn.GELU(),
                                                 nn.Linear(width, width))
         self.screen_position = nn.Sequential(nn.Linear(18, width), nn.GELU(), nn.Linear(width, width))
         self.render_blocks = nn.ModuleList([TokenReadBlock(width, heads) for _ in range(layers)])
         self.render_norm = nn.LayerNorm(width)
-        self.rgb128 = nn.Linear(width, 3 * 8 * 8)
-        self.rgb256 = nn.Linear(width, 3 * 16 * 16)
+        if not render_only or config.image_size == 128:
+            self.rgb128 = nn.Linear(width, 3 * 8 * 8)
+        if not render_only or config.image_size == 256:
+            self.rgb256 = nn.Linear(width, 3 * 16 * 16)
         y, x = torch.meshgrid((torch.arange(16) + .5) / 8 - 1,
                               (torch.arange(16) + .5) / 8 - 1, indexing="ij")
         xy = torch.stack([x, y], -1).reshape(1, 256, 2)
@@ -201,7 +209,10 @@ class CameraTransformerWorldModel(nn.Module):
         self.register_buffer("screen_coordinates", position_features, persistent=False)
 
     def encode_map(self, grid):
-        return self.map_encoder(grid)
+        features = self.map_encoder(grid)
+        if self.config.endless:
+            self._spawn_walkable = (grid == 0).to(device=features.device)
+        return features
 
     def initial_memory(self, batch, device=None, dtype=None):
         parameter = next(self.parameters())
@@ -250,10 +261,19 @@ class CameraTransformerWorldModel(nn.Module):
         # attacks and XY motion; typed rules update HP/alive/ammo/yaw/timers.
         from .structured_state import structured_transition
         targets, attacks = self.hit_target_head(memory).float(), self.attack_head(memory).float()
+        spawn = {}
+        if self.config.endless:
+            from .spawn import decode_spawn_positions
+            logits = self.spawn_head(memory).float().reshape(-1, ENTITY_SLOTS, 256)
+            positions, valid = decode_spawn_positions(logits, authoritative_state, self._spawn_walkable,
+                                                      1. / self.config.simulation_hz)
+            spawn = {"spawn_logits": logits, "spawn_positions": positions, "spawn_valid": valid}
         result = structured_transition(authoritative_state, candidate, action.float(), targets, attacks,
-                                       dt=1. / self.config.simulation_hz, training=self.training)
+                                       dt=1. / self.config.simulation_hz, training=self.training,
+                                       endless=self.config.endless,
+                                       spawn_positions=spawn.get("spawn_positions"), spawn_valid=spawn.get("spawn_valid"))
         return {**result, "memory": memory, "features": self.feature_head(memory),
-                "target_logits": targets, "attack_logits": attacks}
+                "target_logits": targets, "attack_logits": attacks, **spawn}
 
     def render_with_aux(self, state, features, map_features):
         if self.config.transition_mode == "event_v1":
@@ -261,7 +281,8 @@ class CameraTransformerWorldModel(nn.Module):
             # cached map. Different recurrent histories cannot repaint walls
             # when those inputs are identical. 128D features remain KD-only.
             state = state.to(dtype=map_features.dtype)
-            features = torch.zeros_like(features, dtype=map_features.dtype)
+            features = (features.to(dtype=map_features.dtype) if self.config.architecture == "vjepa2_ac"
+                        else torch.zeros_like(features, dtype=map_features.dtype))
         geometry = self.geometry(state, map_features)
         if self.config.transition_mode == "event_v1":
             from .models import render_state_view
