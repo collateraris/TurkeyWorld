@@ -130,6 +130,70 @@ class OptimizerMigrationTests(unittest.TestCase):
         torch.testing.assert_close(mapped["state"][0]["exp_avg"],
                                    checkpoint["optimizer"]["state"][1]["exp_avg"], rtol=0, atol=0)
 
+    def test_full_adamw_keeps_frozen_weights_moments_and_exact_unfrozen_resume(self):
+        from turkeyworld.optimizer_migration import optimizer_parameter_names, optimizer_state_for_trainables
+        _, _, model, optimizer, checkpoint, x = self.fixture()
+        mapped, _ = optimizer_state_for_trainables(checkpoint, model, optimizer)
+        optimizer.load_state_dict(mapped)
+        # Initialize both components' actual AdamW state before the phase.
+        model(x).square().mean().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        original_names = optimizer_parameter_names(model, optimizer)
+        frozen_weights = copy.deepcopy(model.flow_renderer.state_dict())
+        frozen_moments = {name: copy.deepcopy(optimizer.state[parameter])
+                          for name, parameter in model.flow_renderer.named_parameters()}
+        model.flow_renderer.requires_grad_(False)
+        with self.assertRaisesRegex(ValueError, 'frozen parameter'):
+            optimizer_parameter_names(model, optimizer)
+        self.assertEqual(optimizer_parameter_names(model, optimizer, allow_frozen=True), original_names)
+        # The same full optimizer updates core while inactive Flow grad=None.
+        model(x).square().mean().backward()
+        self.assertTrue(all(parameter.grad is None for parameter in model.flow_renderer.parameters()))
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        for name, parameter in model.flow_renderer.named_parameters():
+            torch.testing.assert_close(parameter, frozen_weights[name], rtol=0, atol=0)
+            for key, value in frozen_moments[name].items():
+                torch.testing.assert_close(optimizer.state[parameter][key], value, rtol=0, atol=0)
+        saved = {'model': copy.deepcopy(model.state_dict()),
+                 'optimizer': copy.deepcopy(optimizer.state_dict()),
+                 'optimizer_parameter_names': optimizer_parameter_names(model, optimizer, allow_frozen=True),
+                 'pipeline_phase': 'teacher175vq_world'}
+        restored = copy.deepcopy(model)
+        # Restore the full optimizer before configuring the next active phase.
+        restored.flow_renderer.requires_grad_(True)
+        resumed_optimizer = torch.optim.AdamW([p for p in restored.parameters() if p.requires_grad], lr=.9)
+        rng = torch.get_rng_state().clone()
+        state, report = optimizer_state_for_trainables(saved, restored, resumed_optimizer)
+        torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+        self.assertTrue(report['parameter_order_unchanged'])
+        self.assertEqual(report['added_parameters'], [])
+        self.assert_state_equal(state, saved['optimizer'])
+        resumed_optimizer.load_state_dict(state)
+        model.flow_renderer.requires_grad_(True)
+        model(x).square().mean().backward()
+        restored(x).square().mean().backward()
+        optimizer.step()
+        resumed_optimizer.step()
+        for actual, expected in zip(restored.parameters(), model.parameters()):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assert_state_equal(resumed_optimizer.state_dict(), optimizer.state_dict())
+
+    def test_allow_frozen_still_rejects_foreign_and_duplicate_parameters(self):
+        from turkeyworld.optimizer_migration import optimizer_parameter_names
+        _, _, model, optimizer, _, _ = self.fixture()
+        model.core.requires_grad_(False)
+        self.assertEqual(len(optimizer_parameter_names(model, optimizer, allow_frozen=True)[0]), 4)
+        group = optimizer.param_groups[0]['params']
+        group.append(group[0])
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            optimizer_parameter_names(model, optimizer, allow_frozen=True)
+        group.pop()
+        group.append(torch.nn.Parameter(torch.ones(1), requires_grad=False))
+        with self.assertRaisesRegex(ValueError, 'outside the model'):
+            optimizer_parameter_names(model, optimizer, allow_frozen=True)
+
     def test_legacy_fallback_is_restricted_to_known_pretraining_phase_and_exact_order_size(self):
         from turkeyworld.optimizer_migration import optimizer_state_for_trainables
         _, _, model, optimizer, checkpoint, _ = self.fixture()

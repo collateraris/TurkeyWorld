@@ -17,8 +17,13 @@ _LEGACY_WORLD_PHASE = re.compile(r"teacher\d*(?:vq)?_world(?:_\d+)?\Z")
 _FROZEN_PRETRAIN_PREFIXES = ("flow_renderer.", "vjepa_backend.renderer.")
 
 
-def optimizer_parameter_names(model, optimizer):
-    """Return validated nested names for the supported single optimizer group."""
+def optimizer_parameter_names(model, optimizer, *, allow_frozen=False):
+    """Return validated names for the supported single optimizer group.
+
+    A staged trainer may retain its full AdamW parameter group while freezing
+    an inactive component. ``allow_frozen`` only permits naming those existing
+    model parameters; duplicate and foreign parameters remain invalid.
+    """
     if len(optimizer.param_groups) != 1:
         raise ValueError("Optimizer migration supports exactly one parameter group")
     names_by_identity = {id(parameter): name for name, parameter in model.named_parameters()}
@@ -29,7 +34,7 @@ def optimizer_parameter_names(model, optimizer):
             raise ValueError("Current optimizer contains a parameter outside the model")
         if name in seen:
             raise ValueError("Current optimizer contains duplicate parameter names")
-        if not parameter.requires_grad:
+        if not parameter.requires_grad and not allow_frozen:
             raise ValueError(f"Current optimizer contains a frozen parameter: {name}")
         seen.add(name)
         names.append(name)

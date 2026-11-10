@@ -211,16 +211,18 @@ class StagedCurriculum:
         stage = self.stage
         dataset = self.plan['datasets'][stage['id']]
         self.state.update(stage=stage['id'], stage_label=stage['label'], stages=list(STAGES),
-            renderer_only=stage['renderer_only'], stage_updates=step-self.state['stage_start_step'],
+            renderer_only=stage['renderer_only'], stage_updates=step-self.state['stage_start_step']-self.state.get('stage_excluded_updates', 0),
             validation_every=100, required_passes=self.plan.get('required_passes', 2),
             target_seconds=15, target_steps=450, source_engine_feedback=False,
             current_data={key: dataset.get(key) for key in
                 ('directory', 'train_clips', 'validation_clips', 'train_transitions', 'train_snapshots')},
             replay_fraction=0. if self.state['stage_index'] == 0 else self.plan.get('replay_fraction', .25))
+        from .navigation_experiment import sync_navigation_experiment
+        sync_navigation_experiment(self, step)
         return self.state
 
     def horizon(self, step):
-        updates = step-self.state['stage_start_step']
+        updates = step-self.state['stage_start_step']-self.state.get('stage_excluded_updates', 0)
         if self.stage['renderer_only']:
             return 1
         if self.stage['id'] == 'navigation':
@@ -241,16 +243,21 @@ class StagedCurriculum:
             raise ValueError('A validation step cannot advance the gate twice')
         streak = self.state['pass_streak']+1 if passed and eligible else 0
         self.state['pass_streak'] = streak
+        focus = self.state.get('sampling_experiment')
+        focus_hold = bool(focus and focus['status'] == 'active')
         gate = {'status': 'passed' if passed else 'failed', 'step': step,
             'metrics': report.get('metrics', {}), 'thresholds': report.get('thresholds', {}),
             'report': report.get('report_path'), 'quality_passed': passed,
-            'minimum_updates': minimum, 'eligible_for_transition': eligible,
+            'minimum_updates': minimum, 'eligible_for_transition': eligible and not focus_hold,
             'pass_streak': streak, 'required_passes': self.plan.get('required_passes', 2),
             'failures': report.get('failures', [])}
+        if focus_hold:
+            gate.update(promotion_hold='navigation_sampling_experiment',
+                sampling_experiment_remaining_updates=focus['remaining_updates'])
         self.state['gate'] = gate
         self.state['validation_history'].append({'stage': self.stage['id'], **gate})
         self.state['validation_history'] = self.state['validation_history'][-150:]
-        advanced = eligible and streak >= self.plan.get('required_passes', 2)
+        advanced = eligible and not focus_hold and streak >= self.plan.get('required_passes', 2)
         if advanced:
             self.state['history'].append({'stage': self.stage['id'], 'passed_at': utc_now(),
                 'step': step, 'metrics': gate['metrics'], 'thresholds': gate['thresholds'],
@@ -259,7 +266,7 @@ class StagedCurriculum:
                 self.state.update(final_qualified=True, status='qualified')
             else:
                 self.state.update(stage_index=self.state['stage_index']+1, stage_start_step=step,
-                    pass_streak=0, gate={'status': 'pending'})
+                    stage_excluded_updates=0, pass_streak=0, gate={'status': 'pending'})
                 self.sync(step)
         return advanced
 
@@ -270,6 +277,43 @@ class StagedTrainingPools:
         self.device, self.seed, self.cache_bytes = device, seed, cache_bytes
         self.pools = {}
         self.motion = {}
+        self.focus_sampler = None
+        self.pending_focus = None
+
+    def _focused_batch(self, count, step, context, rng):
+        from .navigation_sampling import NavigationFocusSampler
+        experiment = self.curriculum.state['sampling_experiment']
+        if self.pending_focus is not None:
+            raise RuntimeError('A navigation draw must be committed by an optimizer update before another draw')
+        if self.focus_sampler is None:
+            self.focus_sampler = NavigationFocusSampler(self.get('navigation'), context=context,
+                horizon=29, weights=experiment['weights'])
+        if self.focus_sampler.fingerprint != experiment['source_fingerprint']:
+            raise ValueError('Navigation sampling source windows changed')
+        if count != experiment['microbatch_size']:
+            raise ValueError('Navigation focus requires the saved microbatch size')
+        expected = (step-experiment['start_optimizer_step'])*count
+        if experiment['draws'] != expected:
+            raise ValueError('Navigation draw count differs from the completed optimizer boundary')
+        indices, counts, draws, selected = self.focus_sampler.sample(count, rng,
+            counts=experiment['sample_counts'], draws=experiment['draws'])
+        batch = self.get('navigation').batch(count, context=context, horizon=29, rng=rng, indices=indices)
+        # Pending choices are not published/saved until optimizer.step succeeds.
+        self.pending_focus = {'sample_counts': counts, 'draws': draws,
+            'last_batch_case_counts': selected, 'before_optimizer_step': step}
+        return batch
+
+    def commit_sampling(self, optimizer_step):
+        if self.pending_focus is None:
+            return False
+        pending = self.pending_focus
+        if optimizer_step != pending['before_optimizer_step']+1:
+            raise ValueError('Navigation sampling commit must follow exactly one optimizer update')
+        experiment = self.curriculum.state['sampling_experiment']
+        experiment.update({key: pending[key] for key in ('sample_counts', 'draws', 'last_batch_case_counts')})
+        self.pending_focus = None
+        self.curriculum.sync(optimizer_step)
+        return experiment['status'] == 'complete'
 
     def get(self, stage_id):
         if stage_id in self.pools:
@@ -310,6 +354,9 @@ class StagedTrainingPools:
 
     def batch(self, batch_size, step, context, rng):
         curriculum = self.curriculum
+        from .navigation_experiment import navigation_focus_active
+        if navigation_focus_active(curriculum, step):
+            return self._focused_batch(batch_size, step, context, rng)
         stage_id, static = curriculum.stage['id'], curriculum.stage['renderer_only']
         horizon = curriculum.horizon(step)
         replay_count = int(round(batch_size*curriculum.state['replay_fraction']))

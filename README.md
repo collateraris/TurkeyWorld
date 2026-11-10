@@ -438,6 +438,66 @@ target remains **15 seconds / 450 autonomous transitions**, and only an explicit
 successful full-game check can set `staged_curriculum.final_qualified=true`.
 There is no promised completion time or automatic Student start.
 
+### Three phases for training model components
+
+The approved plan separates component training from the four game-content
+milestones above. It resumed the same run from the saved optimizer step **777**;
+the renderer phase is running, with its first GPU update saved at **778**. Model weights and
+optimizer history are retained; VQGAN and SR stay frozen, with batch16 and
+accumulation1 unchanged.
+
+| Component phase | Trained | Frozen | Minimum / maximum updates |
+|---|---|---|---:|
+| Renderer | Base, Flow and GAN on Source GT coordinates | Dynamics, shared map encoder, VQGAN, SR | 200 / 1,000 |
+| Dynamics | Motion, wall sliding and returns | Base, Flow, GAN, shared map encoder, VQGAN, SR | 300 / 1,000 |
+| Joint | World dynamics, renderer and shared map encoder, followed by autonomous validation | VQGAN, SR | Remaining overall budget |
+
+The shared map encoder is frozen in **both isolated phases** so a dynamics-only
+update cannot change a fixed-pose renderer's map condition. It trains only in
+the joint phase. The saved update verifies GPU execution and continuation of
+the phase; it does not establish a quality improvement or a passed gate.
+
+Checks run every **100 optimizer updates**, previews every **10**. The first
+two phases advance after two passing checks, a five-check plateau or their
+update limit. Plateau and budget completion are recorded separately from a
+quality pass. The joint phase retains the overall **5,182-update** budget and
+the original strict game-content gates, including the independent final
+**15-second / 450-transition** check. It continues navigation → static NPC →
+moving NPC → full game rather than treating component-phase completion as
+completion of those tasks.
+
+At **http://127.0.0.1:8765/** the three component cards show actual status,
+updates, minimum/budget, trainable/frozen modules, coordinate source, measured
+losses and gate/completion reason. The four content milestones remain separate.
+The dynamics phase uses the six navigation-case weights below with new
+phase-local counters; dataset and immutable curriculum-plan fingerprints stay
+unchanged.
+
+### Previous navigation sampling experiment: superseded
+
+The earlier **300-optimizer-update** navigation focus started at step **625**
+and was superseded by the three-phase plan at step **777**, after **152 updates /
+2,432 window draws**. Its previous scheduled end was 925; that schedule is no
+longer active. It selected existing Source windows by cases appearing in their forecast interval:
+slide 30%, short return 25%, wall stop 20%, turn 15%, straight 5%, strafe 5%.
+This changes window selection only: the data, immutable curriculum-plan
+fingerprint, losses and **batch16 × accumulation1 = effective16** stay the same.
+Source case labels select examples; future Source states do not become model
+inputs or corrections to its autoregressive state.
+
+The checkpointed `staged_curriculum.sampling_experiment` records the actual
+start/stop optimizer steps, completed/remaining updates, source fingerprint,
+draw count and per-case counts. The dashboard shows these measured values;
+draws are windows sampled with replacement, not unique examples. Its original
+schedule would return to MotionCurriculum after 300 updates; it was superseded
+before that boundary by the component plan above. Weights, optimizer state and historical sampling counters continue
+across resumes. Stage gates remain every **100 updates** and previews every
+**10**; completion of this sampling experiment does not pass a quality gate.
+Its historical bounds were **625 → 925**. Every 100-update held-out check also
+reports endpoint XY mean/p95 and collision windows/steps for each case, with
+its window count, validation step and a separate baseline. Missing cohorts
+remain unmeasured rather than being reported as zero error.
+
 ## Historical eight-enemy architecture and execution
 
 This section documents the archived 90-value/eight-NPC model. The current

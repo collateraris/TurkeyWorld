@@ -209,7 +209,8 @@ class VJEPAExperiment(Experiment):
         if self.state.get('enemy_policy'):
             additional['behavior_version'] = self.state['enemy_policy']['version']
         from .optimizer_migration import optimizer_parameter_names
-        additional['optimizer_parameter_names'] = optimizer_parameter_names(model, optimizer)
+        additional['optimizer_parameter_names'] = optimizer_parameter_names(model, optimizer,
+            allow_frozen=getattr(self, 'allow_frozen_optimizer_parameters', False))
         additional['training_counters'] = {'optimizer_updates': self.global_step,
             'fragments_seen': getattr(self, 'fragments_seen', self.global_step*getattr(self.args, 'batch', 1)),
             'gradient_accumulation_steps': self.accumulation_steps(), 'pending_microbatches': 0}

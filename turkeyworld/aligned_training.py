@@ -160,7 +160,7 @@ def _observed_memory(model, observed, states, map_features, end, context):
 
 def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, teacher=None,
                                distill_endpoint=False, render_last_only=True, object_region_boost=1.,
-                               detach_flow_base=False):
+                               detach_flow_base=False, image_objectives=True):
     """Return loss/metrics and a GT-pose-aligned RGB/GAN endpoint.
 
     `endpoint['ar_state']`/`ar_features` are the independent main prediction.
@@ -179,8 +179,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     previous = batch["previous_states"].detach()
     targets = batch["target_states"].detach()
     images = batch["target_frames"].detach()
-    object_masks = batch.get('target_object_masks') if object_region_boost > 1 or game_training_v5 else None
-    if (object_region_boost > 1 or game_training_v5) and object_masks is None:
+    object_masks = batch.get('target_object_masks') if image_objectives and (object_region_boost > 1 or game_training_v5) else None
+    if image_objectives and (object_region_boost > 1 or game_training_v5) and object_masks is None:
         raise ValueError('Object-aware image supervision requires offline target NPC masks')
     pixel_weights = None
     hits = batch["hit_ids"] if "hit_ids" in batch else batch["hits"]
@@ -243,7 +243,7 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
             hits[:, index], attacks[:, index], events[:, index], simulation_hz=model.config.simulation_hz,
             local_motion=getattr(model.config, 'spatial_entities', False), action=actions[:, index],
             spatial_combat=spatial_combat, game_training_v5=game_training_v5))
-        if spatial_combat:
+        if spatial_combat and image_objectives:
             combat_contexts.append({name: result['combat_context'][name].detach()
                                     for name in ('state', 'pooled', 'spatial')})
             combat_features.append(result['features'].detach())
@@ -263,7 +263,7 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
             distill_values.append(F.kl_div(F.log_softmax(result["target_logits"], -1),
                 F.softmax(teach["target_logits"], -1), reduction="batchmean") +
                 F.binary_cross_entropy_with_logits(result["attack_logits"], teach["attack_logits"].sigmoid()))
-        if render_last_only and index != horizon - 1:
+        if not image_objectives or render_last_only and index != horizon - 1:
             continue
         render_state = targets[:, index]
         base = model.render_base(render_state, result["features"], map_features)
@@ -332,7 +332,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     parts["aux_state"] = 2 * torch.stack([value["state"] for value in auxiliary]).mean()
     auxiliary_latent, _ = latent_prediction_loss(torch.stack(auxiliary_latents, 1), target_latents)
     parts["aux_jepa"] = .5 * auxiliary_latent
-    parts["base_image"] = torch.stack(base_values).mean()
+    if base_values:
+        parts["base_image"] = torch.stack(base_values).mean()
     if foreground_values:
         parts['foreground_base'] = torch.stack(foreground_values).mean()
     if flow_values:
@@ -358,6 +359,9 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     metrics.update({name: float(value) for name, value in {**regularizer_metrics, **latent_metrics, **flow_metrics}.items()})
     metrics.update(supervised_pose_aligned=True, auxiliary_steps=horizon,
                    rgb_supervised_steps=len(base_values), ar_future_gt_feedback=False)
+    if not image_objectives:
+        metrics.update(image_objectives_active=False, renderer_only=False, dynamics_updated=True)
+        return sum(parts.values()), metrics, None
     if detach_flow_base:
         metrics['flow_base_detached'] = True
     if object_masks is not None:
