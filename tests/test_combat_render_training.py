@@ -1,4 +1,6 @@
 """Post-backward RGB supervision reaches combat heads, not saved visual graphs."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import json
 from types import SimpleNamespace
@@ -16,8 +18,8 @@ from turkeyworld.structured_state import structured_transition
 class TinyCombatBackend(nn.Module):
     def __init__(self):
         super().__init__()
-        self.hit_target_head = nn.Linear(6, 9)
-        self.attack_head = nn.Linear(6, 8)
+        self.hit_target_head = nn.Linear(6, ENTITY_SLOTS+1)
+        self.attack_head = nn.Linear(6, ENTITY_SLOTS)
         self.spatial_combat_head = nn.Linear(6, 2, bias=False)
         self.spatial_encoder = nn.Linear(6, 6)
         self.calls = []
@@ -25,14 +27,14 @@ class TinyCombatBackend(nn.Module):
             self.hit_target_head.weight.zero_(); self.hit_target_head.bias.fill_(-1.)
             self.hit_target_head.bias[0] = 2.
             self.attack_head.weight.zero_(); self.attack_head.bias.fill_(-2.)
-            self.attack_head.bias[1] = .5
+            self.attack_head.bias[0] = .5
             self.spatial_combat_head.weight.fill_(.01)
 
     def combat_logits(self, state, pooled, spatial=None):
         self.calls.append(tuple(value.detach().clone() for value in (state, pooled, spatial)))
         pair = self.spatial_combat_head(spatial[:, 1:])
         targets = self.hit_target_head(pooled)
-        targets = torch.cat([targets[:, :8]+pair[..., 0], targets[:, 8:]], -1)
+        targets = torch.cat([targets[:, :ENTITY_SLOTS]+pair[..., 0], targets[:, ENTITY_SLOTS:]], -1)
         return targets, self.attack_head(pooled)+pair[..., 1]
 
 
@@ -83,22 +85,22 @@ class CombatRenderTrainingTests(unittest.TestCase):
         source = torch.arange(batch*horizon*6, dtype=torch.float32).reshape(batch, horizon, 6)/100
         source.requires_grad_()
         pooled = model.core(source)
-        spatial = model.vjepa_backend.spatial_encoder(pooled)[:, :, None].expand(-1, -1, 9, -1)
+        spatial = model.vjepa_backend.spatial_encoder(pooled)[:, :, None].expand(-1, -1, ENTITY_SLOTS+1, -1)
         features = model.feature_head(pooled)
         map_features = model.map_encoder(pooled[:, 0]).reshape(batch, 2, 16, 16)
-        state = torch.zeros(batch, horizon, 90)
+        state = torch.zeros(batch, horizon, STATE_DIM)
         state[:, :, :2] = torch.tensor([2.5/16, 2.5/16])
         state[:, :, 3] = 1.
         state[:, :, 4:6] = torch.tensor([.8, 1.])
         state[:, :, 8:10] = torch.tensor([3.1/16, 2.5/16])
         state[:, :, 12:14] = torch.tensor([.25, 1.])
-        state[:, :, 18:20] = torch.tensor([3.2/16, 2.5/16])
-        state[:, :, 22:24] = torch.tensor([.6, 1.])
+        if batch > 1:
+            state[1, :, 12] = .6  # A separate nonlethal/melee sample for the same single NPC.
         state.requires_grad_()
         target = state.detach().clone()
         target[:, :, 0] += .02
         target[:, :, 8] += .03
-        target[:, :, 88:] = .6
+        target[:, :, -2:] = .6
         target.requires_grad_()
         events = torch.zeros(batch, horizon, 4)
         if eventful and horizon >= 5:
@@ -106,6 +108,8 @@ class CombatRenderTrainingTests(unittest.TestCase):
             if batch > 1: events[1, 2, 1] = 1.; events[1, 4, 3] = 1.
             if batch > 2: events[2, 0, 0] = 1.
         actions = torch.zeros(batch, horizon, 4); actions[:, :, 3] = 1.
+        if batch > 1:
+            actions[1, :, 3] = 0.  # Keep the nearby NPC alive to test attack-head image gradients.
         mask = torch.zeros(batch, horizon, 4, 4); mask[:, :, 1:3, 1:3] = 1.
         payload = {'contexts': {'state': state, 'pooled': pooled, 'spatial': spatial},
             'features': features, 'target_states': target, 'actions': actions.requires_grad_(),
@@ -144,14 +148,15 @@ class CombatRenderTrainingTests(unittest.TestCase):
         rendered = model.render_calls[-1]['state']
         torch.testing.assert_close(rendered[:, :4], target[:, :4], rtol=0, atol=0)
         torch.testing.assert_close(rendered[:, 5:7], target[:, 5:7], rtol=0, atol=0)
-        torch.testing.assert_close(rendered[:, 88:], target[:, 88:], rtol=0, atol=0)
+        torch.testing.assert_close(rendered[:, -2:], target[:, -2:], rtol=0, atol=0)
         torch.testing.assert_close(rendered[:, 4], expected[:, 4], rtol=0, atol=0)
         torch.testing.assert_close(rendered[:, 7], expected[:, 7], rtol=0, atol=0)
-        actual_npc, target_npc, hard_npc = (value[:, 8:88].reshape(-1, 8, 10) for value in (rendered, target, expected))
+        actual_npc, target_npc, hard_npc = (value[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM) for value in (rendered, target, expected))
         for columns in ((0, 1, 2, 3, 9),):
             torch.testing.assert_close(actual_npc[:, :, columns], target_npc[:, :, columns], rtol=0, atol=0)
         torch.testing.assert_close(actual_npc[:, :, 4:9], hard_npc[:, :, 4:9], rtol=0, atol=0)
-        self.assertTrue((actual_npc[:, 0, 5] == 0).all())
+        self.assertEqual(float(actual_npc[0, 0, 5]), 0.)
+        self.assertEqual(float(actual_npc[1, 0, 5]), 1.)
         torch.testing.assert_close(model.flow_renderer.calls[-1]['state'], rendered, rtol=0, atol=0)
         self.assertTrue(model.flow_renderer.calls[-1]['checkpoint_velocity'])
 
@@ -189,7 +194,6 @@ class CombatRenderTrainingTests(unittest.TestCase):
         changed = dict(payload); target = payload['target_states'].detach().clone()
         target[:, :, 4] = .01
         target[:, :, 12] = .01
-        target[:, :, 22] = .02
         target[:, :, 15:17] = .8
         changed['target_states'] = target
         combat_image_objective(model, changed)
@@ -199,10 +203,12 @@ class CombatRenderTrainingTests(unittest.TestCase):
 
     def test_recorded_respawn_offsets_filtered_and_all_invalid_is_connected_zero(self):
         model = TinyCombatModel(); payload, _ = self.payload(model, batch=3, eventful=False)
-        # Slot7 is dead in the previous state. A recorded respawn must exclude
+        # The single slot is dead in the previous state. A recorded respawn must exclude
         # the entire query, rather than substitute future life into own combat.
-        payload['target_states'].data[0, 4, 82:84] = torch.tensor([.6, 1.])
-        payload['target_states'].data[1, :, 82:84] = torch.tensor([.6, 1.])
+        payload['contexts']['state'].data[0, 4, 12:14] = 0.
+        payload['contexts']['state'].data[1, :, 12:14] = 0.
+        payload['target_states'].data[0, 4, 12:14] = torch.tensor([.6, 1.])
+        payload['target_states'].data[1, :, 12:14] = torch.tensor([.6, 1.])
         payload['events'].data[0, 4, 2] = 1.
         loss, metrics = combat_image_objective(model, payload)
         self.assertEqual(metrics['combat_image_selected_offsets'], [3, -1, 4])
@@ -210,7 +216,8 @@ class CombatRenderTrainingTests(unittest.TestCase):
         self.assertEqual(metrics['combat_image_selected_samples'], 2)
         self.assertEqual(model.render_calls[-1]['state'].shape[0], 2)
         loss.backward(); model.zero_grad(set_to_none=True)
-        payload['target_states'].data[:, :, 82:84] = torch.tensor([.6, 1.])
+        payload['contexts']['state'].data[:, :, 12:14] = 0.
+        payload['target_states'].data[:, :, 12:14] = torch.tensor([.6, 1.])
         with patch.object(model, 'render_base', side_effect=AssertionError('No valid image')),\
                 patch.object(model.flow_renderer, 'sample', side_effect=AssertionError('No valid Flow')):
             zero, metrics = combat_image_objective(model, payload)
@@ -253,7 +260,7 @@ class CombatRenderTrainingTests(unittest.TestCase):
                 broken = dict(payload); broken['contexts'] = dict(payload['contexts'])
                 if problem == 'missing': del broken['backgrounds']
                 elif problem == 'shape': broken['features'] = torch.zeros(3, 5, 127)
-                elif problem == 'wrong_context': broken['contexts']['spatial'] = torch.zeros(3, 5, 8, 6)
+                elif problem == 'wrong_context': broken['contexts']['spatial'] = torch.zeros(3, 5, ENTITY_SLOTS+2, 6)
                 else:
                     key = {'nan': 'target_frames', 'mask_range': 'object_masks', 'event_range': 'events'}[problem]
                     broken[key] = broken[key].detach().clone()

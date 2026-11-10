@@ -1,4 +1,6 @@
 """Flow objectives, actual Transformer gradients, ODE sampling and compatibility."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -24,7 +26,7 @@ class ConditionalFlowTests(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(131)
-        self.state = torch.zeros(1, 90)
+        self.state = torch.zeros(1, STATE_DIM)
         self.state[:, :8] = torch.tensor([.2, .3, 0., 1., 1., 1., 0., 0.])
         self.base = torch.rand(1, 3, 128, 128)
 

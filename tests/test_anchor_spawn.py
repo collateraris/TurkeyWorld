@@ -1,4 +1,6 @@
 """Learned anchor categories retain the legacy decoder's safety contract."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 from unittest.mock import patch
 
@@ -16,10 +18,10 @@ class AnchorSpawnTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def inputs(self, batch=1, simultaneous=False):
-        state = torch.zeros(batch, 90)
+        state = torch.zeros(batch, STATE_DIM)
         state[:, :2] = torch.tensor([8.5, 8.5])/16
         state[:, 3:6] = 1
-        npc = state[:, 8:88].reshape(batch, 8, 10)
+        npc = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
         npc[:, :, :2] = torch.tensor([8.5, 8.5])/16
         npc[:, :, 8] = 5 if simultaneous else 0
         npc[:, 0, 8] = 5
@@ -37,26 +39,24 @@ class AnchorSpawnTests(unittest.TestCase):
         state, grid = self.inputs(batch=3, simultaneous=True)
         state[1, :2] = torch.tensor([2.5, 2.5])/16
         grid[2, 2, 2] = False
-        for logits in (torch.randn(3, 8, 256), torch.zeros(3, 8, 256)):
+        for logits in (torch.randn(3, ENTITY_SLOTS, 256), torch.zeros(3, ENTITY_SLOTS, 256)):
             old = decode_spawn_positions(logits, state, grid, 1/30)
-            heads = hierarchical_spawn_logits(logits, torch.zeros(3, 8, 9), state, grid, 1/30)
+            heads = hierarchical_spawn_logits(logits, torch.zeros(3, ENTITY_SLOTS, 9), state, grid, 1/30)
             new = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
             for first, second in zip(old, new):
                 torch.testing.assert_close(first, second, atol=0, rtol=0)
             probability = heads['spawn_logits'].exp()
-            torch.testing.assert_close(probability.sum(-1), torch.ones(3, 8), atol=2e-6, rtol=0)
+            torch.testing.assert_close(probability.sum(-1), torch.ones(3, ENTITY_SLOTS), atol=2e-6, rtol=0)
             self.assertTrue(bool(torch.isfinite(heads['spawn_logits']).all()))
 
-    def test_player_wall_and_npc_masks_override_learned_anchor_preferences(self):
+    def test_player_and_wall_masks_override_learned_anchor_preferences(self):
         state, grid = self.inputs()
         state[:, :2] = torch.tensor([8.5, 2.5])/16
-        npc = state[:, 8:88].reshape(1, 8, 10)
-        npc[:, 1, :2] = torch.tensor([2.5, 2.5])/16
-        npc[:, 1, 4:6] = torch.tensor([.6, 1.])
+        grid[:, 2, 2] = False
         grid[:, 2, 13] = False
-        residual = torch.zeros(1, 8, 9)
+        residual = torch.zeros(1, ENTITY_SLOTS, 9)
         residual[:, :, :4] = torch.tensor([100., 90., 80., 70.])
-        heads = hierarchical_spawn_logits(torch.zeros(1, 8, 256), residual, state, grid, 1/30)
+        heads = hierarchical_spawn_logits(torch.zeros(1, ENTITY_SLOTS, 256), residual, state, grid, 1/30)
         positions, valid = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
         self.assertEqual(heads['spawn_anchor_legal'][0, 0, :4].tolist(), [False, False, False, True])
         torch.testing.assert_close(positions[0, 0]*16, torch.tensor([13.5, 8.5]))
@@ -66,23 +66,24 @@ class AnchorSpawnTests(unittest.TestCase):
         state, _ = self.inputs()
         grid = torch.zeros(1, 16, 16, dtype=torch.bool)
         grid[:, 14, 14] = True
-        residual = torch.zeros(1, 8, 9); residual[:, :, 0] = 1000
-        heads = hierarchical_spawn_logits(torch.randn(1, 8, 256), residual, state, grid, 1/30)
+        residual = torch.zeros(1, ENTITY_SLOTS, 9); residual[:, :, 0] = 1000
+        heads = hierarchical_spawn_logits(torch.randn(1, ENTITY_SLOTS, 256), residual, state, grid, 1/30)
         positions, valid = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
         self.assertFalse(bool(heads['spawn_anchor_legal'][0, 0, :8].any()))
         self.assertTrue(bool(heads['spawn_anchor_legal'][0, 0, 8]))
         self.assertTrue(bool(valid[0, 0]))
         torch.testing.assert_close(positions[0, 0]*16, torch.tensor([14.5, 14.5]))
 
-    def test_simultaneous_slots_respect_id_order_and_separation(self):
-        state, grid = self.inputs(simultaneous=True)
-        residual = torch.zeros(1, 8, 9); residual[:, :, :8] = torch.arange(28., 20., -1)
-        heads = hierarchical_spawn_logits(torch.zeros(1, 8, 256), residual, state, grid, 1/30)
-        positions, valid = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
-        expected = (torch.tensor(SPAWN_ANCHORS, dtype=torch.float32)+.5)/16
-        torch.testing.assert_close(positions[0], expected, atol=0, rtol=0)
-        self.assertTrue(bool(valid.all()))
-        self.assertFalse(bool(heads['spawn_anchor_legal'][0, 1, 0]))
+    def test_single_slot_can_select_each_of_the_eight_anchor_locations(self):
+        state, grid = self.inputs()
+        for anchor, xy in enumerate(SPAWN_ANCHORS):
+            residual = torch.zeros(1, ENTITY_SLOTS, 9)
+            residual[:, :, anchor] = 100
+            heads = hierarchical_spawn_logits(torch.zeros(1, ENTITY_SLOTS, 256), residual, state, grid, 1/30)
+            positions, valid = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
+            self.assertEqual(positions.shape, (1, 1, 2))
+            torch.testing.assert_close(positions[0, 0], (torch.tensor(xy)+.5)/16, atol=0, rtol=0)
+            self.assertTrue(bool(valid.all()))
 
     def test_empty_map_and_terminal_player_are_finite_and_do_not_revive(self):
         for terminal in (False, True):
@@ -91,26 +92,26 @@ class AnchorSpawnTests(unittest.TestCase):
                 state[:, 4] = 0
             else:
                 grid.zero_()
-            raw, residual = torch.randn(1, 8, 256), torch.randn(1, 8, 9)
+            raw, residual = torch.randn(1, ENTITY_SLOTS, 256), torch.randn(1, ENTITY_SLOTS, 9)
             heads = hierarchical_spawn_logits(raw, residual, state, grid, 1/30)
             positions, valid = decode_spawn_positions(heads['spawn_logits'], state, grid, 1/30)
             self.assertTrue(bool(torch.isfinite(heads['spawn_logits']).all()))
             self.assertTrue(bool(torch.isfinite(heads['spawn_anchor_logits']).all()))
             self.assertFalse(bool(valid.any()))
-            torch.testing.assert_close(positions, state[:, 8:88].reshape(1, 8, 10)[:, :, :2])
+            torch.testing.assert_close(positions, state[:, GLOBAL_DIM:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2])
 
     def test_anchor_and_fallback_gradients_exist_without_state_or_label_gradients(self):
         state, grid = self.inputs(simultaneous=True)
         state.requires_grad_()
-        raw = torch.randn(1, 8, 256, requires_grad=True)
-        residual = torch.randn(1, 8, 9, requires_grad=True)
+        raw = torch.randn(1, ENTITY_SLOTS, 256, requires_grad=True)
+        residual = torch.randn(1, ENTITY_SLOTS, 9, requires_grad=True)
         heads = hierarchical_spawn_logits(raw, residual, state, grid, 1/30)
         anchors = anchor_tile_indices()
-        allowed = heads['spawn_legal_mask'][0, 1].clone(); allowed[anchors] = False
+        allowed = heads['spawn_legal_mask'][0, 0].clone(); allowed[anchors] = False
         fallback_label = allowed.nonzero()[0, 0]
         anchor_label = heads['spawn_anchor_legal'][0, 0, :8].nonzero()[0, 0]
         loss = F.cross_entropy(heads['spawn_logits'][:, 0], anchors[anchor_label][None])
-        loss = loss+F.cross_entropy(heads['spawn_logits'][:, 1], fallback_label[None])
+        loss = loss+F.cross_entropy(heads['spawn_logits'][:, 0], fallback_label[None])
         loss.backward()
         self.assertIsNone(state.grad)
         self.assertTrue(bool(torch.isfinite(raw.grad).all()))
@@ -123,8 +124,8 @@ class AnchorSpawnTests(unittest.TestCase):
     def test_unmasked_coarse_supervision_can_train_an_excluded_source_anchor(self):
         state, grid = self.inputs()
         grid[:, 2, 2] = False
-        residual = torch.zeros(1, 8, 9, requires_grad=True)
-        heads = hierarchical_spawn_logits(torch.zeros(1, 8, 256), residual, state, grid, 1/30)
+        residual = torch.zeros(1, ENTITY_SLOTS, 9, requires_grad=True)
+        heads = hierarchical_spawn_logits(torch.zeros(1, ENTITY_SLOTS, 256), residual, state, grid, 1/30)
         self.assertFalse(bool(heads['spawn_anchor_legal'][0, 0, 0]))
         loss = F.cross_entropy(heads['spawn_anchor_logits'][:, 0], torch.zeros(1, dtype=torch.long))
         self.assertTrue(bool(torch.isfinite(loss)))
@@ -168,8 +169,8 @@ class AnchorBackendTests(unittest.TestCase):
             second = new.transition(state, action, second_map, second_memory, project_state)
         for key in ('state', 'memory', 'spawn_positions', 'spawn_valid', 'target_logits', 'attack_logits'):
             torch.testing.assert_close(first[key], second[key], atol=0, rtol=0)
-        self.assertEqual(second['spawn_anchor_logits'].shape, (2, 8, 9))
-        self.assertEqual(second['spawn_fallback_logits'].shape, (2, 8, 256))
+        self.assertEqual(second['spawn_anchor_logits'].shape, (2, ENTITY_SLOTS, 9))
+        self.assertEqual(second['spawn_fallback_logits'].shape, (2, ENTITY_SLOTS, 256))
         self.assertEqual(sum(parameter.numel() for parameter in new.spatial_spawn_anchor_head.parameters()), 297)
         self.assertFalse(hasattr(old, 'spatial_spawn_anchor_head'))
 
@@ -192,7 +193,7 @@ class AnchorBackendTests(unittest.TestCase):
         def hierarchical(state, pooled, spatial, maps, *, walkable=None):
             maps_seen.append(walkable.detach().clone())
             raw = old_method(state, pooled, spatial, maps)
-            return hierarchical_spawn_logits(raw, raw.new_zeros(len(state), 8, 9),
+            return hierarchical_spawn_logits(raw, raw.new_zeros(len(state), ENTITY_SLOTS, 9),
                                              state, walkable, 1/30)['spawn_logits']
 
         model.vjepa_backend.spawn_logits = hierarchical
@@ -213,7 +214,7 @@ class AnchorBackendTests(unittest.TestCase):
         maps = backend.encode_map((~walkable).long())
         spatial = backend.spatial_tokens(state, maps)
         heads = backend.spawn_outputs(state, torch.randn(2, 32), spatial, maps)
-        labels = torch.zeros(2*8, dtype=torch.long)
+        labels = torch.zeros(2*ENTITY_SLOTS, dtype=torch.long)
         loss = F.cross_entropy(heads['spawn_anchor_logits'].reshape(-1, 9), labels)
         loss.backward()
         for weight in (backend.spatial_spawn_anchor_head.weight, backend.spawn_head[-1].weight):

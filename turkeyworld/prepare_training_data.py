@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 from . import engine as _engine
-from .engine import ENTITY_SLOTS, EVENT_NAMES, Game
+from .engine import ENTITY_SLOTS, STATE_DIM, EVENT_NAMES, Game
 from .geometry_targets import build_geometry_targets
 
 FORMAT_VERSION = 4
@@ -288,7 +288,7 @@ def _episode_stats(path, job):
             raise ValueError(f"Existing episode RGB time span differs from its job: {path}")
         states, actions, events = (data[key] for key in ("states", "actions", "events"))
         if (int(data["seed"]) != job["seed"] or int(data["format_version"]) != FORMAT_VERSION
-                or states.shape != (len(actions) + 1, 90) or actions.shape != (len(actions), 4)
+                or states.shape != (len(actions) + 1, STATE_DIM) or actions.shape != (len(actions), 4)
                 or events.shape != (len(actions), 4) or len(actions) < 1):
             raise ValueError(f"Existing episode does not match its job: {path}")
         required = {"respawn_flags", "initial_state", "hit_ids", "attack_flags"}
@@ -388,7 +388,7 @@ def _generate_job(job):
     initial_game_time = game.time
     initial_state = json.dumps(game.get_state(), ensure_ascii=False)
     capacity = job["frames"]
-    states = np.empty((capacity + 1, 90), dtype=np.float32)
+    states = np.empty((capacity + 1, STATE_DIM), dtype=np.float32)
     actions = np.empty((capacity, 4), dtype=np.float32)
     events = np.empty((capacity, 4), dtype=np.float32)
     hits = np.empty(capacity, dtype=np.int64)

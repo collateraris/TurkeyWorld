@@ -1,4 +1,6 @@
 """All microbatch members train sampled RGB/GAN before one accumulation flush."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import tempfile
 import unittest
@@ -23,7 +25,7 @@ class ThreeMemberData:
         identifiers = list(range(self.calls*3+1, self.calls*3+4))
         rgb = torch.rand(3, 3, 64, 64, generator=self.rng)
         target = torch.rand(3, 3, 64, 64, generator=self.rng).requires_grad_()
-        state = torch.zeros(3, 90)
+        state = torch.zeros(3, STATE_DIM)
         state[:, 0] = torch.tensor(identifiers)/1000
         state[:, 3:6] = 1
         state.requires_grad_()
@@ -113,7 +115,7 @@ class JointGANFullMicrobatchTests(unittest.TestCase):
 
             def sampled(base, state, **options):
                 self.assertEqual(base.shape, (3, 3, 64, 64))
-                self.assertEqual(state.shape, (3, 90))
+                self.assertEqual(state.shape, (3, STATE_DIM))
                 self.assertFalse(base.requires_grad)
                 self.assertFalse(state.requires_grad)
                 self.assertEqual(options, {'checkpoint_velocity': True})

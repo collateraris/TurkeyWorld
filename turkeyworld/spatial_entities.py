@@ -1,13 +1,15 @@
-"""Nine persistent spatial entity tokens from state90 and learned map features.
+"""Two persistent spatial entity tokens from state20 and learned map features.
 
-There are no engine queries, future images or changes to the90-value state.
-Slot0 is the player; slots1..8 always retain NPC IDs0..7, including corpses and
+There are no engine queries, future images or changes to the20-value state.
+Slot0 is the player; slot1 retains NPC ID0, including corpses and
 off-camera entities. NPC direction means observed velocity direction, not an
 independent sprite heading. Stationary direction descriptors are zero/invalid.
 Local sampling/motion coordinate frames fall back toward the player for a
 stationary NPC; this does not invent an observed entity/sprite heading.
 """
 from __future__ import annotations
+
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 
 import math
 
@@ -16,8 +18,8 @@ from torch import nn
 from torch.nn import functional as F
 
 
-ENTITY_SLOT_NAMES = ('player',) + tuple(f'npc_{index}' for index in range(8))
-ENTITY_SLOT_COUNT = 9
+ENTITY_SLOT_NAMES = ('player',) + tuple(f'npc_{index}' for index in range(ENTITY_SLOTS))
+ENTITY_SLOT_COUNT = ENTITY_SLOTS+1
 MAP_EXTENT = 16.
 SPATIAL_FEATURE_LAYOUT = (
     ('absolute_xy', 2),                 # Normalized map coordinates x/16,y/16.
@@ -33,7 +35,7 @@ SPATIAL_FEATURE_LAYOUT = (
     ('speed', 1),                       # NPC tiles/second; unknown player speed=0.
     ('is_player', 1),
     ('alive', 1),
-    ('hp', 1),                          # HP/100, as recorded in state90.
+    ('hp', 1),                          # HP/100, as recorded in state20.
     ('animation_phase', 1),             # NPC phase; unavailable player phase=0.
     ('animation_valid', 1),
     ('cooldown', 1),                    # Recorded player fire / NPC attack timer.
@@ -51,8 +53,8 @@ for _name, _length in SPATIAL_FEATURE_LAYOUT:
 
 
 def _check_state(state):
-    if not torch.is_tensor(state) or state.ndim != 2 or state.shape[1] != 90 or state.shape[0] < 1:
-        raise ValueError('Spatial entities require nonempty state[B,90]')
+    if not torch.is_tensor(state) or state.ndim != 2 or state.shape[1] != STATE_DIM or state.shape[0] < 1:
+        raise ValueError('Spatial entities require nonempty state[B,20]')
     if not state.is_floating_point():
         raise TypeError('Spatial state must be floating point')
 
@@ -62,7 +64,7 @@ def _geometry(state):
     dtype = torch.float64 if state.dtype == torch.float64 else torch.float32
     state = state.to(dtype=dtype)
     batch = state.shape[0]
-    npc = state[:, 8:88].reshape(batch, 8, 10)
+    npc = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     xy = torch.cat([state[:, None, :2], npc[:, :, :2]], 1)
     player_sin_cos = state[:, 2:4]
     heading_norm = torch.linalg.vector_norm(player_sin_cos, dim=-1, keepdim=True)
@@ -82,14 +84,14 @@ def _geometry(state):
     return state, npc, xy, direction, direction_valid, safe_heading, heading_valid, speed_normalized
 
 
-def entity_spatial_features(state90):
-    """Return[B,9,30] descriptors with the exact exported FEATURE_SLICES layout.
+def entity_spatial_features(state20):
+    """Return[B,2,30] descriptors with the exact exported FEATURE_SLICES layout.
 
     Relative coordinates retain off-screen/back-facing entities and are never
     multiplied by visibility or life flags. Unknown player velocity and absent
     stationary-NPC direction are explicitly marked, rather than invented.
     """
-    state, npc, xy, direction, valid, heading, heading_valid, speed = _geometry(state90)
+    state, npc, xy, direction, valid, heading, heading_valid, speed = _geometry(state20)
     zeros = torch.zeros_like(xy[:, :, :1])
     is_player = torch.cat([torch.ones_like(zeros[:, :1]), zeros[:, 1:]], 1)
     velocity = torch.cat([torch.zeros_like(xy[:, :1]), npc[:, :, 2:4]], 1)
@@ -104,7 +106,7 @@ def entity_spatial_features(state90):
     relative_cos = direction[:, :, 0]*heading[:, None, 0]+direction[:, :, 1]*heading[:, None, 1]
     relative_direction = torch.stack([relative_sin, relative_cos], -1)
     relative_direction = relative_direction*(valid & heading_valid[:, None]).to(state.dtype)
-    player_heading = torch.where(heading_valid, heading, torch.zeros_like(heading))[:, None].expand(-1, 9, -1)
+    player_heading = torch.where(heading_valid, heading, torch.zeros_like(heading))[:, None].expand(-1, ENTITY_SLOT_COUNT, -1)
     values = [xy, direction, valid.to(state.dtype), velocity, velocity_valid, relative,
         torch.stack([forward, right], -1), distance, bearing, bearing_valid.to(state.dtype),
         torch.cat([zeros[:, :1], speed*2], 1), is_player,
@@ -114,12 +116,12 @@ def entity_spatial_features(state90):
         torch.cat([state[:, None, 6:7], npc[:, :, 6:7]], 1),
         torch.cat([state[:, None, 7:8], npc[:, :, 7:8]], 1),
         torch.cat([zeros[:, :1], npc[:, :, 8:9]], 1), relative_direction,
-        player_heading, heading_valid[:, None].expand(-1, 9, -1).to(state.dtype)]
+        player_heading, heading_valid[:, None].expand(-1, ENTITY_SLOT_COUNT, -1).to(state.dtype)]
     return torch.cat(values, -1)
 
 
 def entity_motion_basis(state, action=None, dt=1/30):
-    """Return forward/right worldXY unit axes[B,9,2] for local motion outputs.
+    """Return forward/right worldXY unit axes[B,2,2] for local motion outputs.
 
     Player axes use post-turn heading when controls are supplied. NPC axes use
     current velocity when nonzero, otherwise the known vector toward the player
@@ -149,16 +151,16 @@ def entity_motion_basis(state, action=None, dt=1/30):
 
 
 def world_to_local(vectors, basis):
-    """Project worldXY vectors[B,9,2] to forward/right components."""
+    """Project worldXY vectors[B,2,2] to forward/right components."""
     if vectors.shape != basis['forward'].shape or vectors.shape != basis['right'].shape:
-        raise ValueError('Motion vectors must match the entity basis shape[B,9,2]')
+        raise ValueError('Motion vectors must match the entity basis shape[B,2,2]')
     return torch.stack([(vectors*basis['forward']).sum(-1), (vectors*basis['right']).sum(-1)], -1)
 
 
 def local_to_world(vectors, basis):
-    """Rotate forward/right vectors[B,9,2] into worldXY without engine rules."""
+    """Rotate forward/right vectors[B,2,2] into worldXY without engine rules."""
     if vectors.shape != basis['forward'].shape or vectors.shape != basis['right'].shape:
-        raise ValueError('Motion vectors must match the entity basis shape[B,9,2]')
+        raise ValueError('Motion vectors must match the entity basis shape[B,2,2]')
     return vectors[:, :, :1]*basis['forward']+vectors[:, :, 1:2]*basis['right']
 
 
@@ -187,7 +189,7 @@ class SpatialEntityEncoder(nn.Module):
         self.register_buffer('patch_offsets', torch.stack([forward, right], -1).flatten(0, 1).float(), persistent=False)
 
     def sampling_grid(self, state):
-        """Return normalized[B,9,9,2] grid in current local motion coordinates."""
+        """Return normalized[B,2,9,2] grid in current local motion coordinates."""
         state, npc, xy, direction, valid, heading, _, _ = _geometry(state)
         basis = entity_motion_basis(state)
         forward_xy, right_xy = basis['forward'], basis['right']
@@ -197,7 +199,7 @@ class SpatialEntityEncoder(nn.Module):
         return positions*2-1
 
     def sample_local_map(self, state, map_features):
-        """Return[B,9,9,C] local features, preserving continuous coordinate grads."""
+        """Return[B,2,9,C] local features, preserving continuous coordinate grads."""
         _check_state(state)
         if (not torch.is_tensor(map_features) or map_features.ndim != 4
                 or map_features.shape != (state.shape[0], self.map_channels, 16, 16)
@@ -206,13 +208,13 @@ class SpatialEntityEncoder(nn.Module):
         if map_features.device != state.device:
             raise ValueError('Spatial state and learned map must share a device')
         dtype = torch.float64 if map_features.dtype == torch.float64 else torch.float32
-        grid = self.sampling_grid(state).to(dtype=dtype).reshape(state.shape[0], 81, 1, 2)
+        grid = self.sampling_grid(state).to(dtype=dtype).reshape(state.shape[0], ENTITY_SLOT_COUNT*9, 1, 2)
         # Avoid rounding the small map-coordinate movements to BF16 before the
         # interpolating read. Gradients still reach the supplied learned map.
         with torch.autocast(map_features.device.type, enabled=False):
             sampled = F.grid_sample(map_features.to(dtype=dtype), grid, mode='bilinear',
                                     padding_mode='border', align_corners=False)
-        return sampled[:, :, :, 0].transpose(1, 2).reshape(state.shape[0], 9, 9, self.map_channels)
+        return sampled[:, :, :, 0].transpose(1, 2).reshape(state.shape[0], ENTITY_SLOT_COUNT, 9, self.map_channels)
 
     def forward(self, state, map_features):
         descriptors = entity_spatial_features(state).to(self.descriptor_projection[0].weight.dtype)

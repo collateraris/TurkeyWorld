@@ -1,4 +1,6 @@
 """NPC slowing must remain learnable through the hard runtime speed bound."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import torch
@@ -51,8 +53,8 @@ class MotionGradientTests(unittest.TestCase):
 
     def test_default_forward_is_exact_original_cap(self):
         rng = torch.Generator().manual_seed(1393)
-        old = torch.rand(4, 8, 2, generator=rng)
-        candidate = torch.rand(4, 8, 2, generator=rng) * 1.4 - .2
+        old = torch.rand(4, ENTITY_SLOTS, 2, generator=rng)
+        candidate = torch.rand(4, ENTITY_SLOTS, 2, generator=rng) * 1.4 - .2
         delta = candidate.clamp(0, 1) - old
         norm = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
         factor = (self.limit / norm.clamp_min(max(torch.finfo(delta.dtype).tiny, 1e-6))).clamp_max(1)
@@ -63,45 +65,44 @@ class MotionGradientTests(unittest.TestCase):
             self.assertLessEqual(float(torch.linalg.vector_norm(result, dim=-1).max()), self.limit + 1e-8)
 
     def test_transition_forward_and_dead_masks_unchanged(self):
-        state = torch.zeros(2, 90)
+        state = torch.zeros(4, STATE_DIM)
         state[:, :2] = torch.tensor([.15, .15])
         state[:, 3] = 1
-        state[0, 4] = 1  # The second batch item is terminal.
+        state[:3, 4] = 1  # Fourth item terminal; third has a dead NPC.
         state[:, 5] = .8
-        old = state[:, 8:88].reshape(2, 8, 10)
-        old[:, :, 0] = torch.arange(8) * .06 + .2
+        old = state[:, GLOBAL_DIM:-2].reshape(4, ENTITY_SLOTS, ENTITY_DIM)
+        old[:, :, 0] = .2
         old[:, :, 1] = .5
         old[:, :, 4:6] = torch.tensor([.6, 1.])
-        old[:, 2, 4:6] = 0  # This corpse must neither move nor receive gradients.
+        old[2, 0, 4:6] = 0  # This corpse must neither move nor receive gradients.
         candidate = state.clone()
-        proposed = candidate[:, 8:88].reshape(2, 8, 10)
-        proposed[:, 0, :2] += torch.tensor([.001, -.001])
-        proposed[:, 1:3, :2] += torch.tensor([.02, .03])
+        proposed = candidate[:, GLOBAL_DIM:-2].reshape(4, ENTITY_SLOTS, ENTITY_DIM)
+        proposed[0, 0, :2] += torch.tensor([.001, -.001])
+        proposed[1:, 0, :2] += torch.tensor([.02, .03])
         candidate.requires_grad_()
-        targets = torch.full((2, 9), -10.)
-        targets[:, 8] = 10.
-        attacks = torch.full((2, 8), -10.)
+        targets = torch.full((4, (ENTITY_SLOTS+1)), -10.)
+        targets[:, ENTITY_SLOTS] = 10.
+        attacks = torch.full((4, ENTITY_SLOTS), -10.)
         for endless in (False, True):
             with self.subTest(endless=endless):
-                train = structured_transition(state, candidate, torch.zeros(2, 4), targets, attacks,
+                train = structured_transition(state, candidate, torch.zeros(4, 4), targets, attacks,
                                               training=True, endless=endless)
-                evaluate = structured_transition(state, candidate, torch.zeros(2, 4), targets, attacks,
+                evaluate = structured_transition(state, candidate, torch.zeros(4, 4), targets, attacks,
                                                  training=False, endless=endless)
                 self.assertTrue(torch.equal(train['state'].detach().view(torch.int32),
                                             evaluate['state'].detach().view(torch.int32)))
-                slots = train['state'][:, 8:88].reshape(2, 8, 10)
+                slots = train['state'][:, GLOBAL_DIM:-2].reshape(4, ENTITY_SLOTS, ENTITY_DIM)
                 displacement = slots[:, :, :2] - old[:, :, :2]
                 self.assertLessEqual(float(torch.linalg.vector_norm(displacement, dim=-1).max().detach()),
                                      self.limit + 1e-7)
-                self.assertTrue(torch.equal(displacement[1], torch.zeros_like(displacement[1])))
-                self.assertTrue(torch.equal(displacement[0, 2], torch.zeros(2)))
+                self.assertTrue(torch.equal(displacement[2:], torch.zeros_like(displacement[2:])))
+                self.assertGreater(float(displacement[:2].detach().abs().sum()), 0.)
                 gradient, = torch.autograd.grad(slots[:, :, :2].sum(), candidate)
-                npc_gradient = gradient[:, 8:88].reshape(2, 8, 10)[:, :, :2]
-                torch.testing.assert_close(npc_gradient[0, 1], torch.ones(2), rtol=0, atol=0)
-                self.assertTrue(torch.equal(npc_gradient[0, 2], torch.zeros(2)))
-                self.assertTrue(torch.equal(npc_gradient[1], torch.zeros_like(npc_gradient[1])))
+                npc_gradient = gradient[:, GLOBAL_DIM:-2].reshape(4, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2]
+                torch.testing.assert_close(npc_gradient[:2], torch.ones(2, 1, 2), rtol=0, atol=0)
+                torch.testing.assert_close(npc_gradient[2:], torch.zeros(2, 1, 2), rtol=0, atol=0)
                 # Supervision is used only by the loss; transition inputs stay intact.
-                self.assertTrue(torch.equal(state[:, :2], torch.tensor([[.15, .15], [.15, .15]])))
+                torch.testing.assert_close(state[:, :2], torch.full((4, 2), .15), rtol=0, atol=0)
 
 
 if __name__ == '__main__':

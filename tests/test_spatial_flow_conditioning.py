@@ -1,3 +1,5 @@
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import unittest
 
@@ -12,12 +14,12 @@ class SpatialFlowConditionTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def state(self, batch=2):
-        state = torch.zeros(batch, 90)
+        state = torch.zeros(batch, STATE_DIM)
         state[:, :2] = torch.tensor([.1, .5])
         state[:, 3:5] = 1
-        npc = state[:, 8:88].reshape(batch, 8, 10)
-        npc[:, :, 0] = torch.linspace(.35, .8, 8)
-        npc[:, :, 1] = torch.linspace(.47, .53, 8)
+        npc = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+        npc[:, :, 0] = torch.linspace(.35, .8, ENTITY_SLOTS)
+        npc[:, :, 1] = torch.linspace(.47, .53, ENTITY_SLOTS)
         npc[:, :, 2:4] = torch.tensor([.1, .2])
         npc[:, :, 4] = .6;npc[:, :, 5] = 1
         return state
@@ -41,9 +43,9 @@ class SpatialFlowConditionTests(unittest.TestCase):
         with torch.no_grad():after = model(noisy, time, base, state)
         self.assertTrue(torch.equal(before, after))
         for name, value in old.items():self.assertTrue(torch.equal(value, model.state_dict()[name]), name)
-        self.assertEqual(tuple(model.spatial_condition.entity_tokens(state).shape), (2, 9, 32))
+        self.assertEqual(tuple(model.spatial_condition.entity_tokens(state).shape), (2, ENTITY_SLOTS+1, 32))
 
-    def test_all_eight_npc_coordinates_direction_and_hp_receive_actual_velocity_gradients(self):
+    def test_single_npc_coordinates_direction_and_hp_receive_actual_velocity_gradients(self):
         model = self.network().train();model.enable_spatial_conditioning(32)
         with torch.no_grad():
             for layer in model.state_input.modules():
@@ -52,7 +54,7 @@ class SpatialFlowConditionTests(unittest.TestCase):
         state = self.state().requires_grad_()
         output = model(torch.rand(2, 4, 8, 8), torch.tensor([.3, .8]), torch.rand(2, 4, 8, 8), state)
         output.square().mean().backward()
-        gradients = state.grad[:, 8:88].reshape(2, 8, 10)
+        gradients = state.grad[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)
         for field in [0, 1, 2, 3, 4]:
             self.assertTrue(bool((gradients[:, :, field].abs().sum(0) > 0).all()), field)
         self.assertGreater(float(state.grad[:, :4].abs().sum()), 0)
@@ -62,7 +64,7 @@ class SpatialFlowConditionTests(unittest.TestCase):
         module = SpatialFlowCondition(32, 2, 32)
         state = self.state()
         state[:, 8] = .01
-        self.assertEqual(tuple(module.entity_tokens(state).shape), (2, 9, 32))
+        self.assertEqual(tuple(module.entity_tokens(state).shape), (2, ENTITY_SLOTS+1, 32))
         weights = module.projection_weights(state)
         self.assertTrue(torch.equal(weights[:, :, 0], torch.ones(2, 4)))
         self.assertEqual(float(weights[:, :, 1].abs().sum()), 0)

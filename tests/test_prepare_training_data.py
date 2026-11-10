@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from turkeyworld.engine import EVENT_NAMES, Game
+from turkeyworld.engine import ENTITY_SLOTS, EVENT_NAMES, Game
 from turkeyworld.prepare_training_data import _atomic_json, prepare
 
 
@@ -55,7 +55,7 @@ class PreparedDataTests(unittest.TestCase):
                         self.assertEqual(data["frames"].dtype, np.uint8)
                         self.assertEqual(data["frames"].shape, (9, 32, 32, 3))
                         self.assertEqual(data["depth"].shape, (9, 32))
-                        self.assertEqual(data["visibility"].shape, (9, 8))
+                        self.assertEqual(data["visibility"].shape, (9, ENTITY_SLOTS))
                         np.testing.assert_array_equal(game.render(size=32, overlays=False), data["frames"][0])
                     else:
                         self.assertNotIn("frames", data.files)
@@ -66,7 +66,7 @@ class PreparedDataTests(unittest.TestCase):
                         np.testing.assert_array_equal([float(event[name]) for name in EVENT_NAMES],
                                                       data["events"][index])
                         self.assertEqual(event["hit_id"], int(data["hit_ids"][index]))
-                        attacks = np.zeros(8, dtype=np.float32)
+                        attacks = np.zeros(ENTITY_SLOTS, dtype=np.float32)
                         attacks[event["attacker_ids"]] = 1
                         np.testing.assert_array_equal(attacks, data["attack_flags"][index])
                         respawns = ~alive_before & np.array([enemy["alive"] for enemy in game.enemies])

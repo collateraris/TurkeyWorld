@@ -1,4 +1,6 @@
 """Endless evaluator contract and source-only 300-second qualification checks."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import numpy as np
@@ -38,8 +40,8 @@ class EndlessRolloutValidationTests(unittest.TestCase):
                 self.assertIn('revival', self.codes(game, previous, current, action, events))
 
     def test_respawn_near_player_in_wall_or_with_wrong_health_is_rejected(self):
-        for field, value, code in [(slice(8, 10), [3.5/16, 2.5/16], 'respawn_player_distance'),
-                                   (slice(8, 10), [4.5/16, 3.5/16], 'respawn_wall'),
+        for field, value, code in [(slice(GLOBAL_DIM, GLOBAL_DIM+2), [3.5/16, 2.5/16], 'respawn_player_distance'),
+                                   (slice(GLOBAL_DIM, GLOBAL_DIM+2), [4.5/16, 3.5/16], 'respawn_wall'),
                                    (12, .42, 'respawn_health')]:
             game, previous, current, action, events = self.respawn_pair()
             current[field] = value
@@ -57,9 +59,9 @@ class EndlessRolloutValidationTests(unittest.TestCase):
 
     def test_cumulative_counter_and_infinite_ammo_are_checked(self):
         game, previous, current, action, events = self.respawn_pair()
-        current[88] = 0.
+        current[-2] = 0.
         self.assertIn('kill_count', self.codes(game, previous, current, action, events))
-        current[88] = previous[88]
+        current[-2] = previous[-2]
         current[5] -= 1/99
         self.assertIn('shot_ammo', self.codes(game, previous, current, action, events))
 
@@ -89,7 +91,7 @@ class EndlessRolloutValidationTests(unittest.TestCase):
         tape = build_action_tape(10000, 'mixed', 9000, 1/30, endless=True)
         self.assertIsNone(tape['reference_terminal_step'])
         self.assertEqual(tape['controller'], 'survival_patrol_with_combat')
-        self.assertGreater(float(tape['reference_states'][-1, 88])*8, 8)
+        self.assertGreater(float(tape['reference_states'][-1, -2])*ENTITY_SLOTS, 8)
         monitor = RolloutMonitor(tape['map'], 'mixed', 9000, endless=True)
         states = tape['reference_states']
         for index, action in enumerate(tape['actions']):

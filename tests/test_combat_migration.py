@@ -1,4 +1,6 @@
 """Old spatial weights/moments survive new combat, spawn and Flow branches."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 from dataclasses import asdict
 import hashlib
@@ -40,7 +42,7 @@ class CombatMigrationTests(unittest.TestCase):
             'image_size': 32, 'teacher_parameters': sum(p.numel() for p in model.parameters()),
             'teacher_config_fingerprint': fingerprint, 'codec_fingerprint': 'frozen-codec',
             'seed': 173, 'behavior_version': 'deterministic_enemy_v3_simple_spawn',
-            'spatial_entities': True, 'spatial_entity_count': 9}
+            'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1}
         initial = {'stage': 'world', 'config': old_config, 'model': copy.deepcopy(model.state_dict()),
             'training_steps': 0, 'global_training_step': 0, 'pipeline_phase': 'teacher175vq_initial',
             'initialization': copy.deepcopy(marker)}
@@ -78,7 +80,7 @@ class CombatMigrationTests(unittest.TestCase):
         (root/'initialization.json').write_text(json.dumps(marker), encoding='utf-8')
         budget = b'{"limit_updates":6000,"start_optimizer_step":0,"stop_optimizer_step":6000}\n'
         (root/'teacher_budget.json').write_bytes(budget)
-        spatial = b'{"status":"complete","spatial_entities":true,"spatial_entity_count":9,"start_optimizer_step":66}\n'
+        spatial = b'{"status":"complete","spatial_entities":true,"spatial_entity_count":2,"start_optimizer_step":66}\n'
         (root/'spatial_entities_migration.json').write_bytes(spatial)
         (root/'experiment_config175vq.json').write_text(json.dumps({'training_subset_manifest': 'fixed128k.json'}), encoding='utf-8')
         sr = root/'updated_sr.pt'
@@ -97,6 +99,9 @@ class CombatMigrationTests(unittest.TestCase):
         self.assertTrue(migrated['config']['spatial_combat'])
         self.assertEqual(report['start_optimizer_step'], 103)
         self.assertFalse(report['source_spatial_combat'])
+        self.assertEqual(report['spatial_entity_count'], 2)
+        self.assertEqual(report['enemy_slots'], 1)
+        self.assertEqual(report['state_dim'], 20)
         self.assertGreater(report['added_parameter_count'], 0)
         self.assertTrue(all(name.startswith(COMBAT_PREFIXES) for name in report['added_parameters']))
         self.assertTrue(any(name.startswith('flow_renderer.spatial_condition.') for name in report['added_parameters']))
@@ -295,7 +300,7 @@ class CombatMigrationTests(unittest.TestCase):
         with torch.device('meta'):
             model = NeuralWorldModel(teacher175_vq_config(VQGANConfig(image_size=32, n_embed=1488),
                 spatial_entities=True, spatial_combat=True))
-        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 176_492_456)
+        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 175_449_484)
         self.assertEqual(sum(parameter.numel() for name, parameter in model.named_parameters()
             if name.startswith(('flow_renderer.wall_condition.',
                                 'flow_renderer.residual_adapter.wall_condition.'))), 264_192)

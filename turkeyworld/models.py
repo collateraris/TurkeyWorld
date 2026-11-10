@@ -8,6 +8,8 @@ free-residual baseline for old checkpoints. Entity slots keep permanent IDs.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_SCHEMA_VERSION
+
 from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
@@ -19,18 +21,20 @@ from torch.nn import functional as F
 
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
-ENTITY_SLOTS = 8
+ENTITY_SLOTS = 1
 STATE_DIM = GLOBAL_DIM + ENTITY_DIM * ENTITY_SLOTS + 2
 ACTION_DIM = 4
 EVENT_DIM = 4
 FEATURE_DIM = 128
 STATE_SCHEMA = {
+    "version": STATE_SCHEMA_VERSION,
+    "state_dim": STATE_DIM,
     "global": ["x/W", "y/H", "sin_angle", "cos_angle", "hp/100", "ammo/99",
                "fire_cooldown/.22", "shot_flash/.1"],
     "entities": ["x/W", "y/H", "vx/2", "vy/2", "hp/100", "alive",
                  "attack_cooldown/1.2", "hurt_timer/.15", "death_timer/.6", "phase"],
     "slots": ENTITY_SLOTS,
-    "tail": ["kills/8", "time/300"],
+    "tail": ["kills/1", "time/300"],
     "actions": ["forward", "strafe", "turn", "fire"],
     "events": ["shot", "hit", "kill", "player_hit"],
 }
@@ -39,6 +43,8 @@ STATE_SCHEMA = {
 @dataclass
 class WorldModelConfig:
     kind: str = "student"
+    entity_slots: int = ENTITY_SLOTS
+    state_schema_version: str = STATE_SCHEMA_VERSION
     image_size: int = 256
     tile_types: int = 16
     architecture: str = "camera_transformer"
@@ -74,6 +80,9 @@ class WorldModelConfig:
     flow_block_conditioning: bool = False
 
     def __post_init__(self):
+        if (not isinstance(self.entity_slots, int) or isinstance(self.entity_slots, bool)
+                or self.entity_slots != ENTITY_SLOTS or self.state_schema_version != STATE_SCHEMA_VERSION):
+            raise ValueError('Only the single-enemy20D state schema is supported; migrate legacy checkpoints explicitly')
         if not isinstance(self.spatial_entities, bool):
             raise ValueError('spatial_entities must be a boolean')
         if not isinstance(self.spatial_combat, bool):
@@ -286,8 +295,8 @@ class NeuralWorldModel(nn.Module):
         if self.config.transition_mode == "residual_v0":
             self.event_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, EVENT_DIM))
         else:
-            self.hit_target_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, 9))
-            self.attack_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, 8))
+            self.hit_target_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, ENTITY_SLOTS+1))
+            self.attack_head = nn.Sequential(nn.Linear(h, 128), nn.SiLU(), nn.Linear(128, ENTITY_SLOTS))
             initialize_event_heads(self.hit_target_head, self.attack_head)
         self.feature_head = nn.Sequential(nn.Linear(h, FEATURE_DIM), nn.SiLU())
         # Zero residual initialization starts from a copy of the input state.
@@ -596,7 +605,7 @@ def initialize_event_heads(target_head, attack_head):
     nn.init.zeros_(target_head[-1].weight)
     nn.init.zeros_(target_head[-1].bias)
     with torch.no_grad():
-        target_head[-1].bias[8] = 2.0  # Explicit none target, not a random kill.
+        target_head[-1].bias[ENTITY_SLOTS] = 2.0  # Explicit none target, not a random kill.
     nn.init.zeros_(attack_head[-1].weight)
     nn.init.constant_(attack_head[-1].bias, -4.0)
 
@@ -613,6 +622,12 @@ def load_world_checkpoint(path, device="cpu"):
     # v0.1 checkpoint dictionaries predate the architecture field. Their keys
     # and exact CNN topology remain loadable without pretending they are tokens.
     config = dict(checkpoint["config"])
+    if checkpoint.get('state_schema', {}).get('slots', ENTITY_SLOTS) != ENTITY_SLOTS:
+        raise ValueError('Legacy multi-enemy checkpoint requires explicit single_enemy_migration')
+    if any(name.endswith(('state_encoder.weight', 'state_input.0.weight'))
+           and value.ndim == 2 and value.shape[1] != STATE_DIM
+           for name, value in checkpoint['model'].items()):
+        raise ValueError('Legacy state dimensions require explicit single_enemy_migration')
     config.setdefault("architecture", "legacy_cnn")
     config.setdefault("transition_mode", "residual_v0")
     config.setdefault("simulation_hz", 30.0)

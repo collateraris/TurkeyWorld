@@ -1,4 +1,6 @@
 """Held-out future images/states never enter the autoregressive predictor."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import json
 from pathlib import Path
 import random
@@ -27,13 +29,13 @@ class VJEPAValidationTests(unittest.TestCase):
         values = np.arange(steps + 1, dtype=np.float32)
         frames = np.broadcast_to((values + episode_id * 20).astype(np.uint8)[:, None, None, None],
                                  (steps + 1, 16, 16, 3)).copy()
-        states = np.zeros((steps + 1, 90), dtype=np.float32)
+        states = np.zeros((steps + 1, STATE_DIM), dtype=np.float32)
         states[:, 0], states[:, 3:5] = values, 1
         np.savez_compressed(path, frames=frames, states=states,
                             actions=np.ones((steps, 4), dtype=np.float32),
                             events=np.zeros((steps, 4), dtype=np.float32),
                             hit_ids=np.full(steps, -1, dtype=np.int64),
-                            attack_flags=np.zeros((steps, 8), dtype=np.float32),
+                            attack_flags=np.zeros((steps, ENTITY_SLOTS), dtype=np.float32),
                             map=np.zeros((16, 16), dtype=np.int8), split=np.asarray(split), dt=np.asarray(1 / 30))
 
     @staticmethod
@@ -83,7 +85,7 @@ class VJEPAValidationTests(unittest.TestCase):
             self.assertEqual(first["summary"]["psnr_mean"], 120.)
             self.assertEqual([int(state[0, 0]) for state in model.state_inputs], [1, 2, 3, 4])
             self.assertEqual(tuple(model.initializations[0][0].shape), (1, 2, 3, 16, 16))
-            self.assertEqual(tuple(model.initializations[0][1].shape), (1, 2, 90))
+            self.assertEqual(tuple(model.initializations[0][1].shape), (1, 2, STATE_DIM))
             # Change every future measurement target, preserving initial context
             # and controls. Generated RGB/state inputs must remain identical.
             data.episodes[0]["frames"][2:] = 200

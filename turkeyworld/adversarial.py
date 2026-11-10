@@ -8,6 +8,8 @@ substituted for the final generated image.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 
 import torch
@@ -29,7 +31,7 @@ class _PatchDiscriminator(nn.Module):
             channels = width
         self.blocks = nn.ModuleList(blocks)
         self.logits = spectral_norm(nn.Conv2d(channels, 1, 4, padding=1))
-        self.state_projection = spectral_norm(nn.Linear(90, channels, bias=False))
+        self.state_projection = spectral_norm(nn.Linear(STATE_DIM, channels, bias=False))
 
     def forward(self, paired, state):
         features = []
@@ -56,7 +58,7 @@ class MultiScaleDiscriminator(nn.Module):
 
     Inputs are RGB [B,C,H,W] in the same [0,1] convention as the renderer.
     The base condition may be coarse and is resized after detaching. Optional
-    state [B,90] is restricted to render_state_view, excluding invisible HUD
+    state [B,20] is restricted to render_state_view, excluding invisible HUD
     counters. Only candidate RGB receives input gradients, including for R1.
     """
 
@@ -82,8 +84,8 @@ class MultiScaleDiscriminator(nn.Module):
         if condition.shape[-2:] != rgb.shape[-2:]:
             condition = F.interpolate(condition, rgb.shape[-2:], mode="bilinear", align_corners=False)
         if state is not None:
-            if state.shape != (rgb.shape[0], 90):
-                raise ValueError("Conditional state must have shape [B,90]")
+            if state.shape != (rgb.shape[0], STATE_DIM):
+                raise ValueError("Conditional state must have shape [B,20]")
             from .models import render_state_view
             state = render_state_view(state.detach().to(device=rgb.device, dtype=rgb.dtype))
         paired = torch.cat([rgb * 2 - 1, condition * 2 - 1], dim=1)

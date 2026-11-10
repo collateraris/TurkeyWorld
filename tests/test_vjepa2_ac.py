@@ -1,4 +1,6 @@
 """Causal visual dynamics, persistent conditioning and honest renderer migration."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -52,7 +54,7 @@ class CompactVJEPA2ACTests(unittest.TestCase):
     def test_interleaved_predictor_is_block_causal_and_actions_change_next_latents(self):
         from turkeyworld.vjepa2_ac import block_causal_mask
         core = self.core().eval()
-        latents, actions, states = torch.randn(1, 3, 64, 32), torch.randn(1, 3, 4), torch.randn(1, 3, 90)
+        latents, actions, states = torch.randn(1, 3, 64, 32), torch.randn(1, 3, 4), torch.randn(1, 3, STATE_DIM)
         with torch.inference_mode():
             first = core.predict(latents, actions, states)
             changed_latents, changed_actions, changed_states = latents.clone(), actions.clone(), states.clone()
@@ -124,13 +126,13 @@ class CompactVJEPA2ACTests(unittest.TestCase):
     def test_all_entity_slots_persist_outside_the_view_and_new_features_condition_rgb(self):
         model = self.model(renderer_mode='direct')
         _, state, rgb, features = self.initial(model)
-        state[:, 78:80] = torch.tensor([1.5/16, 12.5/16])
-        state[:, 82:84] = 0.  # Persistent dead slot7, away from the initial view.
+        state[:, 8:10] = torch.tensor([1.5/16, 12.5/16])
+        state[:, 12:14] = 0.  # Persistent dead NPC0, away from the initial view.
         memory = model.initialize_from_image(rgb, state, features)
         result = model.transition(state, torch.zeros(1, 4), features, memory)
-        torch.testing.assert_close(result['state'][:, 78:80], state[:, 78:80], rtol=0, atol=0)
-        self.assertEqual(result['state'].shape, (1, 90))
-        self.assertEqual(float(result['state'][0, 83].detach()), 0.)
+        torch.testing.assert_close(result['state'][:, 8:10], state[:, 8:10], rtol=0, atol=0)
+        self.assertEqual(result['state'].shape, (1, STATE_DIM))
+        self.assertEqual(float(result['state'][0, 13].detach()), 0.)
         with torch.inference_mode():
             zero = model.render_base(state, torch.zeros(1, 128), features)
             one = model.render_base(state, torch.ones(1, 128), features)
@@ -162,7 +164,7 @@ class CompactVJEPA2ACTests(unittest.TestCase):
             model = NeuralWorldModel(WorldModelConfig(kind='teacher', image_size=128, architecture='vjepa2_ac',
                 endless=True, renderer_mode='flow_matching', flow_steps=12,
                 flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8))
-        self.assertEqual(parameter_counts(model)['world_total'], 125_439_429)
+        self.assertEqual(parameter_counts(model)['world_total'], 124_406_761)
         self.assertEqual(model.core.memory_tokens, 264)
         self.assertEqual(model.core.width, 512)
         self.assertFalse(any('ema' in name or 'discriminator' in name for name, _ in model.named_parameters()))

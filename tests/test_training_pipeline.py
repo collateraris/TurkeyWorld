@@ -1,4 +1,6 @@
 """A tiny real CPU experiment exercises all training stages and resumable files."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from argparse import Namespace
 import contextlib
 import io
@@ -98,7 +100,7 @@ class TrainingPipelineSmokeTests(unittest.TestCase):
             experiment.joint(teacher, "teacher", 1, data, validation)
             experiment.temporal(teacher, "teacher_temporal")
             pairs = experiment.reflow(teacher, data)
-            self.assertEqual(pairs["states"].shape, (2, 90))
+            self.assertEqual(pairs["states"].shape, (2, STATE_DIM))
             self.assertEqual(pairs["noise"].shape, (2, 3, 128, 128))
             self.assertEqual(pairs["endpoints"].shape, (2, 3, 128, 128))
             self.assertTrue(np.isfinite(pairs["noise"]).all())

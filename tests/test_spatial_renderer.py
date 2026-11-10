@@ -1,4 +1,6 @@
 """Persistent entity tokens have an independent, camera-grounded visual read."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from contextlib import ExitStack
 import math
 import unittest
@@ -11,11 +13,11 @@ from turkeyworld.models import WorldModelConfig
 from turkeyworld.transformer_model import CameraTransformerWorldModel
 
 
-def state90():
-    state = torch.zeros(1, 90)
+def entity_state():
+    state = torch.zeros(1, STATE_DIM)
     state[:, :8] = torch.tensor([.5, .5, 0., 1., 1., .8, .1, 0.])
-    entities = state[:, 8:88].reshape(1, 8, 10)
-    entities[:, :, :2] = torch.tensor([7/16, 8/16])  # Other slots behind camera.
+    entities = state[:, GLOBAL_DIM:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
+    entities[:, :, :2] = torch.tensor([7/16, 8/16])
     entities[:, :, 4:6] = torch.tensor([.8, 1.])
     entities[:, 0, :4] = torch.tensor([9/16, 8/16, .2, 0.])
     return state
@@ -38,8 +40,8 @@ class SpatialRendererTests(unittest.TestCase):
             model.spatial_render.attention.out_proj.weight.copy_(torch.eye(model.width))
 
     def test_disabled_flag_preserves_legacy_keys_counts_and_initialization(self):
-        for kind, parameters, renderer, keys in [('teacher', 3857646, 2202252, 169),
-                                                  ('student', 942062, 529164, 105)]:
+        for kind, parameters, renderer, keys in [('teacher', 3842862, 2188812, 169),
+                                                  ('student', 932206, 520204, 105)]:
             with self.subTest(kind=kind):
                 torch.manual_seed(73)
                 legacy = self.model(False, kind)
@@ -58,19 +60,19 @@ class SpatialRendererTests(unittest.TestCase):
         torch.manual_seed(11)
         legacy, spatial = self.model(False), self.model(True)
         spatial.load_state_dict(legacy.state_dict(), strict=False)
-        state, features = state90(), torch.zeros(1, 128)
+        state, features = entity_state(), torch.zeros(1, 128)
         maps = torch.randn(1, legacy.width, 16, 16)
         with torch.no_grad():
             before = legacy.render_with_aux(state, features, maps)
             after = spatial.render_with_aux(state, features, maps)
         torch.testing.assert_close(after['rgb'], before['rgb'], rtol=0, atol=0)
-        self.assertEqual(after['spatial_tokens'].shape, (1, 9, spatial.width))
-        self.assertEqual(after['spatial_render_weights'].shape, (1, 256, 9))
+        self.assertEqual(after['spatial_tokens'].shape, (1, ENTITY_SLOTS+1, spatial.width))
+        self.assertEqual(after['spatial_render_weights'].shape, (1, 256, ENTITY_SLOTS+1))
         self.assertNotIn('spatial_tokens', before)
 
     def test_spatial_positions_and_directions_change_actual_rgb_with_legacy_path_held_fixed(self):
         torch.manual_seed(17)
-        model, original = self.model(), state90()
+        model, original = self.model(), entity_state()
         maps, features = torch.randn(1, model.width, 16, 16), torch.zeros(1, 128)
         with torch.no_grad():
             fixed_geometry = model.geometry(original, maps)
@@ -95,7 +97,7 @@ class SpatialRendererTests(unittest.TestCase):
                 self.assertGreater(float((changed-baseline).abs().max()), 1e-6, index)
 
     def test_visual_projection_retains_partial_edge_corpses_but_masks_behind_keys(self):
-        model, state = self.model(), state90()
+        model, state = self.model(), entity_state()
         state[:, 9] = 8.8/16  # NPC center beyond right FOV; sprite still overlaps.
         state[:, 12:14] = 0.  # Corpse still has a sprite.
         original = state.clone()
@@ -105,14 +107,15 @@ class SpatialRendererTests(unittest.TestCase):
         weights = result['spatial_render_weights']
         self.assertTrue(bool((weights[:, :, 1] > 0).any()))
         self.assertTrue(bool((weights[:, :, 1] == 0).any()))
-        self.assertTrue(bool((weights[:, :, 2:] == 0).all()))
+        self.assertEqual(weights.shape[-1], 2)  # Player and the only NPC.
         torch.testing.assert_close(weights[:, :, 0], torch.ones(1, 256), rtol=0, atol=0)
-        self.assertEqual(result['spatial_tokens'].shape[1], 9)
+        self.assertEqual(result['spatial_tokens'].shape[1], ENTITY_SLOTS+1)
         self.assertTrue(bool((result['spatial_tokens'].abs().sum(-1) > 0).all()))
         torch.testing.assert_close(state, original, rtol=0, atol=0)
 
     def test_masked_behind_token_cannot_contribute_to_the_spatial_visual_read(self):
-        model, state = self.model(), state90()
+        model, state = self.model(), entity_state()
+        state[:, GLOBAL_DIM:GLOBAL_DIM+2] = torch.tensor([7/16, 8/16])  # Sole NPC behind camera.
         self.activate(model)
         maps = torch.randn(1, model.width, 16, 16)
         with torch.no_grad():
@@ -122,15 +125,15 @@ class SpatialRendererTests(unittest.TestCase):
             queries = torch.randn(1, 256, model.width)
             before = model.spatial_render(queries, tokens, weights)
             changed = tokens.clone()
-            changed[:, 2] = torch.randn_like(changed[:, 2])*20
+            changed[:, 1] = torch.randn_like(changed[:, 1])*20
             after = model.spatial_render(queries, changed, weights)
-        self.assertEqual(tokens.shape[1], 9)
+        self.assertEqual(tokens.shape[1], ENTITY_SLOTS+1)
         torch.testing.assert_close(before, after, rtol=0, atol=0)
 
     def test_training_from_zero_opens_projection_then_reaches_spatial_encoder_and_rgb_head(self):
         torch.manual_seed(29)
         model = self.model().train()
-        state = state90().requires_grad_()
+        state = entity_state().requires_grad_()
         maps = torch.randn(1, model.width, 16, 16, requires_grad=True)
         features, target = torch.zeros(1, 128), torch.rand(1, 3, 32, 32)
         optimizer = torch.optim.Adam(model.parameters(), lr=.001)
@@ -149,7 +152,7 @@ class SpatialRendererTests(unittest.TestCase):
             optimizer.step()
 
     def test_amp_keeps_original_fp32_spatial_coordinates_before_local_map_sampling(self):
-        model, state = self.model(), state90()
+        model, state = self.model(), entity_state()
         state[:, 0] += .0001
         observed = []
         handle = model.spatial_encoder.register_forward_pre_hook(
@@ -165,7 +168,8 @@ class SpatialRendererTests(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(result['rgb']).all()))
 
     def test_spatial_renderer_adds_no_engine_or_nonvisual_hud_conditioning(self):
-        model, state = self.model(), state90()
+        model, state = self.model(), entity_state()
+        state[:, GLOBAL_DIM:GLOBAL_DIM+2] = torch.tensor([7/16, 8/16])  # Sole NPC behind camera.
         self.activate(model)
         maps, features = torch.randn(1, model.width, 16, 16), torch.zeros(1, 128)
         changed = state.clone()

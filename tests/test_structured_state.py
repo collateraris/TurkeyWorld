@@ -1,4 +1,6 @@
 """Event bookkeeping invariants, independent of renderer quality or learned weights."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import numpy as np
@@ -17,12 +19,12 @@ class StructuredStateTests(unittest.TestCase):
         state = torch.from_numpy(Game(seed=3).state_vector())[None]
         return state.repeat(batch, 1)
 
-    def logits(self, batch=1, target=8):
-        targets = torch.full((batch, 9), -12.0)
+    def logits(self, batch=1, target=ENTITY_SLOTS):
+        targets = torch.full((batch, ENTITY_SLOTS+1), -12.0)
         targets[:, target] = 12.0
-        return targets, torch.full((batch, 8), -12.0)
+        return targets, torch.full((batch, ENTITY_SLOTS), -12.0)
 
-    def run_step(self, state, action=None, target=8, attacks=None, candidate=None, training=False):
+    def run_step(self, state, action=None, target=ENTITY_SLOTS, attacks=None, candidate=None, training=False):
         target_logits, attack_logits = self.logits(len(state), target)
         if attacks is not None:
             attack_logits = attacks
@@ -43,14 +45,14 @@ class StructuredStateTests(unittest.TestCase):
             for _ in range(9000):
                 # Even wildly wrong proposals for non-motion fields must not
                 # erode HP, flags, ammunition or create combat events.
-                proposal = torch.rand((1, 90), generator=generator)
+                proposal = torch.rand((1, STATE_DIM), generator=generator)
                 result = structured_transition(state, proposal, actions, targets, attacks)
                 state = result['state']
                 self.assertEqual(float(result['events'].sum()), 0.0)
         torch.testing.assert_close(state[:, :2], initial[:, :2], rtol=0, atol=0)
         torch.testing.assert_close(state[:, 4:6], initial[:, 4:6], rtol=0, atol=0)
-        old = initial[:, 8:-2].reshape(1, 8, 10)
-        new = state[:, 8:-2].reshape(1, 8, 10)
+        old = initial[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
+        new = state[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         torch.testing.assert_close(new[:, :, 4:6], old[:, :, 4:6], rtol=0, atol=0)
         self.assertEqual(float(state[0, -2]), 0.0)
         self.assertAlmostEqual(float(state[0, -1]), 1.0, places=3)
@@ -75,7 +77,7 @@ class StructuredStateTests(unittest.TestCase):
         self.assertEqual(float(dead[0, 4]), 0)
         self.assertEqual(float(dead[0, 5]), 0)
         self.assertEqual(float(dead[0, 8]), 0)
-        self.assertEqual(float(second['state'][0, -2]), 1 / 8)
+        self.assertEqual(float(second['state'][0, -2]), 1 / ENTITY_SLOTS)
         position = dead[:, :2].clone()
         state = second['state']
         for _ in range(30):
@@ -96,12 +98,12 @@ class StructuredStateTests(unittest.TestCase):
         dead = self.run_step(state, fire, target=0)
         self.assertEqual(dead['accepted_target'].tolist(), [-1])
         self.assertEqual(dead['events'].tolist(), [[1., 0., 0., 0.]])
-        self.assertEqual(float(dead['state'][0, -2]), 1 / 8)
+        self.assertEqual(float(dead['state'][0, -2]), 1 / ENTITY_SLOTS)
 
     def test_melee_guards_cooldown_and_killed_attack_cancel(self):
         state = self.initial()
         state[:, 8:10] = torch.tensor([[2.9 / 16, 2.5 / 16]])
-        attacks = torch.full((1, 8), -12.)
+        attacks = torch.full((1, ENTITY_SLOTS), -12.)
         attacks[:, 0] = 12
         first = self.run_step(state, attacks=attacks)
         self.assertTrue(bool(first['accepted_attacks'][0, 0]))
@@ -132,7 +134,7 @@ class StructuredStateTests(unittest.TestCase):
         state[:, 6:8] = 1
         state[:, 14] = 1  # NPC attack cooldown
         terminal = self.run_step(state, torch.ones(1, 4), target=0,
-                                 attacks=torch.full((1, 8), 12.), candidate=proposal)
+                                 attacks=torch.full((1, ENTITY_SLOTS), 12.), candidate=proposal)
         torch.testing.assert_close(terminal['state'][:, :4], state[:, :4], rtol=0, atol=0)
         torch.testing.assert_close(terminal['state'][:, 8:10], state[:, 8:10], rtol=0, atol=0)
         self.assertEqual(float(terminal['events'].sum()), 0)
@@ -148,8 +150,8 @@ class StructuredStateTests(unittest.TestCase):
         self.assertLessEqual(float(player_distance), 2.4 / 30 + 1e-6)
         self.assertAlmostEqual(float(moved[0, 2]), np.sin(2.2 / 30), places=6)
         self.assertAlmostEqual(float(moved[0, 3]), np.cos(2.2 / 30), places=6)
-        slots = moved[:, 8:-2].reshape(1, 8, 10)
-        old = state[:, 8:-2].reshape(1, 8, 10)
+        slots = moved[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
+        old = state[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         distances = torch.linalg.vector_norm((slots[:, :, :2] - old[:, :, :2]) * 16, dim=-1)
         self.assertLessEqual(float(distances.max()), 1.2 / 30 + 1e-6)
         torch.testing.assert_close(slots[:, :, 2:4], (slots[:, :, :2] - old[:, :, :2]) * (16 * 30 / 2),
@@ -158,8 +160,8 @@ class StructuredStateTests(unittest.TestCase):
     def test_hard_forward_decisions_have_finite_nonzero_training_gradients(self):
         previous = self.initial(batch=2).requires_grad_()
         candidate = (previous.detach() + .01).requires_grad_()
-        targets = torch.zeros(2, 9, requires_grad=True)
-        attacks = torch.ones(2, 8, requires_grad=True)
+        targets = torch.zeros(2, ENTITY_SLOTS+1, requires_grad=True)
+        attacks = torch.ones(2, ENTITY_SLOTS, requires_grad=True)
         # NPC0 in melee range, while all targets begin nonlethal at 0.6 HP.
         close = previous.detach().clone()
         close[:, 8:10] = torch.tensor([[2.9 / 16, 2.5 / 16]])
@@ -186,9 +188,9 @@ class StructuredStateTests(unittest.TestCase):
             before = game.state_vector()
             event = game.step(action_values)
             after = game.state_vector()
-            target, attack = self.logits(target=event['hit_id'] if event['hit_id'] >= 0 else 8)
-            old_slots = before[8:-2].reshape(8, 10)
-            new_slots = after[8:-2].reshape(8, 10)
+            target, attack = self.logits(target=event['hit_id'] if event['hit_id'] >= 0 else ENTITY_SLOTS)
+            old_slots = before[8:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
+            new_slots = after[8:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
             accepted = (new_slots[:, 6] > .999) & (old_slots[:, 6] < .1)
             attack[0, torch.from_numpy(accepted)] = 12
             result = structured_transition(torch.from_numpy(before)[None], torch.from_numpy(after)[None],

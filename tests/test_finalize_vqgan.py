@@ -1,4 +1,6 @@
 """Latest stopped codec acceptance preserves failed metrics and original weights."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 import copy
 import hashlib
@@ -181,9 +183,9 @@ class FinalizeVQGANTests(unittest.TestCase):
             directory = root/'data'/'rgb'/'val'
             directory.mkdir(parents=True)
             np.savez_compressed(directory/'episode.npz', frames=np.zeros((3, 128, 128, 3), np.uint8),
-                states=np.zeros((3, 90), np.float32), actions=np.zeros((2, 4), np.float32),
+                states=np.zeros((3, STATE_DIM), np.float32), actions=np.zeros((2, 4), np.float32),
                 events=np.zeros((2, 4), np.float32), hit_ids=np.full(2, -1, np.int64),
-                attack_flags=np.zeros((2, 8), np.float32), map=np.zeros((16, 16), np.int8),
+                attack_flags=np.zeros((2, ENTITY_SLOTS), np.float32), map=np.zeros((16, 16), np.int8),
                 split=np.asarray('val'), dt=np.asarray(1/30))
             with patch('turkeyworld.finalize_vqgan.evaluate_vqgan', side_effect=AssertionError('Wrong native size must fail first')):
                 with self.assertRaisesRegex(ValueError, 'native source RGB 32x32'):

@@ -7,6 +7,8 @@ spawn head or replace the main autoregressive state.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import math
 
 import torch
@@ -37,20 +39,20 @@ def spawn_positions_with_grad(logits, previous, walkable, dt):
     Unready/terminal/full-wall cases preserve the legacy positions and have
     finite zero logit gradients, even if a row has no legal categorical cell.
     """
-    if (not torch.is_tensor(previous) or previous.ndim != 2 or previous.shape[-1] != 90
+    if (not torch.is_tensor(previous) or previous.ndim != 2 or previous.shape[-1] != STATE_DIM
             or not previous.is_floating_point()):
-        raise ValueError('Spawn previous state must be floating point[B,90]')
+        raise ValueError('Spawn previous state must be floating point[B,STATE_DIM]')
     batch = len(previous)
-    if (not torch.is_tensor(logits) or logits.shape != (batch, 8, 256)
+    if (not torch.is_tensor(logits) or logits.shape != (batch, ENTITY_SLOTS, 256)
             or not logits.is_floating_point() or logits.device != previous.device):
-        raise ValueError('Spawn logits must be colocated floating point[B,8,256]')
+        raise ValueError('Spawn logits must be colocated floating point[B,NPC,256]')
     if (not math.isfinite(dt) or dt <= 0 or not bool(torch.isfinite(previous.detach()).all())
             or not bool(torch.isfinite(logits.detach()).all())):
         raise ValueError('Spawn inputs and positive timestep must be finite')
     previous = previous.detach()
     walkable = _walkable_batch(walkable, batch, previous.device)
     hard_positions, available = decode_spawn_positions(logits, previous, walkable, dt, deterministic=False)
-    old = previous[:, 8:88].reshape(batch, 8, 10)
+    old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
     ready = (~alive & (old[:, :, 8]*DEATH_DURATION+dt >= RESPAWN_DELAY-1e-6)
              & (previous[:, 4:5] > 0))
@@ -61,7 +63,7 @@ def spawn_positions_with_grad(logits, previous, walkable, dt):
                                          .square().sum(-1) >= 4.**2)
     accepted_positions = old[:, :, :2].clone()
     results = []
-    for slot in range(8):
+    for slot in range(ENTITY_SLOTS):
         distances = ((centers[None, :, None]-accepted_positions[:, None])*MAP_EXTENT).square().sum(-1)
         allowed = base_allowed & ~((distances < 1.) & alive[:, None]).any(-1)
         usable = ready[:, slot] & allowed.any(-1)
@@ -92,12 +94,12 @@ def _payload_tensors(payload):
     if any(not torch.is_tensor(value) or not value.is_floating_point() for value in values.values()):
         raise ValueError('Spawn image payload values must be floating point tensors')
     previous = values['context_state']
-    if previous.ndim != 3 or previous.shape[-1] != 90 or min(previous.shape[:2]) < 1:
-        raise ValueError('Spawn context states require shape[B,H,90]')
+    if previous.ndim != 3 or previous.shape[-1] != STATE_DIM or min(previous.shape[:2]) < 1:
+        raise ValueError('Spawn context states require shape[B,H,STATE_DIM]')
     batch, horizon = previous.shape[:2]
     pooled, frames, maps = (values[name] for name in ('context_pooled', 'target_frames', 'map_features'))
     if (pooled.ndim != 3 or pooled.shape[:2] != (batch, horizon) or pooled.shape[-1] < 1
-            or values['context_spatial'].shape != (batch, horizon, 9, pooled.shape[-1])
+            or values['context_spatial'].shape != (batch, horizon, ENTITY_SLOTS+1, pooled.shape[-1])
             or values['features'].shape != (batch, horizon, 128)
             or values['target_states'].shape != previous.shape
             or frames.ndim != 5 or frames.shape[:3] != (batch, horizon, 3)
@@ -136,7 +138,7 @@ def spawn_image_objective(model, payload):
     values = _payload_tensors(payload)
     previous, target = values['context_state'], values['target_states']
     batch, horizon = previous.shape[:2]
-    old, future = (value[:, :, 8:88].reshape(batch, horizon, 8, 10) for value in (previous, target))
+    old, future = (value[:, :, GLOBAL_DIM:-2].reshape(batch, horizon, ENTITY_SLOTS, ENTITY_DIM) for value in (previous, target))
     old_alive = (old[..., 5] >= .5) & (old[..., 4] > 0)
     new_alive = (future[..., 5] >= .5) & (future[..., 4] > 0)
     revived = ~old_alive & new_alive
@@ -174,8 +176,8 @@ def spawn_image_objective(model, payload):
                                   values['context_spatial'][rows, steps], maps, **spawn_options)
     positions, available = spawn_positions_with_grad(logits, state, walkable[rows], dt)
     changed = revived[rows, steps]
-    old_selected = state[:, 8:88].reshape(-1, 8, 10)
-    target_selected = pose[:, 8:88].reshape_as(old_selected)
+    old_selected = state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    target_selected = pose[:, GLOBAL_DIM:-2].reshape_as(old_selected)
     xy = torch.where(changed[:, :, None], positions, target_selected[:, :, :2])
     # No Source resurrection when the own decoder cannot legally place a slot.
     corpse = old_selected.clone()
@@ -183,7 +185,7 @@ def spawn_image_objective(model, payload):
     corpse[:, :, 8] = (corpse[:, :, 8]+dt/DEATH_DURATION).clamp_max(RESPAWN_DELAY/DEATH_DURATION)
     fields = torch.where((changed & ~available)[:, :, None], corpse[:, :, 2:], target_selected[:, :, 2:])
     entities = torch.cat([xy, fields], -1)
-    image_state = torch.cat([pose[:, :8], entities.flatten(1), pose[:, 88:]], -1)
+    image_state = torch.cat([pose[:, :8], entities.flatten(1), pose[:, -2:]], -1)
     features = values['features'][rows, steps]
     base = model.render_base(image_state, features, maps)
     flow_options = {}

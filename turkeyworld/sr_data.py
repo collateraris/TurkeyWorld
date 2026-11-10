@@ -4,6 +4,8 @@ The collector records ``frames`` and ``hr_frames`` at the same engine state.
 This reader never creates HR targets by resizing LR and never calls the engine.
 Only NPZ headers and small provenance fields are read during indexing.
 """
+
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
 from collections import OrderedDict
 import hashlib
 import json
@@ -74,7 +76,7 @@ class SRPairData:
         size, output = self.image_size, self.image_size*self.scale
         if (len(lr) != 4 or lr[1:] != (size, size, 3) or lr_dtype != np.uint8
                 or hr != (lr[0], output, output, 3) or hr_dtype != np.uint8
-                or lr[0] < 2 or states != (lr[0], 90) or actions != (lr[0]-1, 4)):
+                or lr[0] < 2 or states != (lr[0], STATE_DIM) or actions != (lr[0]-1, 4)):
             raise ValueError(f'{path.name}: native LR/HR/state frames must be aligned {size}/{output} pairs')
         decoded = int(np.prod(lr)+np.prod(hr))
         if decoded > self.cache_limit_bytes:

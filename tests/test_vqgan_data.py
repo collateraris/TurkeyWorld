@@ -1,4 +1,6 @@
 """VQGAN targets are adjacent source frames, with immutable validation pairs."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,7 +18,7 @@ def write_episode(path, identity=0, split="train", policy="movement", attack_ind
     steps = 6
     values = np.arange(steps+1)+identity*30
     frames = np.broadcast_to(values[:, None, None, None], (steps+1, 16, 16, 3)).astype(np.uint8).copy()
-    states = np.zeros((steps+1, 90), np.float32)
+    states = np.zeros((steps+1, STATE_DIM), np.float32)
     states[:, 0] = np.arange(steps+1)
     states[:, 1] = identity
     events = np.zeros((steps, 4), np.float32)
@@ -24,7 +26,7 @@ def write_episode(path, identity=0, split="train", policy="movement", attack_ind
         events[attack_index, 3] = 1
     np.savez_compressed(path, frames=frames, predicted_frames=np.full_like(frames, 255),
         states=states, actions=np.zeros((steps, 4), np.float32), events=events,
-        hit_ids=np.full(steps, -1, np.int64), attack_flags=np.zeros((steps, 8), np.float32),
+        hit_ids=np.full(steps, -1, np.int64), attack_flags=np.zeros((steps, ENTITY_SLOTS), np.float32),
         map=np.full((16, 16), identity, np.int8), split=np.asarray(split), dt=np.asarray(1/30),
         policy=np.asarray(policy), frame_source=np.asarray(source))
 
@@ -46,7 +48,7 @@ class VQGANPairDataTests(unittest.TestCase):
             first = data.batch(16, rng=np.random.default_rng(273))
             again = data.batch(16, rng=np.random.default_rng(273))
             self.assertEqual(tuple(first["frames"].shape), (16, 2, 3, 16, 16))
-            self.assertEqual(tuple(first["states"].shape), (16, 2, 90))
+            self.assertEqual(tuple(first["states"].shape), (16, 2, STATE_DIM))
             self.assertEqual(tuple(first["events"].shape), (16, 1, 4))
             self.assertEqual(tuple(first["map"].shape), (16, 16, 16))
             self.assertEqual(tuple(first["indices"].shape), (16, 2))

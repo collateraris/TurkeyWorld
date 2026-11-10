@@ -7,6 +7,8 @@ the intermediate patch decoder are never substituted for final generated RGB.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -82,7 +84,7 @@ def _episode_ranges(data):
 def _entity_scores(states):
     """A fixed GT-state coverage proxy; it never inspects predictions or RGB."""
     state = np.asarray(states)
-    enemies = state[:, 8:88].reshape(-1, 8, 10)
+    enemies = state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     delta = (enemies[:, :, :2]-state[:, None, :2])*16
     forward = delta[:, :, 0]*state[:, None, 3]+delta[:, :, 1]*state[:, None, 2]
     lateral = -delta[:, :, 0]*state[:, None, 2]+delta[:, :, 1]*state[:, None, 3]

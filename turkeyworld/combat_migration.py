@@ -18,6 +18,7 @@ import tempfile
 
 import torch
 
+from .structured_state import ENTITY_SLOTS, STATE_DIM
 from .models import NeuralWorldModel, WorldModelConfig
 from .training_pipeline import atomic_json, now, replace_file
 from .vqgan_pipeline import process_alive
@@ -97,9 +98,9 @@ def enable_combat_checkpoint(saved, seed=173):
         state[name] = state[name].detach().clone()
     count = sum(parameter.numel() for parameter in parameters.values())
     profile = {'teacher_parameters': count, 'teacher_config_fingerprint': config_fingerprint(config),
-               'spatial_entities': True, 'spatial_entity_count': 9, 'spatial_combat': True}
+               'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM, 'spatial_combat': True}
     report = {'status': 'already_enabled' if source_config.spatial_combat else 'expanded',
-        'seed': seed, 'spatial_entities': True, 'spatial_entity_count': 9, 'spatial_combat': True,
+        'seed': seed, 'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM, 'spatial_combat': True,
         'source_spatial_combat': bool(source_config.spatial_combat),
         'source_step': int(saved.get('training_steps', 0)),
         'start_optimizer_step': int(saved.get('global_training_step', saved.get('training_steps', 0))),
@@ -211,8 +212,8 @@ def migrate_combat_run(run_dir, sr_checkpoint, seed=173, target_seconds=30.):
         return previous
     spatial_marker = _read_json(root/'spatial_entities_migration.json', {})
     if (spatial_marker.get('status') != 'complete' or not spatial_marker.get('spatial_entities')
-            or spatial_marker.get('spatial_entity_count') != 9):
-        raise ValueError('The prior nine-participant spatial migration must already be complete')
+            or spatial_marker.get('spatial_entity_count') != ENTITY_SLOTS+1):
+        raise ValueError('The prior player/NPC spatial migration must already be complete')
     source = torch.load(main, map_location='cpu', weights_only=False)
     origin = torch.load(initial, map_location='cpu', weights_only=False)
     if (source.get('stage') != 'world' or source.get('pipeline_phase') != 'teacher175vq_world'
@@ -232,7 +233,7 @@ def migrate_combat_run(run_dir, sr_checkpoint, seed=173, target_seconds=30.):
     if previous.get('teacher_config_fingerprint'):
         acceptable.add(previous['teacher_config_fingerprint'])
     if (not isinstance(marker, dict) or marker.get('teacher_size') != '175m_vqgan'
-            or not marker.get('spatial_entities') or marker.get('spatial_entity_count') != 9
+            or not marker.get('spatial_entities') or marker.get('spatial_entity_count') != ENTITY_SLOTS+1
             or marker.get('teacher_config_fingerprint') not in acceptable):
         raise ValueError('Initialization marker/configuration does not identify this spatial teacher175 source')
     if previous.get('status') == 'pending' and (
@@ -251,7 +252,7 @@ def migrate_combat_run(run_dir, sr_checkpoint, seed=173, target_seconds=30.):
         raise ValueError('World/initial expanded combat configurations must match')
     profile = {'teacher_parameters': main_report['generator_parameters'],
         'teacher_config_fingerprint': main_report['teacher_config_fingerprint'],
-        'spatial_entities': True, 'spatial_entity_count': 9, 'spatial_combat': True}
+        'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM, 'spatial_combat': True}
     upgraded_marker = {**marker, **profile}
     staged = []
     try:

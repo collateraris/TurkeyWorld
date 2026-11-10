@@ -1,4 +1,6 @@
 """Base reconstruction and conditional-flow regression have separate gradients."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -26,7 +28,7 @@ class SeparateRendererObjectiveTests(unittest.TestCase):
         torch.nn.init.normal_(flow.output.weight, std=.02)
         base = torch.rand(1, 3, 32, 32, requires_grad=True)
         target = torch.rand_like(base, requires_grad=True)
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, 3:6] = 1
         mask = torch.zeros(1, 1, 32, 32, requires_grad=True)
         with torch.no_grad():

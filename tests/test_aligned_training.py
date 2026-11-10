@@ -1,4 +1,6 @@
 """GT-label alignment is separate from the persistent autoregressive stream."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from types import SimpleNamespace
 import unittest
 
@@ -59,11 +61,11 @@ class AlignedTrainingTests(unittest.TestCase):
                 super().__init__()
                 self.config = SimpleNamespace(simulation_hz=30.)
                 self.core, self.flow_renderer = Core(), Flow()
-                self.pose = torch.nn.Linear(width, 90)
+                self.pose = torch.nn.Linear(width, STATE_DIM)
                 self.feature = torch.nn.Linear(width, 128)
-                self.hit = torch.nn.Linear(width, 9)
-                self.attack = torch.nn.Linear(width, 8)
-                self.spawn = torch.nn.Linear(width, 2048)
+                self.hit = torch.nn.Linear(width, ENTITY_SLOTS+1)
+                self.attack = torch.nn.Linear(width, ENTITY_SLOTS)
+                self.spawn = torch.nn.Linear(width, ENTITY_SLOTS*256)
                 self.state_inputs, self.outputs, self.render_states = [], [], []
 
             @property
@@ -87,7 +89,7 @@ class AlignedTrainingTests(unittest.TestCase):
                 result = {"state": state + .01 * self.pose(pooled), "memory": latent,
                           "latent_prediction": latent, "features": self.feature(pooled),
                           "target_logits": self.hit(pooled), "attack_logits": self.attack(pooled),
-                          "spawn_logits": self.spawn(pooled).reshape(-1, 8, 256)}
+                          "spawn_logits": self.spawn(pooled).reshape(-1, ENTITY_SLOTS, 256)}
                 for key in ("target_logits", "attack_logits", "spawn_logits"):
                     if result[key].requires_grad:
                         result[key].retain_grad()
@@ -103,11 +105,11 @@ class AlignedTrainingTests(unittest.TestCase):
     @staticmethod
     def batch():
         frames = torch.rand(1, 6, 3, 16, 16)
-        states = torch.zeros(1, 6, 90)
+        states = torch.zeros(1, 6, STATE_DIM)
         states[:, :, 0] = torch.arange(6) * .05 + .1
         states[:, :, 1] = .2
         states[:, :, 3:6] = 1
-        enemies = states[:, :, 8:88].reshape(1, 6, 8, 10)
+        enemies = states[:, :, GLOBAL_DIM:-2].reshape(1, 6, ENTITY_SLOTS, ENTITY_DIM)
         enemies[:, :, :, :2] = .5
         enemies[:, :, :, 4:6] = torch.tensor([.6, 1.])
         enemies[:, :4, 0, 4:6] = 0
@@ -115,12 +117,12 @@ class AlignedTrainingTests(unittest.TestCase):
         events = torch.zeros(1, 4, 4)
         events[:, 0, :2] = 1
         events[:, 1, 3] = 1
-        attacks = torch.zeros(1, 4, 8)
-        attacks[:, 1, 2] = 1
+        attacks = torch.zeros(1, 4, ENTITY_SLOTS)
+        attacks[:, 1, 0] = 1
         return {"frames": frames, "context_frames": frames[:, :2], "target_frames": frames[:, 2:],
                 "states": states, "previous_states": states[:, 1:-1], "target_states": states[:, 2:],
                 "actions": torch.ones(1, 4, 4), "events": events,
-                "hit_ids": torch.tensor([[1, -1, -1, -1]]), "attack_flags": attacks,
+                "hit_ids": torch.tensor([[0, -1, -1, -1]]), "attack_flags": attacks,
                 "map": torch.zeros(1, 16, 16, dtype=torch.long)}
 
     def setUp(self):
@@ -144,7 +146,7 @@ class AlignedTrainingTests(unittest.TestCase):
         changed["states"][:, 2:, 0] += .3
         changed["previous_states"] = changed["states"][:, 1:-1]
         changed["target_states"] = changed["states"][:, 2:]
-        changed["hit_ids"][:] = 3
+        changed["hit_ids"][:] = -1
         changed["attack_flags"][:] = 1
         model.state_inputs.clear()
         _, _, second = aligned_short_rollout_loss(model, ema, changed)
@@ -211,15 +213,22 @@ class AlignedTrainingTests(unittest.TestCase):
         batch = self.batch()
         previous, target = batch["previous_states"][:, 2], batch["target_states"][:, 2]
         predicted = target.clone().requires_grad_()
-        spawn = torch.zeros(1, 8, 256, requires_grad=True)
-        result = {"state": predicted, "target_logits": torch.zeros(1, 9, requires_grad=True),
-                  "attack_logits": torch.zeros(1, 8, requires_grad=True), "spawn_logits": spawn}
+        spawn = torch.zeros(1, ENTITY_SLOTS, 256, requires_grad=True)
+        result = {"state": predicted, "target_logits": torch.zeros(1, ENTITY_SLOTS+1, requires_grad=True),
+                  "attack_logits": torch.zeros(1, ENTITY_SLOTS, requires_grad=True), "spawn_logits": spawn}
         losses = aligned_auxiliary_step_loss(result, previous, target, batch["hit_ids"][:, 2],
                                              batch["attack_flags"][:, 2], batch["events"][:, 2])
         self.assertEqual(float(losses["motion"].detach()), 0.)
         sum(losses.values()).backward()
         self.assertGreater(float(spawn.grad[:, 0].abs().sum()), 0.)
-        self.assertEqual(float(spawn.grad[:, 1:].abs().sum()), 0.)
+        # The one-slot equivalent of an unrelated non-respawning ID is a
+        # second query in which that same persistent ID remains dead.
+        idle_spawn = torch.zeros_like(spawn, requires_grad=True)
+        idle_result = {**result, 'state': previous.detach(), 'spawn_logits': idle_spawn}
+        idle_losses = aligned_auxiliary_step_loss(idle_result, previous, previous,
+            batch['hit_ids'][:, 2], batch['attack_flags'][:, 2], batch['events'][:, 2])
+        idle_losses['spawn'].backward()
+        self.assertEqual(float(idle_spawn.grad.abs().sum()), 0.)
 
 
 if __name__ == "__main__":

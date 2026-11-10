@@ -1,4 +1,6 @@
 """Combat labels supervise own legal probabilities; HP never supplies a history ledger."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import torch
@@ -11,21 +13,21 @@ from turkeyworld.structured_state import structured_transition
 
 
 def state(batch=1):
-    value = torch.zeros(batch, 90)
+    value = torch.zeros(batch, STATE_DIM)
     value[:, :2] = .4
     value[:, 3:6] = 1
-    npc = value[:, 8:88].reshape(batch, 8, 10)
+    npc = value[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     npc[:, :, :2] = .8
     npc[:, :, 4] = .6
     npc[:, :, 5] = 1
     return value
 
 
-def transition(previous, *, chosen=8, fire=True, attacking=False, near=False):
-    targets = torch.full((len(previous), 9), -2.)
+def transition(previous, *, chosen=ENTITY_SLOTS, fire=True, attacking=False, near=False):
+    targets = torch.full((len(previous), ENTITY_SLOTS+1), -2.)
     targets[:, chosen] = 2.
     targets.requires_grad_()
-    attacks = torch.full((len(previous), 8), -2.)
+    attacks = torch.full((len(previous), ENTITY_SLOTS), -2.)
     if attacking:
         attacks[:, 0] = 2.
     attacks.requires_grad_()
@@ -56,12 +58,12 @@ class CombatCountTests(unittest.TestCase):
     def test_nominal_source_ladders_death_and_respawn(self):
         previous = state(4)
         previous[:, 4] = torch.tensor([1., .92, .04, 0.])
-        npc = previous[:, 8:88].reshape(4, 8, 10)
+        npc = previous[:, GLOBAL_DIM:-2].reshape(4, ENTITY_SLOTS, ENTITY_DIM)
         npc[:, 0, 4] = torch.tensor([.6, .25, 0., .6])
         npc[2, 0, 5] = 0
         snapshot = previous.clone()
         features = combat_count_features(previous)
-        self.assertEqual(features.shape, (4, 9, COMBAT_COUNT_FEATURE_DIM))
+        self.assertEqual(features.shape, (4, ENTITY_SLOTS+1, COMBAT_COUNT_FEATURE_DIM))
         self.assertEqual(COMBAT_FEATURE_DIM, 6)
         self.assertEqual(COMBAT_COUNT_FEATURE_SLICES['hp_ladder_valid'], slice(4, 5))
         torch.testing.assert_close(features[:, 0, 0], torch.tensor([0., 1., 12., 13.]))
@@ -76,14 +78,14 @@ class CombatCountTests(unittest.TestCase):
         previous[0, 12] = .35  # Source's forced-kill augmentation is off the60-35n ladder.
         previous.requires_grad_()
         features = combat_count_features(previous)
-        self.assertEqual(float(features[0, 1, 4]), 0.)
-        self.assertEqual(float(features[0, 1, 0]), 1.)
+        self.assertEqual(float(features[0, 1, 4].detach()), 0.)
+        self.assertEqual(float(features[0, 1, 0].detach()), 1.)
         self.assertTrue(bool(torch.isfinite(features).all()))
         features[..., [0, 2]].sum().backward()
         self.assertLess(float(previous.grad[0, 12]), 0.)
         self.assertEqual(float(previous.grad[0, 13]), 0.)
         with self.assertRaises(ValueError):
-            combat_count_features(torch.zeros(2, 89))
+            combat_count_features(torch.zeros(2, STATE_DIM-1))
 
 
 class CombatTransitionObjectiveTests(unittest.TestCase):
@@ -97,7 +99,7 @@ class CombatTransitionObjectiveTests(unittest.TestCase):
         previous[1, 8:10] = previous[1, :2]+.02
         result, _, _, _ = transition(previous, chosen=0, attacking=True)
         hits = torch.tensor([-1, 0])
-        flags = torch.zeros(2, 8); flags[1, 0] = 1
+        flags = torch.zeros(2, ENTITY_SLOTS); flags[1, 0] = 1
         events = torch.tensor([[1., 0., 0., 0.], [1., 1., 0., 1.]])
         before = supervised_event_losses(result, hits, flags, events)
         after = losses(result, previous, hits=hits, attacks=flags, events=events)
@@ -115,7 +117,7 @@ class CombatTransitionObjectiveTests(unittest.TestCase):
         # Recorded shot missed (e.g. wall occlusion), despite the wrong own lethal decision.
         target = previous.clone()
         objective = losses(result, previous, target=target, hits=torch.tensor([-1]),
-                           attacks=torch.zeros(1, 8), events=torch.tensor([[1., 0., 0., 0.]]))
+                           attacks=torch.zeros(1, ENTITY_SLOTS), events=torch.tensor([[1., 0., 0., 0.]]))
         for key in ('damage_npc', 'death_npc'):
             gradient = torch.autograd.grad(objective[key], targets, retain_graph=True)[0]
             self.assertGreater(float(gradient[0, 0]), 0., key)
@@ -123,41 +125,43 @@ class CombatTransitionObjectiveTests(unittest.TestCase):
 
     def test_wrong_none_prediction_receives_positive_lethal_hit_supervision(self):
         previous = state(); previous[0, 12] = .25
-        result, targets, _, _ = transition(previous, chosen=8)
+        result, targets, _, _ = transition(previous, chosen=ENTITY_SLOTS)
         target = previous.clone(); target[0, 12:14] = 0
         objective = losses(result, previous, target=target, hits=torch.tensor([0]),
-                           attacks=torch.zeros(1, 8), events=torch.tensor([[1., 1., 1., 0.]]))
+                           attacks=torch.zeros(1, ENTITY_SLOTS), events=torch.tensor([[1., 1., 1., 0.]]))
         (objective['damage_npc']+objective['death_npc']).backward()
         self.assertLess(float(targets.grad[0, 0]), 0.)
-        self.assertGreater(float(targets.grad[0, 8]), 0.)
+        self.assertGreater(float(targets.grad[0, ENTITY_SLOTS]), 0.)
 
     def test_player_overkill_expectation_survives_clamped_hp_and_occluded_negative(self):
-        previous = state(); previous[0, 4] = .04
+        previous = state(2); previous[:, 4] = .04
         previous[0, 8:10] = previous[0, :2]+.02
         result, _, attacks, _ = transition(previous, fire=False, attacking=True)
         self.assertEqual(float(result['state'][0, 4]), 0.)
         old_gradient = torch.autograd.grad(result['state'][0, 4], attacks, retain_graph=True)[0]
         self.assertEqual(float(old_gradient.abs().sum()), 0.)
         # The nearby source NPC is occluded; target labels teach the attack head to abstain.
-        objective = losses(result, previous, target=previous, hits=torch.tensor([-1]),
-                           attacks=torch.zeros(1, 8), events=torch.zeros(1, 4))
+        objective = losses(result, previous, target=previous, hits=torch.full((2,), -1),
+                           attacks=torch.zeros(2, ENTITY_SLOTS), events=torch.zeros(2, 4))
         gradient = torch.autograd.grad(objective['damage_player'], attacks)[0]
         self.assertGreater(float(gradient[0, 0]), 0.)
-        torch.testing.assert_close(gradient[0, 1:], torch.zeros(7), rtol=0, atol=0)
+        # Use a second query with the same single ID out of range, rather than
+        # an empty assertion over removed extra NPC slots.
+        torch.testing.assert_close(gradient[1], torch.zeros(ENTITY_SLOTS), rtol=0, atol=0)
         probability = attacks.detach()[0, 0].sigmoid()
-        expected = F.smooth_l1_loss(probability*.04/.08, torch.tensor(0.))
+        expected = F.smooth_l1_loss(probability*.04/.08, torch.tensor(0.))/2
         torch.testing.assert_close(objective['damage_player'], expected)
 
     def test_prior_dead_respawn_no_fire_and_player_terminal_mask_new_objectives(self):
         previous = state()
-        npc = previous[:, 8:88].reshape(1, 8, 10)
+        npc = previous[:, GLOBAL_DIM:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         npc[:, :, 4:6] = 0
         npc[:, :, 8] = 5
-        target_logits = torch.zeros(1, 9, requires_grad=True)
-        attack_logits = torch.zeros(1, 8, requires_grad=True)
+        target_logits = torch.zeros(1, ENTITY_SLOTS+1, requires_grad=True)
+        attack_logits = torch.zeros(1, ENTITY_SLOTS, requires_grad=True)
         result = structured_transition(previous, previous, torch.zeros(1, 4),
             target_logits, attack_logits, training=True, endless=True,
-            spawn_positions=torch.full((1, 8, 2), .8), spawn_valid=torch.ones(1, 8, dtype=torch.bool))
+            spawn_positions=torch.full((1, ENTITY_SLOTS, 2), .8), spawn_valid=torch.ones(1, ENTITY_SLOTS, dtype=torch.bool))
         self.assertTrue(bool(result['respawn_flags'].all()))
         objective = losses(result, previous)
         for name in ('damage_npc', 'damage_player', 'death_npc'):
@@ -176,12 +180,12 @@ class CombatTransitionObjectiveTests(unittest.TestCase):
         own = {key: value for key, value in result.items() if key not in ('shot', 'events')}
         target = previous.clone(); target[0, 12:14] = 0
         objective = combat_transition_losses(own, previous, target, torch.tensor([0]),
-            torch.zeros(1, 8), torch.ones(1, 4), action=action)
+            torch.zeros(1, ENTITY_SLOTS), torch.ones(1, 4), action=action)
         self.assertEqual(float(objective['death_npc']), 0.)
-        self.assertAlmostEqual(float(objective['damage_npc']), .5*(.25/.35)**2/8, places=7)
+        self.assertAlmostEqual(float(objective['damage_npc']), .5*(.25/.35)**2/ENTITY_SLOTS, places=7)
         with self.assertRaises(ValueError):
             combat_transition_losses(own, previous, target, torch.tensor([0]),
-                                     torch.zeros(1, 8), torch.ones(1, 4))
+                                     torch.zeros(1, ENTITY_SLOTS), torch.ones(1, 4))
 
 
 class CombatImageConditionTests(unittest.TestCase):
@@ -219,11 +223,11 @@ class CombatImageConditionTests(unittest.TestCase):
 
     def test_respawned_slot_is_physical_and_has_no_surrogate_damage_gradient(self):
         previous = state(); previous[:, 12:14] = 0; previous[:, 16] = 5
-        targets = torch.zeros(1, 9, requires_grad=True)
-        attacks = torch.zeros(1, 8, requires_grad=True)
+        targets = torch.zeros(1, ENTITY_SLOTS+1, requires_grad=True)
+        attacks = torch.zeros(1, ENTITY_SLOTS, requires_grad=True)
         result = structured_transition(previous, previous, torch.zeros(1, 4), targets, attacks,
-            training=True, endless=True, spawn_positions=torch.full((1, 8, 2), .8),
-            spawn_valid=torch.ones(1, 8, dtype=torch.bool))
+            training=True, endless=True, spawn_positions=torch.full((1, ENTITY_SLOTS, 2), .8),
+            spawn_valid=torch.ones(1, ENTITY_SLOTS, dtype=torch.bool))
         condition = combat_image_state(result, previous, previous)
         self.assertEqual(float(condition[0, 12]), float(result['state'][0, 12]))
         self.assertEqual(float(condition[0, 13]), 1.)

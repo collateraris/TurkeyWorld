@@ -1,4 +1,6 @@
 """Fresh world/frame-generator lineage and deterministic-corpus readiness."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
@@ -41,7 +43,7 @@ class FreshVQWorldTests(unittest.TestCase):
         with torch.device('meta'):
             model = NeuralWorldModel(teacher_vq_config(self.codec_info()['codec_config']))
         self.assertEqual(sum(p.numel() for p in model.parameters()), TEACHER_VQ_PARAMETERS)
-        self.assertEqual(TEACHER_VQ_PARAMETERS, 504_857_752)
+        self.assertEqual(TEACHER_VQ_PARAMETERS, 503_825_084)
         self.assertEqual((model.core.width, len(model.core.encoder.blocks), len(model.core.predictor.blocks)),
                          (512, 76, 58))
         self.assertEqual(model.flow_renderer.steps, 12)

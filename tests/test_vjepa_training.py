@@ -1,4 +1,6 @@
 """Small real autograd tests for JEPA prediction and teacher/student coupling."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 import json
 from pathlib import Path
@@ -68,10 +70,10 @@ class VJEPATrainingTests(unittest.TestCase):
                 super().__init__()
                 self.config = SimpleNamespace(simulation_hz=30.)
                 self.core, self.flow_renderer = Core(), Flow()
-                self.motion = torch.nn.Linear(width, 90)
+                self.motion = torch.nn.Linear(width, STATE_DIM)
                 self.feature = torch.nn.Linear(width, 128)
-                self.target = torch.nn.Linear(width, 9)
-                self.attack = torch.nn.Linear(width, 8)
+                self.target = torch.nn.Linear(width, ENTITY_SLOTS+1)
+                self.attack = torch.nn.Linear(width, ENTITY_SLOTS)
                 self.state_inputs, self.memory_inputs, self.state_outputs, self.memory_outputs = [], [], [], []
 
             @property
@@ -108,7 +110,7 @@ class VJEPATrainingTests(unittest.TestCase):
     @staticmethod
     def batch():
         frames = torch.rand(2, 6, 3, 16, 16)
-        states = torch.zeros(2, 6, 90)
+        states = torch.zeros(2, 6, STATE_DIM)
         states[:, :2, 0] = .1
         states[:, 2:, 0] = torch.tensor([10., 20., 30., 40.])
         states[:, :, 3:5] = 1
@@ -116,7 +118,7 @@ class VJEPATrainingTests(unittest.TestCase):
                 "states": states, "target_states": states[:, 2:], "previous_states": states[:, 1:-1],
                 "actions": torch.ones(2, 4, 4), "events": torch.zeros(2, 4, 4),
                 "hits": torch.full((2, 4), -1, dtype=torch.long),
-                "attacks": torch.zeros(2, 4, 8), "map": torch.zeros(2, 16, 16, dtype=torch.long)}
+                "attacks": torch.zeros(2, 4, ENTITY_SLOTS), "map": torch.zeros(2, 16, 16, dtype=torch.long)}
 
     def setUp(self):
         torch.manual_seed(72)
@@ -140,7 +142,7 @@ class VJEPATrainingTests(unittest.TestCase):
         self.assertGreater(float(model.core.predictor.weight.grad.abs().sum()), 0)
         self.assertTrue(all(parameter.grad is None for parameter in ema.parameters()))
         self.assertIn("jepa", metrics)
-        self.assertEqual(endpoint["state"].shape, (2, 90))
+        self.assertEqual(endpoint["state"].shape, (2, STATE_DIM))
 
     def test_changing_future_supervision_changes_loss_but_not_generated_endpoint(self):
         from turkeyworld.jepa_training_utils import EMATargetEncoder
@@ -154,7 +156,7 @@ class VJEPATrainingTests(unittest.TestCase):
         changed["frames"][:, 2:] = .9
         changed["target_frames"][:] = .9
         changed["events"][:] = 1
-        changed["hits"][:] = 3
+        changed["hits"][:] = 0
         changed["attacks"][:] = 1
         second_loss, _, second = short_rollout_loss(model, ema, changed)
         torch.testing.assert_close(first["state"], second["state"], rtol=0, atol=0)
@@ -177,7 +179,7 @@ class VJEPATrainingTests(unittest.TestCase):
         torch.testing.assert_close(teacher.flow_renderer.sample_calls[0],
                                    student.flow_renderer.loss_calls[1]["noise"], rtol=0, atol=0)
         self.assertIsNotNone(student.flow_renderer.loss_calls[1]["endpoint"])
-        self.assertEqual(tuple(teacher.core.context_states[0].shape), (2, 2, 90))
+        self.assertEqual(tuple(teacher.core.context_states[0].shape), (2, 2, STATE_DIM))
         loss.backward()
         self.assertTrue(all(parameter.grad is None for parameter in teacher.parameters()))
         self.assertGreater(float(student.core.predictor.weight.grad.abs().sum()), 0)
@@ -429,7 +431,7 @@ class VJEPAFitPlateauTests(unittest.TestCase):
 
         def loss(model, ema, batch, **options):
             base = model.value.expand(1, 3, 1, 1)
-            endpoint = {"base": base, "state": base.new_zeros(1, 90), "target": torch.zeros_like(base)}
+            endpoint = {"base": base, "state": base.new_zeros(1, STATE_DIM), "target": torch.zeros_like(base)}
             return -model.value, {}, endpoint
 
         def load(path, device="cpu"):

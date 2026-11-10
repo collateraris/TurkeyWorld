@@ -1,4 +1,6 @@
 """Isolated CPU migration/transaction checks; no real training files or GPU."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 from dataclasses import asdict
 import hashlib
@@ -130,7 +132,7 @@ class TrainingV5MigrationTests(unittest.TestCase):
         self.assertTrue(upgraded['config']['game_training_v5'])
         self.assertTrue(upgraded['config']['flow_block_conditioning'])
         self.assertEqual(int(model.vjepa_backend.spatial_spawn_anchor_head.weight.count_nonzero()), 0)
-        state = torch.zeros(1, 90); state[:, 3:6] = 1
+        state = torch.zeros(1, STATE_DIM); state[:, 3:6] = 1
         with torch.inference_mode():
             model.eval(); model.encode_map(torch.zeros(1, 16, 16, dtype=torch.long))
             velocity = model.flow_renderer.velocity(torch.randn(1, 4, 8, 8), torch.tensor([.5]),

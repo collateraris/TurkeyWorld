@@ -1,4 +1,6 @@
 """Codec held-out reconstruction is measured separately from world rollout."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import json
 from pathlib import Path
 import random
@@ -29,10 +31,10 @@ class VQGANValidationTests(unittest.TestCase):
         frames = np.broadcast_to(np.arange(7, dtype=np.uint8)[:, None, None, None], (7, 16, 16, 3)).copy()
         events = np.zeros((6, 4), np.float32)
         events[0, 0] = 1
-        states = np.zeros((7, 90), np.float32)
+        states = np.zeros((7, STATE_DIM), np.float32)
         np.savez_compressed(directory / "episode.npz", frames=frames, states=states,
             actions=np.zeros((6, 4), np.float32), events=events,
-            hit_ids=np.full(6, -1, np.int64), attack_flags=np.zeros((6, 8), np.float32),
+            hit_ids=np.full(6, -1, np.int64), attack_flags=np.zeros((6, ENTITY_SLOTS), np.float32),
             map=np.zeros((16, 16), np.int8), split=np.asarray(split), dt=np.asarray(1/30),
             frame_source=np.asarray("engine"))
         return VQGANData(directory, split=split, image_size=16, cache_bytes=1_000_000)

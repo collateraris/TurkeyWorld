@@ -1,6 +1,8 @@
 """Held-out short dynamics gate; source labels measure, never repair, rollout."""
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -78,11 +80,11 @@ def _f1(values):
 def _collision(tilemap, previous, current):
     if not np.isfinite(current).all():
         return True
-    old = previous[8:88].reshape(8, 10)
-    new = current[8:88].reshape(8, 10)
+    old = previous[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
+    new = current[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
     for before, after, radius, revived in [(previous[:2], current[:2], .2, False)] + [
             (old[index, :2], new[index, :2], .25,
-             old[index, 5] < .5 and new[index, 5] >= .5) for index in range(8)]:
+             old[index, 5] < .5 and new[index, 5] >= .5) for index in range(ENTITY_SLOTS)]:
         if not circle_is_clear(tilemap, after * 16, radius):
             return True
         if not revived and not segment_is_clear(tilemap, before * 16, after * 16, radius):
@@ -151,7 +153,7 @@ def evaluate_dynamics_gate(model, data, panel=None, *, count=64, context=2, hori
                     invalid = not bool(torch.isfinite(state).all() and torch.isfinite(memory).all())
                 if invalid:
                     after = np.full_like(before, np.nan)
-                    predicted_hit, predicted_attack = np.zeros(len(chosen), bool), np.zeros((len(chosen), 8), bool)
+                    predicted_hit, predicted_attack = np.zeros(len(chosen), bool), np.zeros((len(chosen), ENTITY_SLOTS), bool)
                 else:
                     after = state.detach().double().cpu().numpy()
                     if "events" in result and torch.is_tensor(result["events"]):
@@ -171,7 +173,7 @@ def evaluate_dynamics_gate(model, data, panel=None, *, count=64, context=2, hori
                         prediction_protocol.add("raw_attack_head_slots")
                     else:
                         missing_predictions += len(chosen)
-                        predicted_attack = np.zeros((len(chosen), 8), bool)
+                        predicted_attack = np.zeros((len(chosen), ENTITY_SLOTS), bool)
                 source_previous = batch["previous_states"][:, index].double().cpu().numpy()
                 source_next = batch["target_states"][:, index].double().cpu().numpy()
                 reference_hit = batch["events"][:, index, 1].cpu().numpy() >= .5
@@ -197,12 +199,12 @@ def evaluate_dynamics_gate(model, data, panel=None, *, count=64, context=2, hori
                                                if finite else 1e6)
                     if finite:
                         actor_error = np.concatenate([(after[row, :2] - source_next[row, :2])[None],
-                            (after[row, 8:88].reshape(8, 10)[:, :2] - source_next[row, 8:88].reshape(8, 10)[:, :2])]) * 16
+                            (after[row, GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)[:, :2] - source_next[row, GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)[:, :2])]) * 16
                         distances = np.linalg.norm(actor_error, axis=-1)
                         poses.extend(distances.tolist())
                         player_poses.append(float(distances[0]))
                     else:
-                        poses.extend([1e6] * 9)
+                        poses.extend([1e6] * (ENTITY_SLOTS+1))
                         player_poses.append(1e6)
     mean = lambda values: float(np.mean(values)) if values else 1e6
     recall = int(hit_counts[0]) / source_hits if source_hits else 0.

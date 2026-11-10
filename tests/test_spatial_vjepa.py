@@ -1,4 +1,6 @@
-"""Nine spatial entity tokens augment V-JEPA without changing legacy memory."""
+"""Two spatial entity tokens augment V-JEPA without changing legacy memory."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -27,15 +29,13 @@ class SpatialVJEPATests(unittest.TestCase):
             vjepa_heads=4, vjepa_context_frames=4, spatial_entities=spatial))
 
     def inputs(self, model, batch=1):
-        state = torch.zeros(batch, 90)
+        state = torch.zeros(batch, STATE_DIM)
         state[:, :2] = torch.tensor([4.5/16, 4.5/16])
         state[:, 3:6] = 1
-        npc = state[:, 8:88].reshape(batch, 8, 10)
-        npc[:, :, :2] = torch.tensor([[8.5, 4.5], [2.5, 4.5], [9.5, 7.5], [3.5, 12.5],
-                                     [12.5, 2.5], [8.5, 12.5], [13.5, 9.5], [1.5, 13.5]])/16
+        npc = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+        npc[:, :, :2] = torch.tensor([8.5, 4.5])/16
         npc[:, :, 4], npc[:, :, 5] = .6, 1.
         npc[:, 0, 2] = -.2
-        npc[:, 7, 4:6] = 0  # Hidden corpse keeps its permanent ninth token.
         grid = torch.zeros(batch, 16, 16, dtype=torch.long)
         grid[:, 0], grid[:, -1], grid[:, :, 0], grid[:, :, -1] = 1, 1, 1, 1
         grid[:, 6, 5:12] = 2
@@ -73,7 +73,7 @@ class SpatialVJEPATests(unittest.TestCase):
             legacy = NeuralWorldModel(WorldModelConfig(kind='teacher', image_size=128,
                 architecture='vjepa2_ac', endless=True, renderer_mode='flow_matching', flow_steps=12,
                 flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8))
-        self.assertEqual(sum(parameter.numel() for parameter in legacy.parameters()), 125_439_429)
+        self.assertEqual(sum(parameter.numel() for parameter in legacy.parameters()), 124_406_761)
         with self.assertRaisesRegex(ValueError, 'boolean'):
             WorldModelConfig(spatial_entities=1)
 
@@ -106,8 +106,8 @@ class SpatialVJEPATests(unittest.TestCase):
         for name in ('state', 'memory', 'latent_prediction', 'features', 'rgb', 'target_logits', 'attack_logits'):
             torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
         self.assertEqual(second['memory'].shape, (1, 264, 32))
-        self.assertEqual(second['spatial_tokens'].shape, (1, 9, 32))
-        self.assertEqual(second['local_motion_residual'].shape, (1, 9, 2))
+        self.assertEqual(second['spatial_tokens'].shape, (1, ENTITY_SLOTS+1, 32))
+        self.assertEqual(second['local_motion_residual'].shape, (1, ENTITY_SLOTS+1, 2))
         self.assertEqual(int(second['local_motion_residual'].count_nonzero()), 0)
 
     def test_enabled_cross_attention_and_local_motion_heads_receive_training_gradients(self):
@@ -142,25 +142,25 @@ class SpatialVJEPATests(unittest.TestCase):
         model = self.model(True).eval()
         state, _, fmap, _, memory = self.inputs(model)
         changed = state.clone()
-        changed[:, 78:80] = torch.tensor([2.5/16, 10.5/16])
+        changed[:, GLOBAL_DIM:GLOBAL_DIM+2] = torch.tensor([2.5/16, 10.5/16])
         backend = model.vjepa_backend
         with torch.no_grad():
             backend.spatial_visual_attention.output.weight.normal_(std=.03)
             backend.spatial_motion_head[-1].weight.normal_(std=.03)
         first = backend.spatial_tokens(state, fmap)
         second = backend.spatial_tokens(changed, fmap)
-        self.assertEqual(first.shape, (1, 9, 32))
-        torch.testing.assert_close(first[:, :8], second[:, :8], rtol=0, atol=0)
-        self.assertGreater(float((first[:, 8]-second[:, 8]).detach().abs().sum()), 0)
+        self.assertEqual(first.shape, (1, ENTITY_SLOTS+1, 32))
+        torch.testing.assert_close(first[:, :1], second[:, :1], rtol=0, atol=0)
+        self.assertGreater(float((first[:, 1]-second[:, 1]).detach().abs().sum()), 0)
         fixed_visual = memory.reshape(1, 4, 66, 32)[:, -1, 2:]
         attention1 = backend.spatial_visual_attention(fixed_visual, first)
         attention2 = backend.spatial_visual_attention(fixed_visual, second)
         self.assertGreater(float((attention1-attention2).detach().abs().sum()), 0)
-        context = torch.zeros(1, 9, backend.spatial_motion_context.out_features)
+        context = torch.zeros(1, ENTITY_SLOTS+1, backend.spatial_motion_context.out_features)
         residual1 = backend.spatial_motion_head(torch.cat([first, context], -1))
         residual2 = backend.spatial_motion_head(torch.cat([second, context], -1))
-        torch.testing.assert_close(residual1[:, :8], residual2[:, :8], rtol=0, atol=0)
-        self.assertGreater(float((residual1[:, 8]-residual2[:, 8]).detach().abs().sum()), 0)
+        torch.testing.assert_close(residual1[:, :1], residual2[:, :1], rtol=0, atol=0)
+        self.assertGreater(float((residual1[:, 1]-residual2[:, 1]).detach().abs().sum()), 0)
 
     def test_local_motion_prediction_uses_postturn_axes_and_matches_world_proposal(self):
         from turkeyworld.spatial_entities import entity_motion_basis, world_to_local, local_to_world
@@ -173,7 +173,7 @@ class SpatialVJEPATests(unittest.TestCase):
             output = model.transition(state, action, fmap, memory)
             pooled = output['latent_prediction'].mean(1)
             pooled = pooled+backend.readout_neck(pooled)
-            old = backend.delta_head(pooled).reshape(1, 9, 2)
+            old = backend.delta_head(pooled).reshape(1, ENTITY_SLOTS+1, 2)
         basis = entity_motion_basis(state, action, dt=1/30)
         torch.testing.assert_close(output['local_motion_prior'], world_to_local(old, basis))
         torch.testing.assert_close(output['motion_basis_forward'], basis['forward'])
@@ -184,7 +184,7 @@ class SpatialVJEPATests(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-7)
         self.assertGreater(float(basis['forward'][0, 0, 1]), 0)
 
-    def test_rollout_uses_only_cached_context_and_preserves_all_nine_tokens(self):
+    def test_rollout_uses_only_cached_context_and_preserves_all_two_tokens(self):
         from turkeyworld.engine import Game
         model = self.model(True).eval()
         state, _, fmap, _, memory = self.inputs(model)
@@ -195,7 +195,7 @@ class SpatialVJEPATests(unittest.TestCase):
             with torch.inference_mode():
                 for _ in range(3):
                     result = model.step(state, action, memory=memory, map_features=fmap)
-                    self.assertEqual(result['spatial_tokens'].shape, (1, 9, 32))
+                    self.assertEqual(result['spatial_tokens'].shape, (1, ENTITY_SLOTS+1, 32))
                     self.assertEqual(result['memory'].shape, (1, 264, 32))
                     self.assertTrue(bool(torch.isfinite(result['rgb']).all()))
                     state, memory = result['state'], result['memory']

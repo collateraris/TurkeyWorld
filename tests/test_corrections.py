@@ -1,4 +1,6 @@
 """Model-visited training queries must never repair or splice the model rollout."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from contextlib import redirect_stdout
 import io
 import json
@@ -78,10 +80,10 @@ class CorrectionCollectionTests(unittest.TestCase):
         np.testing.assert_array_equal(payload['student_state'], original)
         self.assertAlmostEqual(float(payload['states'][0, 5]), 50 / 99, places=6)
         self.assertEqual(float(payload['states'][0, -2]), 0)
-        self.assertEqual(payload['states'].shape, (13, 90))
+        self.assertEqual(payload['states'].shape, (13, STATE_DIM))
         self.assertEqual(payload['frames'].shape, (13, 32, 32, 3))
         self.assertEqual(payload['depth'].shape, (13, 32))
-        self.assertEqual(payload['visibility'].shape, (13, 8))
+        self.assertEqual(payload['visibility'].shape, (13, ENTITY_SLOTS))
         replay = Game(seed=8)
         replay.set_state(json.loads(str(payload['initial_state'])))
         np.testing.assert_array_equal(replay.state_vector(), payload['states'][0])
@@ -90,7 +92,7 @@ class CorrectionCollectionTests(unittest.TestCase):
             np.testing.assert_array_equal(replay.state_vector(), payload['states'][index+1])
             np.testing.assert_array_equal(Game.event_vector(event), payload['events'][index])
             self.assertEqual(event['hit_id'], int(payload['hit_ids'][index]))
-            attackers = np.zeros(8, dtype=np.float32)
+            attackers = np.zeros(ENTITY_SLOTS, dtype=np.float32)
             attackers[event['attacker_ids']] = 1
             np.testing.assert_array_equal(attackers, payload['attack_flags'][index])
 

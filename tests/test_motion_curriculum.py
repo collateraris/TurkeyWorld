@@ -1,4 +1,6 @@
 """Fixed-label sampling curriculum never changes the model-input contract."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +16,7 @@ from turkeyworld.motion_curriculum import MotionCurriculum, classify_player_moti
 class MotionCurriculumTests(unittest.TestCase):
     @staticmethod
     def episode(kind, count=32):
-        states = np.zeros((count+1, 90), dtype=np.float32)
+        states = np.zeros((count+1, STATE_DIM), dtype=np.float32)
         states[:, :2], states[:, 3:6] = [.3, .4], 1.
         actions = np.zeros((count, 4), dtype=np.float32)
         if kind != 'idle':actions[:, 0] = 1.
@@ -40,7 +42,7 @@ class MotionCurriculumTests(unittest.TestCase):
             states, actions = cls.episode(kind, count)
             np.savez(path, states=states, actions=actions, dt=np.asarray(1/30), split=np.asarray('train'),
                 frames=np.zeros((count+1, 8, 8, 3), dtype=np.uint8), events=np.zeros((count, 4), np.float32),
-                hit_ids=np.full(count, -1, dtype=np.int64), attack_flags=np.zeros((count, 8), np.float32),
+                hit_ids=np.full(count, -1, dtype=np.int64), attack_flags=np.zeros((count, ENTITY_SLOTS), np.float32),
                 map=np.zeros((16, 16), np.int64))
             episodes.append({'path': str(path)})
         return SimpleNamespace(directory=directory, split='train', episodes=episodes)

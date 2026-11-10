@@ -3,6 +3,8 @@
 These tests verify coordinate conventions, supervision contracts and executable
 models. They do not establish trained visibility accuracy or a target FPS.
 """
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -18,9 +20,9 @@ except ImportError:
 
 
 def simple_state():
-    state = np.zeros(90, dtype=np.float32)
+    state = np.zeros(STATE_DIM, dtype=np.float32)
     state[:8] = [2.5 / 16, 2.5 / 16, 0, 1, 1, 1, 0, 0]
-    for slot in range(8):
+    for slot in range(ENTITY_SLOTS):
         offset = 8 + 10 * slot
         state[offset:offset + 2] = [5.5 / 16, 2.5 / 16]
         state[offset + 4:offset + 6] = [.6, 1]
@@ -83,7 +85,7 @@ class CameraGeometryTests(unittest.TestCase):
         state[8 + 4:8 + 6] = 0  # A corpse still has a visible sprite.
         result = self.camera.object_camera_features(torch.tensor(state)[None])
         self.assertTrue(bool(result["frustum"][0, 0]))
-        self.assertEqual(result["features"].shape[:2], (1, 8))
+        self.assertEqual(result["features"].shape[:2], (1, ENTITY_SLOTS))
 
     def test_training_visibility_distinguishes_wall_occlusion_and_corpses(self):
         tilemap = np.zeros((16, 16), dtype=np.uint8)
@@ -126,10 +128,10 @@ class TransformerRuntimeTests(unittest.TestCase):
             output = model.step(state, action, map_features=encoded)
             geometry = model.geometry(output["state"], encoded)
         self.assertEqual(tuple(output["rgb"].shape), (2, 3, 128, 128))
-        self.assertEqual(tuple(output["state"].shape), (2, 90))
+        self.assertEqual(tuple(output["state"].shape), (2, STATE_DIM))
         self.assertEqual(tuple(geometry["depth"].shape), (2, 32))
-        self.assertEqual(tuple(geometry["visibility"].shape), (2, 8))
-        self.assertEqual(tuple(geometry["object_tokens"].shape[:2]), (2, 8))
+        self.assertEqual(tuple(geometry["visibility"].shape), (2, ENTITY_SLOTS))
+        self.assertEqual(tuple(geometry["object_tokens"].shape[:2]), (2, ENTITY_SLOTS))
         loss = (output["rgb"].square().mean()
                 + .01 * geometry["depth"].square().mean()
                 + .1 * geometry["visibility_logits"].square().mean())
@@ -155,8 +157,8 @@ class TransformerRuntimeTests(unittest.TestCase):
         with torch.inference_mode():
             encoded = model.encode_map(grid)
             geometry = model.geometry(state, encoded)
-            high_visibility = {**geometry, "render_gate": torch.ones(1, 8)}
-            low_visibility = {**geometry, "render_gate": torch.full((1, 8), .55)}
+            high_visibility = {**geometry, "render_gate": torch.ones(1, ENTITY_SLOTS)}
+            low_visibility = {**geometry, "render_gate": torch.full((1, ENTITY_SLOTS), .55)}
             with patch.object(model.camera_backend, "geometry", return_value=high_visibility):
                 high = model.render(state, features, encoded)
             with patch.object(model.camera_backend, "geometry", return_value=low_visibility):

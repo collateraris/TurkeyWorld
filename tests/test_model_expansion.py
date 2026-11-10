@@ -1,4 +1,6 @@
 """Teacher growth preserves trained outputs and adds genuine trainable capacity."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 import hashlib
 from pathlib import Path
@@ -85,8 +87,8 @@ class TeacherExpansionTests(unittest.TestCase):
                 flow_adapter_depth=12, flow_adapter_heads=8))
         total = sum(parameter.numel() for parameter in model.parameters())
         residual = sum(parameter.numel() for parameter in model.flow_renderer.residual_adapter.parameters())
-        self.assertEqual(total, 75_204_173)
-        self.assertEqual(residual, 58_370_752)
+        self.assertEqual(total, 74_177_273)
+        self.assertEqual(residual, 58_334_912)
 
     def test_migration_retains_progress_preserves_source_and_resets_unnamed_optimizer(self):
         from turkeyworld.model_expansion import expand_teacher_checkpoint

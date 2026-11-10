@@ -10,6 +10,8 @@ References: https://arxiv.org/abs/2210.02747 and https://arxiv.org/abs/2209.0300
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 import torch
 from torch import nn
@@ -73,7 +75,7 @@ class ResidualVelocityAdapter(nn.Module):
         self.image_size, self.patch, self.width = image_size, image_size//16, width
         self.image_input = nn.Conv2d(9, width, self.patch, stride=self.patch)
         self.position = nn.Parameter(torch.randn(1, 256, width)*.02)
-        self.state_input = nn.Sequential(nn.Linear(90, width), nn.SiLU(), nn.Linear(width, width))
+        self.state_input = nn.Sequential(nn.Linear(STATE_DIM, width), nn.SiLU(), nn.Linear(width, width))
         self.time_input = nn.Sequential(nn.Linear(64, width), nn.SiLU(), nn.Linear(width, width))
         self.blocks = nn.ModuleList(FlowBlock(width, heads, mlp_ratio) for _ in range(depth))
         self.final_norm = nn.LayerNorm(width, elementwise_affine=False)
@@ -110,7 +112,7 @@ class ConditionalFlowRenderer(nn.Module):
         self.width = width
         self.image_input = nn.Conv2d(9, width, self.patch, stride=self.patch)
         self.position = nn.Parameter(torch.randn(1, 256, width) * .02)
-        self.state_input = nn.Sequential(nn.Linear(90, width), nn.SiLU(), nn.Linear(width, width))
+        self.state_input = nn.Sequential(nn.Linear(STATE_DIM, width), nn.SiLU(), nn.Linear(width, width))
         self.time_input = nn.Sequential(nn.Linear(64, width), nn.SiLU(), nn.Linear(width, width))
         self.blocks = nn.ModuleList(FlowBlock(width, heads, mlp_ratio, mlp_hidden) for _ in range(depth))
         self.final_norm = nn.LayerNorm(width, elementwise_affine=False)

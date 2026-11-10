@@ -7,6 +7,8 @@ GT-observation/state stream. They never label a classifier at a drifted pose.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import torch
 from torch.nn import functional as F
 
@@ -22,8 +24,8 @@ def spawn_supervision_statistics(result, previous, target):
     it is not another copy of the effective256-way hierarchical loss.
     """
     from .spawn import SPAWN_ANCHORS
-    old = previous.detach().float()[:, 8:88].reshape(-1, 8, 10)
-    expected = target.detach().float()[:, 8:88].reshape_as(old)
+    old = previous.detach().float()[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target.detach().float()[:, GLOBAL_DIM:-2].reshape_as(old)
     revived = ~((old[..., 5] >= .5) & (old[..., 4] > 0)) & (expected[..., 5] >= .5) & (expected[..., 4] > 0)
     zero = result['state'].sum()*0
     if 'spawn_logits' not in result:
@@ -36,7 +38,7 @@ def spawn_supervision_statistics(result, previous, target):
     if 'spawn_anchor_logits' in result:
         anchor_logits = result['spawn_anchor_logits'].float()
         if anchor_logits.shape != (*labels.shape, 9):
-            raise ValueError('Expected spawn_anchor_logits[B,8,9]')
+            raise ValueError('Expected spawn_anchor_logits[B,NPC,9]')
         anchor_tiles = labels.new_tensor([x+16*y for x, y in SPAWN_ANCHORS])
         matches = labels[..., None] == anchor_tiles
         anchor_labels = torch.where(matches.any(-1), matches.long().argmax(-1), torch.full_like(labels, 8))
@@ -48,7 +50,7 @@ def spawn_supervision_statistics(result, previous, target):
                 raise ValueError('Fallback Source spawns require raw spawn_fallback_logits')
             raw = result['spawn_fallback_logits'].float()
             if raw.shape != (*labels.shape, 256):
-                raise ValueError('Expected spawn_fallback_logits[B,8,256]')
+                raise ValueError('Expected spawn_fallback_logits[B,NPC,256]')
             forbidden = torch.zeros(256, dtype=torch.bool, device=raw.device)
             forbidden[anchor_tiles] = True
             fallback_sum = F.cross_entropy(raw[fallback].masked_fill(forbidden[None], -torch.inf), labels[fallback], reduction='sum')
@@ -77,8 +79,8 @@ def npc_motion_diagnostics(result, previous, target, *, simulation_hz=30.):
     proposal = result.get('proposed_npc_displacement')
     if proposal is None:
         return {}
-    old = previous.detach().float()[:, 8:88].reshape(-1, 8, 10)
-    expected = target.detach().float()[:, 8:88].reshape_as(old)
+    old = previous.detach().float()[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target.detach().float()[:, GLOBAL_DIM:-2].reshape_as(old)
     continuing = (old[:, :, 5] > .5) & (expected[:, :, 5] > .5)
     saturated = proposal.detach().float().norm(dim=-1) > (1.2/simulation_hz/16)*(1+1e-5)
     stopped = (expected[:, :, :2]-old[:, :, :2]).norm(dim=-1) < 1e-7
@@ -92,9 +94,9 @@ def motion_error_parts(prediction, previous, target, *, simulation_hz=30., local
                        action=None):
     """Separate scaled player/NPC motion errors, excluding respawn teleports."""
     dt = 1 / simulation_hz
-    old = previous[:, 8:88].reshape(-1, 8, 10)
-    expected = target[:, 8:88].reshape_as(old)
-    predicted = prediction[:, 8:88].reshape_as(old)
+    old = previous[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target[:, GLOBAL_DIM:-2].reshape_as(old)
+    predicted = prediction[:, GLOBAL_DIM:-2].reshape_as(old)
     continuing = (old[:, :, 5] > .5) & (expected[:, :, 5] > .5)
     first = torch.cat([(prediction[:, :2]-previous[:, :2])[:, None],
                        predicted[:, :, :2]-old[:, :, :2]], 1)
@@ -129,8 +131,8 @@ def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags,
         losses = supervised_event_losses(result, hit_ids.detach(), attack_flags.detach(), events.detach(),
                                         none_class_weight=none_class_weight, attack_pos_weight=attack_pos_weight)
     losses["state"] = state_loss(result["state"], target)
-    old = previous[:, 8:88].reshape(-1, 8, 10)
-    expected = target[:, 8:88].reshape_as(old)
+    old = previous[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target[:, GLOBAL_DIM:-2].reshape_as(old)
     player, npc = motion_error_parts(result['state'], previous, target, simulation_hz=simulation_hz,
                                     local_motion=local_motion, action=action)
     losses["motion"] = player+npc
@@ -144,7 +146,7 @@ def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags,
         tiles = (expected[:, :, :2] * 16).long().clamp(0, 15)
         labels = tiles[:, :, 0] + tiles[:, :, 1] * 16
         values = F.cross_entropy(result["spawn_logits"].float().reshape(-1, 256), labels.reshape(-1),
-                                 reduction="none").reshape(-1, 8)
+                                 reduction="none").reshape(-1, ENTITY_SLOTS)
         losses["spawn"] = (values * revived).sum() / revived.sum().clamp_min(1)
     return losses
 

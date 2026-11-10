@@ -8,6 +8,8 @@ and the complete Flow sampler render the accepted combat fields differentiably.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import math
 
 import torch
@@ -29,13 +31,13 @@ def _payload_tensors(payload):
     if any(not torch.is_tensor(value) or not value.is_floating_point() for value in values.values()):
         raise ValueError('Combat image payload values must be floating point tensors')
     previous = values['context_state']
-    if previous.ndim != 3 or previous.shape[-1] != 90 or min(previous.shape[:2]) < 1:
-        raise ValueError('Captured combat states require shape[B,H,90]')
+    if previous.ndim != 3 or previous.shape[-1] != STATE_DIM or min(previous.shape[:2]) < 1:
+        raise ValueError('Captured combat states require shape[B,H,STATE_DIM]')
     batch, horizon = previous.shape[:2]
     pooled = values['context_pooled']
     images = values['target_frames']
     if (pooled.ndim != 3 or pooled.shape[:2] != (batch, horizon) or pooled.shape[-1] < 1
-            or values['context_spatial'].shape != (batch, horizon, 9, pooled.shape[-1])
+            or values['context_spatial'].shape != (batch, horizon, ENTITY_SLOTS+1, pooled.shape[-1])
             or values['features'].shape != (batch, horizon, 128)
             or values['target_states'].shape != previous.shape
             or values['actions'].shape != (batch, horizon, 4)
@@ -66,8 +68,8 @@ def _payload_tensors(payload):
 def _select_offsets(values):
     previous, targets = values['context_state'], values['target_states']
     batch, horizon = previous.shape[:2]
-    old = previous[:, :, 8:88].reshape(batch, horizon, 8, 10)
-    target = targets[:, :, 8:88].reshape_as(old)
+    old = previous[:, :, GLOBAL_DIM:-2].reshape(batch, horizon, ENTITY_SLOTS, ENTITY_DIM)
+    target = targets[:, :, GLOBAL_DIM:-2].reshape_as(old)
     old_alive = (old[..., 5] >= .5) & (old[..., 4] > 0)
     target_alive = (target[..., 5] >= .5) & (target[..., 4] > 0)
     valid = ~(~old_alive & target_alive).any(-1)

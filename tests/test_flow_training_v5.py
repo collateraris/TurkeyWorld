@@ -1,4 +1,6 @@
 """Opt-in fine latent patches, in-block conditions and region-balanced Flow."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import math
 import unittest
 from unittest.mock import patch
@@ -27,10 +29,10 @@ def renderer(*, improved=True, blocks=False, patch_size=2, kind='student', **opt
 
 
 def inputs(batch=2):
-    state = torch.zeros(batch, 90)
+    state = torch.zeros(batch, STATE_DIM)
     state[:, :2] = torch.tensor([.2, .35]); state[:, 3:6] = 1.
-    npc = state[:, 8:88].reshape(batch, 8, 10)
-    npc[:, :, 0] = torch.linspace(.4, .8, 8); npc[:, :, 1] = .4
+    npc = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+    npc[:, :, 0] = torch.linspace(.4, .8, ENTITY_SLOTS); npc[:, :, 1] = .4
     npc[:, :, 4:6] = torch.tensor([.6, 1.])
     maps = torch.zeros(batch, 16, 16, dtype=torch.long)
     maps[:, 0], maps[:, -1], maps[:, :, 0], maps[:, :, -1] = 1, 2, 3, 4

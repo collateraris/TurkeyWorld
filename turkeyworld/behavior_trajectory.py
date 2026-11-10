@@ -1,4 +1,6 @@
 """Held-out, state-only free trajectories; no future target enters the model."""
+
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
 from pathlib import Path
 import hashlib
 import json
@@ -86,7 +88,7 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
                 for offset in range(horizon):
                     result = model.transition(current, batch['actions'][:, offset], fmap, memory)
                     current, memory = result['state'], result['memory']
-                    if (current.shape != (len(pairs), 90) or not bool(torch.isfinite(current).all())
+                    if (current.shape != (len(pairs), STATE_DIM) or not bool(torch.isfinite(current).all())
                             or memory.shape[0] != len(pairs) or tuple(memory.shape[1:]) != expected_memory_shape
                             or not bool(torch.isfinite(memory).all())):
                         raise FloatingPointError(f'Invalid predicted state/memory at future offset{offset+1}')
@@ -104,10 +106,10 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
     tilemaps, actions, dt = np.concatenate(grids), np.concatenate(controls), np.concatenate(timesteps)
     if not np.allclose(dt, 1/float(model.config.simulation_hz), atol=1e-7, rtol=0):
         raise ValueError('Model timestep must match the recorded held-out source')
-    pred_npc, true_npc = (array[:, :, 8:88].reshape(count, horizon+1, 8, 10) for array in (predicted, source))
+    pred_npc, true_npc = (array[:, :, GLOBAL_DIM:-2].reshape(count, horizon+1, ENTITY_SLOTS, ENTITY_DIM) for array in (predicted, source))
     pred_alive = (pred_npc[..., 5] >= .5) & (pred_npc[..., 4] > 0)
     true_alive = (true_npc[..., 5] >= .5) & (true_npc[..., 4] > 0)
-    respawn_seen = np.zeros((count, 8), dtype=bool)
+    respawn_seen = np.zeros((count, ENTITY_SLOTS), dtype=bool)
     first_collision = [None]*count
     offsets = {}
     for offset in range(1, horizon+1):

@@ -1,4 +1,6 @@
 """Source enemy behavior depends on state, game time and actions, never RNG."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import unittest
 
@@ -13,7 +15,7 @@ class DeterministicEnemySourceTests(unittest.TestCase):
     def test_initial_positions_and_animation_do_not_depend_on_seed(self):
         first, second = Game(seed=1, endless=True), Game(seed=999, endless=True)
         np.testing.assert_array_equal(first.state_vector(), second.state_vector())
-        self.assertEqual(BEHAVIOR_VERSION, 'deterministic_enemy_v3_simple_spawn')
+        self.assertEqual(BEHAVIOR_VERSION, 'deterministic_enemy_v4_single_spawn_cycle')
         self.assertEqual(first.get_state()['behavior_version'], BEHAVIOR_VERSION)
         self.assertTrue(all(e['animation_phase'] == 0. for e in first.enemies))
 
@@ -22,7 +24,6 @@ class DeterministicEnemySourceTests(unittest.TestCase):
         for game in (first, second):
             game.time = 17.
             game.enemies[0].update(hp=0., alive=False, death_timer=2.99)
-            game.enemies[2].update(hp=0., alive=False, death_timer=2.99)
         first.rng.random(11)
         second.rng.random(10001)
         rng = np.random.default_rng(411)
@@ -35,8 +36,8 @@ class DeterministicEnemySourceTests(unittest.TestCase):
 
     def test_coarse_anchor_cycle_is_stable_nearby_and_repeats_after_24_seconds(self):
         game = Game(endless=True)
-        positions = [(0., 0.)] * 8
-        alive = [False] * 8
+        positions = [(0., 0.)] * ENTITY_SLOTS
+        alive = [False] * ENTITY_SLOTS
         player = (8.5, 8.5)  # All eight anchors satisfy the four-tile exclusion.
         self.assertEqual(SPAWN_CYCLE_SECONDS, 24)
         for x, y in SPAWN_ANCHORS:
@@ -51,7 +52,9 @@ class DeterministicEnemySourceTests(unittest.TestCase):
             self.assertEqual(deterministic_spawn_tile(game.map == 0, player, positions, alive, 0,
                 (phase+8)*SPAWN_PHASE_TICKS), expected)
         self.assertEqual(len(set(phases)), 8)
-        self.assertNotEqual(spawn_tile_rank(10, 0, 2*16+2), spawn_tile_rank(10, 1, 2*16+2))
+        # There is one actor; the retained compatibility argument cannot add
+        # a hidden ID-dependent phase or hash to the point cycle.
+        self.assertEqual(spawn_tile_rank(10, 0, 2*16+2), spawn_tile_rank(10, 7, 2*16+2))
 
     def test_anchor_safety_skips_walls_player_and_living_npc_then_uses_static_fallback(self):
         walkable = np.ones((16, 16), dtype=bool)
@@ -111,7 +114,7 @@ class SharedSpawnPolicyTests(unittest.TestCase):
                 for e in game.enemies:
                     e.update(hp=0., alive=False, death_timer=2.99, animation_phase=.7)
                 before = torch.from_numpy(game.state_vector())[None]
-                logits = torch.randn(1, 8, 256)
+                logits = torch.randn(1, ENTITY_SLOTS, 256)
                 positions, valid = decode_spawn_positions(logits, before, torch.tensor(game.map == 0),
                                                           1 / 30, deterministic=True)
                 other, other_valid = decode_spawn_positions(-logits, before, torch.tensor(game.map == 0),
@@ -119,10 +122,10 @@ class SharedSpawnPolicyTests(unittest.TestCase):
                 self.assertTrue(torch.equal(positions, other))
                 self.assertTrue(torch.equal(valid, other_valid))
                 self.assertTrue(bool(valid.all()))
-                targets = torch.full((1, 9), -10.)
-                targets[:, 8] = 10.
+                targets = torch.full((1, ENTITY_SLOTS+1), -10.)
+                targets[:, ENTITY_SLOTS] = 10.
                 typed = structured_transition(before, before.clone(), torch.zeros(1, 4), targets,
-                    torch.full((1, 8), -10.), endless=True, spawn_positions=positions, spawn_valid=valid)
+                    torch.full((1, ENTITY_SLOTS), -10.), endless=True, spawn_positions=positions, spawn_valid=valid)
                 game.step([0, 0, 0, 0])
                 torch.testing.assert_close(typed['state'], torch.from_numpy(game.state_vector())[None],
                                            rtol=0, atol=1e-6)
@@ -134,7 +137,7 @@ class SharedSpawnPolicyTests(unittest.TestCase):
         game = Game(endless=True)
         game.enemies[0].update(hp=0., alive=False, death_timer=2.99)
         state = torch.from_numpy(game.state_vector())[None]
-        logits = torch.zeros(1, 8, 256)
+        logits = torch.zeros(1, ENTITY_SLOTS, 256)
         logits[0, 0, 1 * 16 + 14] = 100.
         first, available = decode_spawn_positions(logits, state, torch.tensor(game.map == 0), 1 / 30)
         second, second_available = decode_spawn_positions(logits, state, torch.tensor(game.map == 0), 1 / 30)

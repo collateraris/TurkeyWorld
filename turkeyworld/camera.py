@@ -8,14 +8,16 @@ visibility must be learned separately.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 import torch
 from torch.nn import functional as F
 
 FOV_DEGREES = 68.0
-ENTITY_SLOTS = 8
+ENTITY_SLOTS = 1
 ENTITY_DIM = 10
-STATE_DIM = 90
+STATE_DIM = GLOBAL_DIM+ENTITY_DIM*ENTITY_SLOTS+2
 OBJECT_CAMERA_DIM = 18
 
 
@@ -59,7 +61,7 @@ def sample_camera_frustum(map_features, state, rays=32, samples=64,
 
     Args:
         map_features: [B,C,H,W], one spatial feature cell per world-map tile.
-        state: [B,90], with normalized player x/W, y/H and sin/cos heading.
+        state: [B,20], with normalized player x/W, y/H and sin/cos heading.
         rays: number of horizontal screen-column samples.
         samples: uniformly spaced forward-depth bins on each camera ray.
 
@@ -112,7 +114,7 @@ def object_camera_features(state, map_size=16, max_depth=24.0,
                            fov_degrees=FOV_DEGREES):
     """Represent all eight persistent object slots relative to the camera.
 
-    features[B,8,18] has the following fixed layout:
+    features[B,1,18] has the following fixed layout:
       forward/max_depth, right/max_depth, distance/max_depth,
       bearing_sin, bearing_cos, clipped_screen_x/4,
       clipped_projected_radius/4, center_frustum,
@@ -130,7 +132,7 @@ def object_camera_features(state, map_size=16, max_depth=24.0,
         raise ValueError("max_depth must be finite and positive")
     if not math.isfinite(fov_degrees) or not 0 < fov_degrees < 179:
         raise ValueError("fov_degrees must be finite and in (0,179)")
-    entities = state[:, 8:88].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    entities = state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     forward_basis, right_basis = camera_basis(state)
     scale = state.new_tensor([width, height])
     delta = (entities[..., :2] - state[:, None, :2]) * scale
@@ -164,8 +166,8 @@ def object_camera_features(state, map_size=16, max_depth=24.0,
 def project_sprite_bounds(state, image_size=128, map_size=16, fov_degrees=FOV_DEGREES):
     """Project full NPC sprite rectangles, without visibility or engine queries.
 
-    Returns clipped ``boxes[B,8,4]`` in normalized [0,1] XYXY coordinates,
-    ``unclipped_boxes`` in the same units, ``sprite_frustum[B,8]`` indicating
+    Returns clipped ``boxes[B,1,4]`` in normalized [0,1] XYXY coordinates,
+    ``unclipped_boxes`` in the same units, ``sprite_frustum[B,1]`` indicating
     positive screen overlap in front of the near plane, forward tile depth,
     and clipped ``area_fraction``. Behind/offscreen boxes and areas are zero.
 
@@ -184,7 +186,7 @@ def project_sprite_bounds(state, image_size=128, map_size=16, fov_degrees=FOV_DE
     height, width = _map_dimensions(map_size)
     # Keep close-camera projection finite and stable under neural autocast.
     camera_state = state.float()
-    entities = camera_state[:, 8:88].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    entities = camera_state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     forward_axis, right_axis = camera_basis(camera_state)
     delta = (entities[..., :2]-camera_state[:, None, :2])*camera_state.new_tensor([width, height])
     forward = (delta*forward_axis[:, None]).sum(-1)

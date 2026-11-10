@@ -1,4 +1,6 @@
 """Long-trajectory format and source-event alignment, without RGB overhead."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import contextlib
 import io
 import json
@@ -22,8 +24,8 @@ class StateOnlyCollectionTests(unittest.TestCase):
                 self.assertNotIn("frames", episode.files)
                 self.assertNotIn("depth", episode.files)
                 self.assertEqual(episode["hit_ids"].shape, (24,))
-                self.assertEqual(episode["attack_flags"].shape, (24, 8))
-                self.assertEqual(episode["states"].shape, (25, 90))
+                self.assertEqual(episode["attack_flags"].shape, (24, ENTITY_SLOTS))
+                self.assertEqual(episode["states"].shape, (25, STATE_DIM))
 
     def test_event_labels_match_exact_source_replay(self):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
@@ -35,7 +37,7 @@ class StateOnlyCollectionTests(unittest.TestCase):
                     result = game.step(action, float(episode["dt"]))
                     np.testing.assert_array_equal(game.state_vector(), episode["states"][t+1])
                     self.assertEqual(result["hit_id"], int(episode["hit_ids"][t]))
-                    attackers = np.zeros(8, dtype=np.float32)
+                    attackers = np.zeros(ENTITY_SLOTS, dtype=np.float32)
                     attackers[result["attacker_ids"]] = 1
                     np.testing.assert_array_equal(attackers, episode["attack_flags"][t])
 
@@ -46,7 +48,7 @@ class StateOnlyCollectionTests(unittest.TestCase):
             with np.load(paths[0], allow_pickle=False) as episode:
                 self.assertNotIn("frames", episode.files)
                 self.assertEqual(episode["depth"].shape, (3, 32))
-                self.assertEqual(episode["visibility"].shape, (3, 8))
+                self.assertEqual(episode["visibility"].shape, (3, ENTITY_SLOTS))
 
 
 if __name__ == "__main__":

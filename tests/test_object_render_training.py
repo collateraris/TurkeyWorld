@@ -1,4 +1,6 @@
 """Exact NPC pixel masks supervise losses without entering world-model inputs."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import tempfile
 import unittest
@@ -43,7 +45,7 @@ class ObjectRenderTrainingTests(unittest.TestCase):
         torch.manual_seed(351)
         flow = tiny_flow()
         target = torch.rand(1, 3, 32, 32, requires_grad=True)
-        base, state = torch.rand(1, 3, 32, 32), torch.zeros(1, 90)
+        base, state = torch.rand(1, 3, 32, 32), torch.zeros(1, STATE_DIM)
         state[:, 3:6] = 1.
         mask = torch.zeros(1, 1, 32, 32)
         mask[:, :, 8:24, 8:24] = 1.

@@ -6,6 +6,8 @@ source label excluded by an earlier own simultaneous choice cannot create NaN.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 
 import torch
@@ -37,14 +39,14 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
     over legal non-anchor cells. Raw9 scores retain blocked anchor classes for
     supervision; runtime scores apply all safety constraints.
     """
-    if (not torch.is_tensor(previous) or previous.ndim != 2 or previous.shape[-1] != 90
+    if (not torch.is_tensor(previous) or previous.ndim != 2 or previous.shape[-1] != STATE_DIM
             or not previous.is_floating_point()):
-        raise ValueError('Hierarchical spawn state must be floating point[B,90]')
+        raise ValueError('Hierarchical spawn state must be floating point[B,20]')
     batch = len(previous)
-    if (tile_logits.shape != (batch, 8, 256) or anchor_residual.shape != (batch, 8, 9)
+    if (tile_logits.shape != (batch, ENTITY_SLOTS, 256) or anchor_residual.shape != (batch, ENTITY_SLOTS, 9)
             or tile_logits.device != previous.device or anchor_residual.device != previous.device
             or not tile_logits.is_floating_point() or not anchor_residual.is_floating_point()):
-        raise ValueError('Hierarchical spawn requires colocated logits[B,8,256] and residual[B,8,9]')
+        raise ValueError('Hierarchical spawn requires colocated logits[B,1,256] and residual[B,1,9]')
     if not math.isfinite(dt) or dt <= 0:
         raise ValueError('Hierarchical spawn requires a positive finite timestep')
     if not torch.is_tensor(walkable):
@@ -66,7 +68,7 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
     axis = (torch.arange(16, device=previous.device, dtype=state.dtype)+.5)/MAP_EXTENT
     yy, xx = torch.meshgrid(axis, axis, indexing='ij')
     centers = torch.stack([xx, yy], -1).reshape(256, 2)
-    old = state[:, 8:88].reshape(batch, 8, 10)
+    old = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
     ready = (~alive & (old[:, :, 8]*DEATH_DURATION+dt >= RESPAWN_DELAY-1e-6)
              & (state[:, 4:5] > 0))
@@ -76,7 +78,7 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
                                    .square().sum(-1) >= 4.**2)
     effective, categories, legal, category_legal = [], [], [], []
     negative = -1.e4
-    for slot in range(8):
+    for slot in range(ENTITY_SLOTS):
         distances = ((centers[None, :, None]-positions[:, None])*MAP_EXTENT).square().sum(-1)
         allowed = base_allowed & ~((distances < 1.) & alive[:, None]).any(-1)
         fallback = allowed & ~is_anchor[None]

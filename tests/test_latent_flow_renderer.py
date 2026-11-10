@@ -1,4 +1,6 @@
 """Actual latent ODEs, shared Gaussian reflow noise and frozen-codec gradients."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 import io
 import unittest
@@ -33,7 +35,7 @@ class LatentFlowRendererTests(unittest.TestCase):
         return model
 
     def inputs(self):
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, :8] = torch.tensor([.2, .3, 0., 1., 1., 1., 0., 0.])
         return torch.rand(1, 3, 32, 32), state
 
@@ -76,8 +78,8 @@ class LatentFlowRendererTests(unittest.TestCase):
                 image_size=128, endless=True, renderer_mode='flow_matching', flow_steps=12,
                 flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
                 renderer_codec='vqgan', renderer_codec_config={'n_embed': 1488}, **VJEPA500_PROFILE))
-        self.assertEqual(sum(parameter.numel() for parameter in student.parameters()), 22_475_096)
-        self.assertEqual(sum(parameter.numel() for parameter in teacher.parameters()), 504_857_752)
+        self.assertEqual(sum(parameter.numel() for parameter in student.parameters()), 21_847_868)
+        self.assertEqual(sum(parameter.numel() for parameter in teacher.parameters()), 503_825_084)
         for model in (student, teacher):
             self.assertIsInstance(model.flow_renderer, LatentFlowRenderer)
             codec = model.flow_renderer.codec

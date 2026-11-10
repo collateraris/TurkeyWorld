@@ -1,4 +1,6 @@
 """Pairwise combat and explicit hit-count rendering retain trained spatial weights."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
@@ -63,11 +65,11 @@ class SpatialCombatTests(unittest.TestCase):
         for key in ('state', 'memory', 'latent_prediction', 'target_logits', 'attack_logits', 'features', 'rgb',
                     'spawn_logits', 'spawn_positions', 'spawn_valid'):
             torch.testing.assert_close(first[key], second[key], rtol=0, atol=0)
-        self.assertEqual(second['state'].shape, (2, 90))
+        self.assertEqual(second['state'].shape, (2, STATE_DIM))
         self.assertEqual(second['memory'].shape, (2, 264, 32))
-        self.assertEqual(second['combat_context']['spatial'].shape, (2, 9, 32))
+        self.assertEqual(second['combat_context']['spatial'].shape, (2, ENTITY_SLOTS+1, 32))
 
-    def test_all_eight_pairs_include_player_npc_pooled_and_both_count_features(self):
+    def test_single_pair_include_player_npc_pooled_and_both_count_features(self):
         from turkeyworld.combat_objectives import combat_count_features
         _, model, fixture = self.models()
         state, _, fmap, _, _ = fixture.inputs(model, batch=2)
@@ -83,13 +85,13 @@ class SpatialCombatTests(unittest.TestCase):
             handle.remove()
         pair = captured[0]
         counts = combat_count_features(state)
-        self.assertEqual(pair.shape, (2, 8, 3*32+2*counts.shape[-1]))
-        torch.testing.assert_close(pair[:, :, :32], spatial[:, :1].expand(-1, 8, -1))
+        self.assertEqual(pair.shape, (2, ENTITY_SLOTS, 3*32+2*counts.shape[-1]))
+        torch.testing.assert_close(pair[:, :, :32], spatial[:, :1].expand(-1, ENTITY_SLOTS, -1))
         torch.testing.assert_close(pair[:, :, 32:64], spatial[:, 1:])
-        torch.testing.assert_close(pair[:, :, 64:96], pooled[:, None].expand(-1, 8, -1))
-        torch.testing.assert_close(pair[:, :, 96:102], counts[:, :1].expand(-1, 8, -1))
+        torch.testing.assert_close(pair[:, :, 64:96], pooled[:, None].expand(-1, ENTITY_SLOTS, -1))
+        torch.testing.assert_close(pair[:, :, 96:102], counts[:, :1].expand(-1, ENTITY_SLOTS, -1))
         torch.testing.assert_close(pair[:, :, 102:], counts[:, 1:])
-        with self.assertRaisesRegex(ValueError, 'explicit nine'):
+        with self.assertRaisesRegex(ValueError, 'explicit two player/NPC'):
             model.vjepa_backend.combat_logits(state, pooled)
 
     def test_activated_pair_branch_sees_coordinates_directions_counts_and_keeps_none_class(self):
@@ -101,7 +103,7 @@ class SpatialCombatTests(unittest.TestCase):
             original_tokens = backend.spatial_tokens(state, fmap)
             targets, attacks = backend.combat_logits(state, pooled, original_tokens)
         variants = []
-        moved = state.clone(); moved[:, 8] += .3/16; variants.append(moved)
+        moved = state.clone(); moved[:, GLOBAL_DIM] += .3/16; variants.append(moved)
         directed = state.clone(); directed[:, 10:12] = torch.tensor([0., .2]); variants.append(directed)
         damaged = state.clone(); damaged[:, 12] = .25; variants.append(damaged)
         player_moved = state.clone(); player_moved[:, 1] += .3/16; variants.append(player_moved)
@@ -110,12 +112,14 @@ class SpatialCombatTests(unittest.TestCase):
         with torch.no_grad():
             for variant in variants:
                 changed = backend.combat_logits(variant, pooled, backend.spatial_tokens(variant, fmap))
-                torch.testing.assert_close(changed[0][:, 8], targets[:, 8], rtol=0, atol=0)
-                self.assertGreater(float((changed[0][:, :8]-targets[:, :8]).abs().sum()
+                torch.testing.assert_close(changed[0][:, ENTITY_SLOTS], targets[:, ENTITY_SLOTS], rtol=0, atol=0)
+                self.assertGreater(float((changed[0][:, :ENTITY_SLOTS]-targets[:, :ENTITY_SLOTS]).abs().sum()
                                          +(changed[1]-attacks).abs().sum()), 0)
             shifted_target, shifted_attack = backend.combat_logits(moved, pooled, backend.spatial_tokens(moved, fmap))
             torch.testing.assert_close(shifted_target[:, 1:], targets[:, 1:], rtol=0, atol=0)
-            torch.testing.assert_close(shifted_attack[:, 1:], attacks[:, 1:], rtol=0, atol=0)
+            self.assertEqual(shifted_target.shape, (1, 2))
+            self.assertEqual(shifted_attack.shape, (1, 1))
+            self.assertGreater(float((shifted_attack-attacks).abs().sum()), 0)
 
     def test_light_combat_recompute_after_primary_backward_does_not_retain_visual_graph(self):
         from turkeyworld.engine import Game
@@ -137,8 +141,8 @@ class SpatialCombatTests(unittest.TestCase):
             target, attack = model.vjepa_backend.combat_logits(detached['state'], detached['pooled'], detached['spatial'])
             spawn = model.vjepa_backend.spawn_logits(detached['state'], detached['pooled'],
                 detached['spatial'], detached['map_features'])
-            (F.cross_entropy(target, torch.tensor([0, 8]))+F.binary_cross_entropy_with_logits(attack, torch.ones_like(attack))
-                +F.cross_entropy(spawn.flatten(0, 1), torch.arange(16))).backward()
+            (F.cross_entropy(target, torch.tensor([0, ENTITY_SLOTS]))+F.binary_cross_entropy_with_logits(attack, torch.ones_like(attack))
+                +F.cross_entropy(spawn.flatten(0, 1), torch.arange(2*ENTITY_SLOTS))).backward()
         backend = model.vjepa_backend
         for parameter in (backend.hit_target_head[-1].weight, backend.attack_head[-1].weight,
                           backend.spatial_combat_head[-1].weight, backend.spatial_spawn_output.weight,
@@ -187,7 +191,7 @@ class SpatialCombatTests(unittest.TestCase):
                 spatial_entities=True, spatial_combat=True))
         count = sum(parameter.numel() for parameter in model.parameters())
         # The separately owned Flow spatial adapters also contribute when enabled.
-        self.assertGreaterEqual(count, 175_785_704)
+        self.assertEqual(count, 175_449_484)
         self.assertEqual(sum(parameter.numel() for name, parameter in model.named_parameters()
                              if name.startswith(COMBAT_PREFIXES)), 199_874)
         self.assertEqual(sum(parameter.numel() for name, parameter in model.named_parameters()
@@ -214,7 +218,7 @@ class SpatialCombatTests(unittest.TestCase):
                 if enabled:
                     self.assertIs(call.args[1], state)
 
-    def test_spawn_has_eight_distinct_queries_and_reads_other_entities_clock_and_map_cells(self):
+    def test_single_spawn_query_reads_player_npc_clock_and_map_cells(self):
         _, model, fixture = self.models()
         state, _, fmap, _, _ = fixture.inputs(model)
         backend = model.vjepa_backend
@@ -225,17 +229,16 @@ class SpatialCombatTests(unittest.TestCase):
             backend.spatial_spawn_output.weight.copy_(torch.eye(32))
             spatial = backend.spatial_tokens(state, fmap)
             baseline = backend.spawn_logits(state, pooled, spatial, fmap)
-            self.assertEqual(baseline.shape, (1, 8, 256))
-            self.assertEqual(torch.unique(baseline[0], dim=0).shape[0], 8)
-            # Slot0's own token/context stay fixed; a hidden/dead OTHER slot
-            # still changes its query through the all-nine entity attention.
-            changed = state.clone(); changed[:, 78:80] += torch.tensor([.2/16, -.3/16])
+            self.assertEqual(baseline.shape, (1, ENTITY_SLOTS, 256))
+            self.assertEqual(baseline.shape[1], 1)
+            # Exactly the player and one NPC participate in this query.
+            changed = state.clone(); changed[:, :2] += torch.tensor([.2/16, -.3/16])
             other = backend.spatial_tokens(changed, fmap)
-            torch.testing.assert_close(spatial[:, :8], other[:, :8], rtol=0, atol=0)
+            self.assertEqual(other.shape[1], 2)
             other_logits = backend.spawn_logits(changed, pooled, other, fmap)
             self.assertGreater(float((baseline[:, 0]-other_logits[:, 0]).abs().sum()), 0)
             variants = []
-            moved = state.clone(); moved[:, 8] += .25/16; variants.append(moved)
+            moved = state.clone(); moved[:, GLOBAL_DIM] += .25/16; variants.append(moved)
             directed = state.clone(); directed[:, 10:12] = torch.tensor([0., .2]); variants.append(directed)
             player = state.clone(); player[:, 2:4] = torch.tensor([.6, .8]); variants.append(player)
             for value in variants:
@@ -257,7 +260,7 @@ class SpatialCombatTests(unittest.TestCase):
         pooled = torch.randn(2, 32, requires_grad=True)
         spatial = backend.spatial_tokens(state, fmap)
         logits = backend.spawn_logits(state, pooled, spatial, fmap)
-        F.cross_entropy(logits.flatten(0, 1), torch.arange(16)*3).backward()
+        F.cross_entropy(logits.flatten(0, 1), torch.arange(2*ENTITY_SLOTS)*3).backward()
         self.assertGreater(float(backend.spatial_spawn_output.weight.grad.abs().sum()), 0)
         self.assertGreater(float(backend.spawn_head[-1].weight.grad.abs().sum()), 0)
         with torch.no_grad():
@@ -266,7 +269,7 @@ class SpatialCombatTests(unittest.TestCase):
         fmap = model.encode_map(grid)
         pooled = torch.randn(2, 32, requires_grad=True)
         spatial = backend.spatial_tokens(state, fmap)
-        F.cross_entropy(backend.spawn_logits(state, pooled, spatial, fmap).flatten(0, 1), torch.arange(16)*3).backward()
+        F.cross_entropy(backend.spawn_logits(state, pooled, spatial, fmap).flatten(0, 1), torch.arange(2*ENTITY_SLOTS)*3).backward()
         for layer in (backend.spatial_spawn_query[0], backend.spatial_spawn_entity_key,
                       backend.spatial_spawn_entity_value, backend.spatial_spawn_map_key):
             self.assertGreater(float(layer.weight.grad.abs().sum()), 0)
@@ -279,7 +282,7 @@ class SpatialCombatTests(unittest.TestCase):
         finite = NeuralWorldModel(replace(model.config, endless=False))
         self.assertFalse(any(name.startswith('vjepa_backend.spatial_spawn_') for name in finite.state_dict()))
         with self.assertRaisesRegex(ValueError, 'endless'):
-            finite.vjepa_backend.spawn_logits(torch.zeros(1, 90), torch.zeros(1, 32), None, None)
+            finite.vjepa_backend.spawn_logits(torch.zeros(1, STATE_DIM), torch.zeros(1, 32), None, None)
 
 
 if __name__ == '__main__':

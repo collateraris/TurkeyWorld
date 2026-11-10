@@ -1,4 +1,6 @@
 """Genuine paired SR streaming and real optimizer/RNG resume without GPU."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import contextlib
 import copy
 import io
@@ -19,7 +21,7 @@ def write_pair(directory, name='episode.npz', *, split='train', size=32, identit
     rng = np.random.default_rng(identity)
     lr = rng.integers(0, 256, (5, size, size, 3), dtype=np.uint8)
     hr = rng.integers(0, 256, (5, size*4, size*4, 3), dtype=np.uint8)
-    values = dict(frames=lr, hr_frames=hr, states=np.zeros((5, 90), np.float32),
+    values = dict(frames=lr, hr_frames=hr, states=np.zeros((5, STATE_DIM), np.float32),
         actions=np.zeros((4, 4), np.float32), split=np.asarray(split),
         frame_source=np.asarray('reference_engine'), hr_frame_source=np.asarray('reference_engine'),
         paired_source_rgb=np.asarray(True), behavior_version=np.asarray('deterministic_enemy_v3_simple_spawn'))
@@ -76,7 +78,7 @@ class PairedSRTests(unittest.TestCase):
     def test_unproven_hr_pseudo_source_misalignment_and_wrong_split_fail(self):
         from turkeyworld.sr_data import SRPairData
         cases = [dict(paired_source_rgb=np.asarray(False)), dict(hr_frame_source=np.asarray('upsampled_lr')),
-                 dict(frame_source=np.asarray('model_prediction')), dict(states=np.zeros((4, 90), np.float32)),
+                 dict(frame_source=np.asarray('model_prediction')), dict(states=np.zeros((4, STATE_DIM), np.float32)),
                  dict(hr_frames=np.zeros((5, 64, 64, 3), np.uint8)), dict(split=np.asarray('val'))]
         for index, changes in enumerate(cases):
             with self.subTest(index=index), tempfile.TemporaryDirectory() as folder:

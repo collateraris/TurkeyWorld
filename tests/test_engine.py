@@ -3,7 +3,7 @@ import json
 import math
 import unittest
 import numpy as np
-from turkeyworld.engine import Game
+from turkeyworld.engine import ENTITY_SLOTS, Game
 
 
 class CombatAndReplayTests(unittest.TestCase):
@@ -33,11 +33,12 @@ class CombatAndReplayTests(unittest.TestCase):
         self.assertTrue(event['shot'])
         self.assertEqual(game.enemies[0]['hp'], hp)
 
-    def test_nearest_target_is_hit_and_death_persists(self):
+    def test_only_target_is_hit_and_death_persists(self):
         game = Game()
         first = game.step([0, 0, 0, 1])
         self.assertEqual(first['hit_id'], 0)
-        self.assertEqual(game.enemies[1]['hp'], 60)
+        self.assertEqual(len(game.enemies), 1)
+        self.assertEqual(game.enemies[0]['hp'], 25)
         for _ in range(7):
             game.step([0, 0, 0, 0])
         second = game.step([0, 0, 0, 1])
@@ -79,10 +80,10 @@ class CombatAndReplayTests(unittest.TestCase):
 
 
 class EndlessCombatTests(unittest.TestCase):
-    def test_more_than_eight_kills_keep_combat_running(self):
+    def test_repeated_kills_reuse_the_single_slot_and_keep_combat_running(self):
         game = Game(seed=19, endless=True)
         for kill_count in range(1, 13):
-            # Stage one clear shot while the other opponents remain far away.
+            # Stage one clear shot in the same persistent enemy slot.
             for enemy in game.enemies:
                 enemy.update(x=12.5, y=12.5, attack_cooldown=100.0)
             game.enemies[0].update(x=5.5, y=2.5, hp=35.0)
@@ -96,15 +97,15 @@ class EndlessCombatTests(unittest.TestCase):
                 game.step([0, 0, 0, 0], dt=.25)
             self.assertTrue(game.enemies[0]['alive'])
             self.assertEqual(game.enemies[0]['hp'], 60.0)
-            self.assertEqual(len(game.enemies), 8)
-            self.assertEqual([enemy['id'] for enemy in game.enemies], list(range(8)))
+            self.assertEqual(len(game.enemies), ENTITY_SLOTS)
+            self.assertEqual([enemy['id'] for enemy in game.enemies], [0])
         self.assertEqual(game.player['ammo'], 99)
 
     def test_corpses_wait_then_respawn_in_separate_reachable_locations(self):
         game = Game(seed=23, endless=True)
         for enemy in game.enemies:
             enemy.update(alive=False, hp=0.0, death_timer=0.0)
-        game.kills = 8
+        game.kills = ENTITY_SLOTS
         for _ in range(11):
             game.step([0, 0, 0, 0], dt=.25)
         self.assertTrue(all(not enemy['alive'] for enemy in game.enemies))
@@ -182,7 +183,7 @@ class EndlessCombatTests(unittest.TestCase):
         self.assertFalse(game.endless)
         game.player['ammo'] = 0
         self.assertFalse(game.step([0, 0, 0, 1])['shot'])
-        game.kills = 8
+        game.kills = ENTITY_SLOTS
         self.assertTrue(game.done)
 
 

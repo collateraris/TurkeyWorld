@@ -1,4 +1,6 @@
 """Joint world/CFM and final-image GAN graphs obey one accumulation clock."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 from pathlib import Path
 import tempfile
@@ -64,7 +66,7 @@ if torch is not None:
             generator = torch.Generator().manual_seed(290)
             self.value = {'rgb': torch.rand(1, 3, 64, 64, generator=generator),
                           'target': torch.rand(1, 3, 64, 64, generator=generator),
-                          'state': torch.zeros(1, 90)}
+                          'state': torch.zeros(1, STATE_DIM)}
             self.value['state'][:, 3:6] = 1
             self.value['state'].requires_grad_()
             self.calls = 0

@@ -8,6 +8,8 @@ This is a DAgger-like data query, not a five-minute quality certificate.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import argparse
 import json
 import math
@@ -37,8 +39,8 @@ def query_branch(student_state, tilemap, actions, seed=0, dt=1 / 30,
     original = np.array(student_state, dtype=np.float32, copy=True)
     action_tape = np.array(actions, dtype=np.float32, copy=True)
     grid = np.array(tilemap, copy=True)
-    if original.shape != (90,):
-        return None, {"accepted": False, "reason": "invalid_state", "detail": "expected 90 values"}
+    if original.shape != (STATE_DIM,):
+        return None, {"accepted": False, "reason": "invalid_state", "detail": "expected STATE_DIM values"}
     if not np.isfinite(original).all():
         return None, {"accepted": False, "reason": "nonfinite", "detail": "student state contains NaN/infinity"}
     if grid.shape != (16, 16) or not np.isfinite(grid).all():
@@ -71,7 +73,7 @@ def query_branch(student_state, tilemap, actions, seed=0, dt=1 / 30,
         accepted_actions.append(action.copy())
         event_rows.append([float(bool(event.get(name, False))) for name in EVENT_NAMES])
         hit_ids.append(int(event.get("hit_id", -1)))
-        attacks = np.zeros(8, dtype=np.float32)
+        attacks = np.zeros(ENTITY_SLOTS, dtype=np.float32)
         attacks[event.get("attacker_ids", [])] = 1.
         attack_flags.append(attacks)
         states.append(oracle.state_vector().copy())

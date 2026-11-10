@@ -3,7 +3,7 @@
 The official MIT implementation at facebookresearch/vjepa2 provides the design
 reference: video patch latents, interleaved action/state tokens, frame-block
 causal action conditioning and separate temporal/height/width rotary axes.
-This implementation uses game action4/state90, 128px images and a causal video
+This implementation uses game action4/state20, 128px images and a causal video
 encoder, so encoding a full training clip cannot leak future images backward.
 An EMA target encoder belongs to the trainer, never this inference model.
 
@@ -12,6 +12,8 @@ visual tokens plus their action/state conditioning. There is no GRU, original
 engine call, future-image input or engine correction in a neural transition.
 """
 from __future__ import annotations
+
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -156,7 +158,7 @@ class ActionConditionedPredictor(nn.Module):
         self.block_tokens = self.visual_tokens+2
         self.predictor_embed = nn.Linear(width, width)
         self.action_encoder = nn.Linear(4, width)
-        self.state_encoder = nn.Linear(90, width)
+        self.state_encoder = nn.Linear(STATE_DIM, width)
         self.type_embedding = nn.Parameter(torch.randn(3, width)*.02)
         self.blocks = nn.ModuleList(VideoBlock(width, heads, mlp_ratio) for _ in range(depth))
         self.norm = nn.LayerNorm(width, eps=1e-6)
@@ -167,7 +169,7 @@ class ActionConditionedPredictor(nn.Module):
         batch, frames, count, width = latents.shape
         if count != self.visual_tokens or width != self.width:
             raise ValueError('Visual latent token shape does not match predictor')
-        if actions.shape != (batch, frames, 4) or states.shape != (batch, frames, 90):
+        if actions.shape != (batch, frames, 4) or states.shape != (batch, frames, STATE_DIM):
             raise ValueError('Actions/states must align with every visual frame')
         dtype = self.action_encoder.weight.dtype
         action = self.action_encoder(actions.to(dtype))[:, :, None].to(latents.dtype)
@@ -291,19 +293,19 @@ class VJEPA2ACWorldBackend(nn.Module):
         neck_width = width*config.vjepa_readout_mlp_ratio
         self.readout_neck = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, neck_width),
                                            nn.GELU(), nn.Linear(neck_width, width))
-        # Only playerXY and eight NPC XY pairs are learned motion outputs;
+        # Only playerXY and one NPC XY pair are learned motion outputs;
         # HP, resources, heading and clocks remain the disclosed typed rules.
-        self.delta_head = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 18))
+        self.delta_head = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 2*(ENTITY_SLOTS+1)))
         nn.init.normal_(self.delta_head[-1].weight, std=.001)
         nn.init.zeros_(self.delta_head[-1].bias)
-        self.hit_target_head = nn.Sequential(nn.Linear(width, 128), nn.GELU(), nn.Linear(128, 9))
-        self.attack_head = nn.Sequential(nn.Linear(width, 128), nn.GELU(), nn.Linear(128, 8))
+        self.hit_target_head = nn.Sequential(nn.Linear(width, 128), nn.GELU(), nn.Linear(128, ENTITY_SLOTS+1))
+        self.attack_head = nn.Sequential(nn.Linear(width, 128), nn.GELU(), nn.Linear(128, ENTITY_SLOTS))
         initialize_event_heads(self.hit_target_head, self.attack_head)
         self.feature_head = nn.Linear(width, 128)
         nn.init.zeros_(self.feature_head.weight)
         nn.init.zeros_(self.feature_head.bias)
         if config.endless:
-            self.spawn_head = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, 8*256))
+            self.spawn_head = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.Linear(width, ENTITY_SLOTS*256))
         if getattr(config, 'spatial_entities', False):
             from .spatial_entities import SpatialEntityEncoder
             self.spatial_encoder = SpatialEntityEncoder(width, map_channels)
@@ -368,10 +370,10 @@ class VJEPA2ACWorldBackend(nn.Module):
         """Read the persistent learned map globally and at all known objects.
 
         These are differentiable feature reads, not exact collision/raycast
-        rules. The unchanged90D numerical state retains all8 entity slots even
+        rules. The unchanged20D numerical state retains the only NPC slot even
         outside the camera; visibility never deletes their persistent state.
         """
-        entity_xy = state[:, 8:88].reshape(-1, 8, 10)[:, :, :2]
+        entity_xy = state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2]
         coordinates = torch.cat([state[:, None, :2], entity_xy], 1)*2-1
         grid = coordinates[:, :, None].to(map_features.dtype)
         local = F.grid_sample(map_features, grid, align_corners=False, padding_mode='border')[:, :, :, 0]
@@ -403,43 +405,43 @@ class VJEPA2ACWorldBackend(nn.Module):
         attacks = self.attack_head(pooled.to(self.attack_head[0].weight.dtype)).float()
         if not getattr(self.config, 'spatial_combat', False):
             return targets, attacks
-        if spatial is None or spatial.shape != (state.shape[0], 9, pooled.shape[-1]):
-            raise ValueError('Spatial combat requires explicit nine player/NPC tokens matching the pooled context')
+        if spatial is None or spatial.shape != (state.shape[0], ENTITY_SLOTS+1, pooled.shape[-1]):
+            raise ValueError('Spatial combat requires explicit two player/NPC tokens matching the pooled context')
         from .combat_objectives import combat_count_features
         counts = combat_count_features(state)
-        pair = torch.cat([spatial[:, :1].expand(-1, 8, -1), spatial[:, 1:],
-            pooled[:, None].expand(-1, 8, -1), counts[:, :1].expand(-1, 8, -1), counts[:, 1:]], -1)
+        pair = torch.cat([spatial[:, :1].expand(-1, ENTITY_SLOTS, -1), spatial[:, 1:],
+            pooled[:, None].expand(-1, ENTITY_SLOTS, -1), counts[:, :1].expand(-1, ENTITY_SLOTS, -1), counts[:, 1:]], -1)
         residual = self.spatial_combat_head(pair.to(self.spatial_combat_head[0].weight.dtype)).float()
-        targets = torch.cat([targets[:, :8]+residual[:, :, 0], targets[:, 8:]], -1)
+        targets = torch.cat([targets[:, :ENTITY_SLOTS]+residual[:, :, 0], targets[:, ENTITY_SLOTS:]], -1)
         return targets, attacks+residual[:, :, 1]
 
     def spawn_logits(self, state, pooled, spatial, map_features, *, walkable=None):
         return self.spawn_outputs(state, pooled, spatial, map_features, walkable=walkable)['spawn_logits']
 
     def spawn_outputs(self, state, pooled, spatial, map_features, *, walkable=None):
-        """Eight persistent slot queries score all256 learned map candidates.
+        """One persistent slot query score all256 learned map candidates.
 
         Each query reads its own NPC, the player, predicted visual context,
-        known next-tick clock and all nine entity tokens without averaging IDs.
+        known next-tick clock and both participant tokens without averaging IDs.
         Only the existing external decoder applies floor/separation masks.
         Detached context/map inputs allow a separate lightweight image query.
         """
         if not self.config.endless:
             raise ValueError('Spawn logits require endless mode')
         batch = state.shape[0]
-        legacy = self.spawn_head(pooled.to(self.spawn_head[0].weight.dtype)).float().reshape(batch, 8, 256)
+        legacy = self.spawn_head(pooled.to(self.spawn_head[0].weight.dtype)).float().reshape(batch, ENTITY_SLOTS, 256)
         if not getattr(self.config, 'spatial_combat', False):
             return {'spawn_logits': legacy}
-        if spatial is None or spatial.shape != (batch, 9, pooled.shape[-1]):
-            raise ValueError('Spatial spawning requires all nine explicit player/NPC tokens')
+        if spatial is None or spatial.shape != (batch, ENTITY_SLOTS+1, pooled.shape[-1]):
+            raise ValueError('Spatial spawning requires both explicit player/NPC tokens')
         if map_features.shape != (batch, self.spatial_spawn_map_key.in_features, 16, 16):
             raise ValueError('Spatial spawning requires the matching learned16x16 map')
         from .spawn import SPAWN_CYCLE_SECONDS
         seconds = state[:, -1].float()*300+1/self.config.simulation_hz
         phase = seconds*(2*math.pi/SPAWN_CYCLE_SECONDS)
         clock = torch.stack([seconds/300, phase.sin(), phase.cos()], -1)
-        inputs = torch.cat([spatial[:, 1:], spatial[:, :1].expand(-1, 8, -1),
-            pooled[:, None].expand(-1, 8, -1), clock[:, None].expand(-1, 8, -1)], -1)
+        inputs = torch.cat([spatial[:, 1:], spatial[:, :1].expand(-1, ENTITY_SLOTS, -1),
+            pooled[:, None].expand(-1, ENTITY_SLOTS, -1), clock[:, None].expand(-1, ENTITY_SLOTS, -1)], -1)
         query = self.spatial_spawn_query(inputs.to(self.spatial_spawn_query[0].weight.dtype))
         key = self.spatial_spawn_entity_key(spatial.to(self.spatial_spawn_entity_key.weight.dtype))
         value = self.spatial_spawn_entity_value(spatial.to(self.spatial_spawn_entity_value.weight.dtype))
@@ -484,10 +486,10 @@ class VJEPA2ACWorldBackend(nn.Module):
         if spatial is not None:
             from .spatial_entities import entity_motion_basis, world_to_local, local_to_world
             local_context = self.spatial_motion_context(pooled.to(self.spatial_motion_context.weight.dtype))
-            local_input = torch.cat([spatial, local_context[:, None].expand(-1, 9, -1)], -1)
+            local_input = torch.cat([spatial, local_context[:, None].expand(-1, ENTITY_SLOTS+1, -1)], -1)
             residual = self.spatial_motion_head(local_input.to(self.spatial_motion_head[0].weight.dtype))
             basis = entity_motion_basis(state, action, dt=1/self.config.simulation_hz)
-            prior = world_to_local(delta.float().reshape(batch, 9, 2), basis)
+            prior = world_to_local(delta.float().reshape(batch, ENTITY_SLOTS+1, 2), basis)
             world_residual = local_to_world(residual.float(), basis)
             # Equivalent to rotating (local prior + residual) back to world XY,
             # while avoiding numerical roundtrip drift of the trained old head.
@@ -497,13 +499,13 @@ class VJEPA2ACWorldBackend(nn.Module):
                 'local_motion_prediction': prior+residual.float(),
                 'motion_basis_forward': basis['forward'], 'motion_basis_right': basis['right']}
         motion = delta.float()
-        old_entities = state[:, 8:88].reshape(batch, 8, 10)
-        candidate_entities = torch.cat([old_entities[:, :, :2]+.1*motion[:, 2:].reshape(batch, 8, 2),
+        old_entities = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+        candidate_entities = torch.cat([old_entities[:, :, :2]+.1*motion[:, 2:].reshape(batch, ENTITY_SLOTS, 2),
                                         old_entities[:, :, 2:]], -1)
         candidate = torch.cat([state[:, :2]+.1*motion[:, :2], state[:, 2:8],
                                candidate_entities.flatten(1), state[:, -2:]], -1)
         candidate = projection(candidate, previous=state)
-        proposed_npc_displacement = candidate[:, 8:88].reshape(batch, 8, 10)[:, :, :2]-old_entities[:, :, :2]
+        proposed_npc_displacement = candidate[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2]-old_entities[:, :, :2]
         targets, attacks = self.combat_logits(state, pooled, spatial)
         combat_result = {}
         if getattr(self.config, 'spatial_combat', False):

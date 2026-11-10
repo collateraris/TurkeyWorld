@@ -10,7 +10,7 @@ No engine collision/navigation/hit query is used.
 """
 from __future__ import annotations
 
-BEHAVIOR_VERSION = 'deterministic_enemy_v3_simple_spawn'
+BEHAVIOR_VERSION = 'deterministic_enemy_v4_single_spawn_cycle'
 SPAWN_TICK_HZ = 30
 SPAWN_PHASE_SECONDS = 3
 SPAWN_PHASE_TICKS = SPAWN_PHASE_SECONDS * SPAWN_TICK_HZ
@@ -24,13 +24,15 @@ SPAWN_CYCLE_SECONDS = SPAWN_PHASE_SECONDS * len(SPAWN_ANCHORS)
 def spawn_tile_rank(tick, slot, tile):
     """Coarse cyclic anchor priority; accepts integers or torch int64 tensors.
 
-    Anchor(slot+floor(game_seconds/3)) modulo8 comes first, followed by the
+    Anchor floor(game_seconds/3) modulo8 comes first, followed by the
     remaining anchors in ring order. Other cells follow in static row-major
     order. The schedule repeats every24seconds; walls/occupancy may skip an
     anchor but cannot introduce randomness.
     """
     count = len(SPAWN_ANCHORS)
-    preferred = (tick // SPAWN_PHASE_TICKS + slot) % count
+    # The public slot argument is retained for source-call compatibility; the
+    # game has one persistent ID and no identity/time hash in its schedule.
+    preferred = (tick // SPAWN_PHASE_TICKS) % count
     rank = count + tile
     for index, (x, y) in enumerate(SPAWN_ANCHORS):
         priority = (index-preferred) % count
@@ -64,7 +66,7 @@ def deterministic_spawn_tile(walkable, player_xy, positions, alive, slot, tick):
 
 
 def decode_spawn_positions(logits, previous, walkable, dt, *, deterministic=False):
-    """Return normalized centers [B,8,2] and availability [B,8].
+    """Return normalized centers [B,1,2] and availability [B,1].
 
     With deterministic=True, learned logits are auxiliary labels only. The
     shared game-time rule controls placement. Slots are processed in ID order
@@ -78,7 +80,7 @@ def decode_spawn_positions(logits, previous, walkable, dt, *, deterministic=Fals
     previous, logits = previous.detach(), logits.detach()
     batch = previous.shape[0]
     if logits.shape != (batch, ENTITY_SLOTS, 256):
-        raise ValueError("spawn logits must have shape [B,8,256]")
+        raise ValueError(f"spawn logits must have shape [B,{ENTITY_SLOTS},256]")
     if walkable.ndim == 2:
         walkable = walkable[None]
     if walkable.shape[0] == 1 and batch != 1:

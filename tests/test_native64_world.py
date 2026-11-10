@@ -1,4 +1,6 @@
 """Native64 world/Base/latent-flow execution, budgets and codec lineage."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -35,9 +37,9 @@ class Native64WorldTests(unittest.TestCase):
 
     @staticmethod
     def state():
-        value = torch.zeros(1, 90)
+        value = torch.zeros(1, STATE_DIM)
         value[:, :2], value[:, 3:6] = .5, 1.
-        entities = value[:, 8:88].reshape(1, 8, 10)
+        entities = value[:, GLOBAL_DIM:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         entities[:, :, :2] = torch.tensor([.7, .6])
         entities[:, :, 4:6] = torch.tensor([.6, 1.])
         return value

@@ -7,6 +7,8 @@ context frames and from controls that describe the predicted transitions.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import copy
 from collections import OrderedDict
 import json
@@ -187,11 +189,11 @@ class SequenceData:
                 episode["dt"] = float(saved["dt"]) if "dt" in saved.files else 1 / 30
                 episode["path"] = str(path)
                 count = len(episode["actions"])
-                if (count < 1 or episode["states"].shape != (count + 1, 90)
+                if (count < 1 or episode["states"].shape != (count + 1, STATE_DIM)
                         or episode["actions"].shape != (count, 4)
                         or episode["events"].shape != (count, 4)
                         or episode["hit_ids"].shape != (count,)
-                        or episode["attack_flags"].shape != (count, 8)
+                        or episode["attack_flags"].shape != (count, ENTITY_SLOTS)
                         or episode["map"].shape != (16, 16)):
                     raise ValueError(f"{path.name}: incompatible state/action/event schema")
                 frames = episode["frames"]
@@ -208,9 +210,9 @@ class SequenceData:
                 if "respawn_flags" in saved.files:
                     episode["respawn_flags"] = np.asarray(saved["respawn_flags"], dtype=np.float32)
                 else:
-                    alive = episode["states"][:, 8:88].reshape(-1, 8, 10)[:, :, 5] >= .5
+                    alive = episode["states"][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] >= .5
                     episode["respawn_flags"] = (~alive[:-1] & alive[1:]).astype(np.float32)
-                if episode["respawn_flags"].shape != (count, 8):
+                if episode["respawn_flags"].shape != (count, ENTITY_SLOTS):
                     raise ValueError(f"{path.name}: expected respawn_flags [T,8]")
                 decoded_bytes = sum(value.nbytes for value in episode.values() if isinstance(value, np.ndarray))
                 if self.raw_bytes + decoded_bytes > max_bytes:

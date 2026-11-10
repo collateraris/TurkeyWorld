@@ -22,15 +22,15 @@ from .models import NeuralWorldModel, WorldModelConfig, load_world_checkpoint
 from .vqgan import VQGAN, VQGANConfig
 
 
-STUDENT_VQ_PARAMETERS = 22_475_096
-TEACHER_VQ_PARAMETERS = 504_857_752
-TEACHER175_VQ_PARAMETERS = 174_910_616
+STUDENT_VQ_PARAMETERS = 21_847_868
+TEACHER_VQ_PARAMETERS = 503_825_084
+TEACHER175_VQ_PARAMETERS = 173_877_948
 # Native64 profiles keep width/depth and eight-by-eight visual tokens. Smaller
 # patch projections, RGB heads and latent positional grids change exact totals.
-TEACHER175_VQ64_PARAMETERS = 174_551_048
-STUDENT_VQ64_PARAMETERS = 22_262_984
-TEACHER175_VQ32_PARAMETERS = 174_461_156
-STUDENT_VQ32_PARAMETERS = 22_209_956
+TEACHER175_VQ64_PARAMETERS = 173_518_380
+STUDENT_VQ64_PARAMETERS = 21_635_756
+TEACHER175_VQ32_PARAMETERS = 173_428_488
+STUDENT_VQ32_PARAMETERS = 21_582_728
 TEACHER175_VQ_PROFILE = {
     'vjepa_width': 512, 'vjepa_encoder_depth': 18, 'vjepa_predictor_depth': 12,
     'vjepa_heads': 8, 'vjepa_context_frames': 4, 'vjepa_readout_mlp_ratio': 5,
@@ -61,7 +61,7 @@ def teacher175_vq_config(codec_config, **overrides):
 
 
 def student_vq_config(codec_config, **overrides):
-    """22.48M complete student, including a frozen 1488-entry shared VQGAN."""
+    """21.85M complete single-NPC student, including a frozen 1488-entry shared VQGAN."""
     codec = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config)
     codec = asdict(VQGANConfig(**codec))
     values = dict(kind='student', architecture='vjepa2_ac', image_size=codec['image_size'], endless=True,

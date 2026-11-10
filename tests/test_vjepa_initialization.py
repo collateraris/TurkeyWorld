@@ -45,7 +45,7 @@ class VJEPAInitializationTests(unittest.TestCase):
             def transition(self, state, action, map_features, memory):
                 self.memory_inputs.append(memory.detach().clone())
                 output = state.clone()
-                output[:, 89] += 1 / 9000
+                output[:, -1] += 1 / 9000
                 return {"state": output, "memory": memory + 1,
                         "features": state.new_zeros(len(state), 128),
                         "events": state.new_zeros(len(state), 4)}

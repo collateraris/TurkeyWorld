@@ -1,4 +1,6 @@
 """Frequent image previews stay separate from full quality and optimizer clocks."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from copy import deepcopy
 from pathlib import Path
 import random
@@ -134,11 +136,11 @@ class PreviewCadenceTests(unittest.TestCase):
             data_dir.mkdir()
             values = np.arange(9, dtype=np.float32)
             frames = np.broadcast_to(values.astype(np.uint8)[:, None, None, None], (9, 16, 16, 3)).copy()
-            states = np.zeros((9, 90), np.float32)
+            states = np.zeros((9, STATE_DIM), np.float32)
             states[:, 0], states[:, 3:5] = values, 1
             np.savez(data_dir/'example.npz', frames=frames, states=states,
                 actions=np.ones((8, 4), np.float32), events=np.zeros((8, 4), np.float32),
-                hit_ids=np.full(8, -1, np.int64), attack_flags=np.zeros((8, 8), np.float32),
+                hit_ids=np.full(8, -1, np.int64), attack_flags=np.zeros((8, ENTITY_SLOTS), np.float32),
                 map=np.zeros((16, 16), np.int8), split=np.asarray('val'), dt=np.asarray(1/30))
             experiment = self.experiment(root)
             experiment.panel, experiment.validation = [(0, 0)], SequenceData(data_dir, split='val')

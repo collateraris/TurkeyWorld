@@ -1,4 +1,6 @@
 """ODE activation recomputation preserves RGB, gradients and frozen codec state."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import unittest
 from unittest.mock import patch
@@ -33,7 +35,7 @@ class CheckpointedLatentSamplerTests(unittest.TestCase):
     @staticmethod
     def inputs(requires_grad=False):
         base = torch.rand(1, 3, 32, 32, requires_grad=requires_grad)
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, :8] = torch.tensor([.2, .3, 0., 1., 1., 1., 0., 0.])
         state.requires_grad_(requires_grad)
         noise = torch.randn(1, 4, 8, 8, requires_grad=requires_grad)

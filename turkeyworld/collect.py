@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 import numpy as np
 
-from .engine import Game
+from .engine import ENTITY_SLOTS, BEHAVIOR_VERSION, Game
 from .geometry_targets import build_geometry_targets
 
 
@@ -31,7 +31,7 @@ class MixedPolicy:
         height, width = tilemap.shape
         pos = state[:2] * (width, height)
         angle = math.atan2(float(state[2]), float(state[3]))
-        entities = state[8:88].reshape(8, 10)
+        entities = state[8:-2].reshape(ENTITY_SLOTS, 10)
         candidates = []
         for entity in entities:
             target = entity[:2] * (width, height)
@@ -119,7 +119,7 @@ def collect(destination, episodes=4, frames=300, size=256, hr_size=0, seed=0, hz
             events.append([float(bool(event.get(key, False))) for key in
                            ("shot", "hit", "kill", "player_hit")])
             hit_ids.append(int(event.get("hit_id", -1)))
-            flags = np.zeros(8, dtype=np.float32)
+            flags = np.zeros(ENTITY_SLOTS, dtype=np.float32)
             flags[event.get("attacker_ids", [])] = 1.
             attack_flags.append(flags)
             states.append(game.state_vector())
@@ -138,7 +138,8 @@ def collect(destination, episodes=4, frames=300, size=256, hr_size=0, seed=0, hz
                        hit_ids=np.asarray(hit_ids, dtype=np.int64),
                        attack_flags=np.asarray(attack_flags, dtype=np.float32),
                        initial_state=np.asarray(initial_state),
-                       policy=np.asarray(policy_name), format_version=np.asarray(3),
+                       policy=np.asarray(policy_name), format_version=np.asarray(4),
+                       behavior_version=np.asarray(BEHAVIOR_VERSION),
                        seed=np.asarray(episode_seed), dt=np.asarray(1/hz))
         if observations is not None:
             payload["frames"] = np.asarray(observations, dtype=np.uint8)

@@ -1,10 +1,10 @@
-"""Explicit22.48M student profile; legacy checkpoint defaults stay unchanged."""
+"""Explicit21.85M single-enemy student profile; legacy checkpoint defaults stay unchanged."""
 from __future__ import annotations
 
 from .models import WorldModelConfig
 
 
-STUDENT_22M_PARAMETERS = 22_475_013
+STUDENT_22M_PARAMETERS = 21_847_785
 STUDENT_22M_PROFILE = {
     'kind': 'student', 'architecture': 'vjepa2_ac', 'image_size': 128,
     'endless': True, 'renderer_mode': 'rectified_flow', 'flow_steps': 4,
@@ -21,7 +21,7 @@ def student_config_22m(image_size=128, endless=True, **overrides):
     small test profiles; they do not change any global model defaults.
     """
     if image_size != 128:
-        raise ValueError('The22.48M game profile is calibrated for128px frames')
+        raise ValueError('The21.85M game profile is calibrated for128px frames')
     values = {**STUDENT_22M_PROFILE, 'image_size': image_size, 'endless': endless, **overrides}
     if values['kind'] != 'student' or values['architecture'] != 'vjepa2_ac' or values['renderer_mode'] != 'rectified_flow':
         raise ValueError('The student profile requires a V-JEPA student with Rectified Flow')

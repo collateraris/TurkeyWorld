@@ -8,6 +8,8 @@ Invalid geometry is skipped, without projection or reference-state fallback.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import argparse
 from datetime import datetime, timezone
 import json
@@ -31,7 +33,7 @@ COLLECTION_KIND = 'model_visited_state_oracle_branch'
 def _restore_unmodified_candidate(game, vector):
     """Reject adapters that would clip/repair anything beyond float32 decoding."""
     vector = np.asarray(vector, dtype=np.float32)
-    if vector.shape != (90,) or not np.isfinite(vector).all() or vector[4] <= 0:
+    if vector.shape != (STATE_DIM,) or not np.isfinite(vector).all() or vector[4] <= 0:
         raise ValueError('A candidate must be a finite living model state')
     game.set_state_vector(vector)
     decoded = game.state_vector()
@@ -95,7 +97,7 @@ def _existing_record(path, fingerprint, steps, max_model_steps):
                 or int(data['max_model_steps']) != max_model_steps):
             raise ValueError(f'Existing visited-state clip belongs to another collection: {path}')
         transitions = len(data['actions'])
-        if (data['states'].shape != (transitions+1, 90) or data['frames'].shape[0] != transitions+1
+        if (data['states'].shape != (transitions+1, STATE_DIM) or data['frames'].shape[0] != transitions+1
                 or data['actions'].shape != (transitions, 4) or data['events'].shape != (transitions, 4)
                 or transitions < 1 or not np.allclose(data['states'][0], data['model_visited_state'],
                                                      rtol=0, atol=2e-6)):

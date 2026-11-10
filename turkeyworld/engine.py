@@ -19,7 +19,7 @@ from .spawn import BEHAVIOR_VERSION, SPAWN_TICK_HZ, deterministic_spawn_tile
 
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
-ENTITY_SLOTS = 8
+ENTITY_SLOTS = 1
 STATE_DIM = GLOBAL_DIM + ENTITY_DIM * ENTITY_SLOTS + 2
 ACTION_DIM = 4
 EVENT_DIM = 4
@@ -29,7 +29,7 @@ STATE_FIELDS = {
                "hp/100", "ammo/99", "cooldown/0.22", "shot_flash/0.10"),
     "entity": ("x/map_width", "y/map_height", "vx/2", "vy/2", "hp/100", "alive",
                "attack_cooldown/1.2", "hurt_timer/0.15", "death_timer/0.6", "animation_phase"),
-    "tail": ("kills/8", "time/300"),
+    "tail": ("kills", "time/300"),
 }
 
 _ROWS = (
@@ -53,7 +53,7 @@ _ROWS = (
 
 
 class Game:
-    """Eight enemy slots, wall-blocked hitscan and optional endless combat.
+    """One persistent enemy, wall-blocked hitscan and optional endless combat.
 
     The default finite mode keeps permanent corpses for model training.
     Endless play reuses dead slots and supplies unlimited ammunition.
@@ -95,8 +95,7 @@ class Game:
         self.rng = np.random.default_rng(self.seed)
         self.player = {"x": 2.5, "y": 2.5, "angle": 0.0, "hp": 100.0,
                        "ammo": 99, "cooldown": 0.0, "shot_flash": 0.0}
-        spawns = [(5.5, 2.5), (12.5, 2.5), (6.5, 5.5), (12.5, 6.5),
-                  (3.5, 9.5), (12.5, 9.5), (6.5, 12.5), (12.5, 14.0)]
+        spawns = [(5.5, 2.5)]
         self.enemies = []
         for ident, (x, y) in enumerate(spawns):
             self.enemies.append(self._new_enemy(ident, x, y))
@@ -167,7 +166,7 @@ class Game:
         return np.array(vector, dtype=np.float32)
 
     def state_vector(self):
-        """90 float32 values, layout given by module STATE_FIELDS."""
+        """20 float32 values, layout given by module STATE_FIELDS."""
         return self._vector_from(self.player, self.enemies, self.kills, self.time)
 
     def set_state_vector(self, vector):

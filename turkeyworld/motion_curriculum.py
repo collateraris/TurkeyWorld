@@ -6,6 +6,8 @@ to a model by this module. Every returned pair is an ordinary SequenceData
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections import Counter
 import hashlib
 import math
@@ -36,10 +38,10 @@ CASE_DEFINITIONS = {
 def classify_player_motion(states, actions, dt=1/30):
     """Return transition masks from source labels, using post-turn game axes."""
     states, actions = np.asarray(states, dtype=np.float64), np.asarray(actions, dtype=np.float64)
-    if (actions.ndim != 2 or actions.shape[1] != 4 or states.shape != (len(actions)+1, 90)
+    if (actions.ndim != 2 or actions.shape[1] != 4 or states.shape != (len(actions)+1, STATE_DIM)
             or not len(actions) or not np.isfinite(states).all() or not np.isfinite(actions).all()
             or not math.isfinite(dt) or not 0 < dt <= .25):
-        raise ValueError('Motion labels require finite states[T+1,90], actions[T,4] and valid dt')
+        raise ValueError('Motion labels require finite states[T+1,STATE_DIM], actions[T,4] and valid dt')
     old, new = states[:-1], states[1:]
     alive = old[:, 4] > 0
     controls = np.clip(actions, [-1, -1, -1, 0], [1, 1, 1, 1])

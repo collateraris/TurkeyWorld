@@ -1,4 +1,6 @@
 """Retain trained 250M values while adding active, causal 500M capacity."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -35,14 +37,14 @@ class VJEPA500ExpansionTests(unittest.TestCase):
             'teacher_quality_gate': {'passed': False},
             'vjepa250_expansion': {'all_original_weight_values_exact': True}}, path)
 
-    def test_full_profile_has_500044741_generator_parameters_and_separate_ema(self):
+    def test_full_profile_has_499012073_generator_parameters_and_separate_ema(self):
         from turkeyworld.models import NeuralWorldModel, WorldModelConfig, parameter_counts
         from turkeyworld.vjepa2_ac import VJEPA500_PROFILE
         with torch.device('meta'):
             model = NeuralWorldModel(WorldModelConfig(kind='teacher', image_size=128, architecture='vjepa2_ac',
                 endless=True, renderer_mode='flow_matching', flow_steps=12,
                 flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8, **VJEPA500_PROFILE))
-        self.assertEqual(parameter_counts(model)['world_total'], 500_044_741)
+        self.assertEqual(parameter_counts(model)['world_total'], 499_012_073)
         self.assertEqual(sum(parameter.numel() for parameter in model.core.encoder.parameters()), 239_975_936)
         self.assertEqual((len(model.core.encoder.blocks), len(model.core.predictor.blocks)), (76, 58))
         self.assertEqual((model.core.memory_tokens, model.core.width), (264, 512))
@@ -66,7 +68,7 @@ class VJEPA500ExpansionTests(unittest.TestCase):
         for name, value in original.state_dict().items():
             prefix = tuple(slice(0, size) for size in value.shape)
             torch.testing.assert_close(value, model.state_dict()[name][prefix], rtol=0, atol=0)
-        video, actions, states = torch.rand(1, 3, 3, 128, 128), torch.randn(1, 3, 4), torch.randn(1, 3, 90)
+        video, actions, states = torch.rand(1, 3, 3, 128, 128), torch.randn(1, 3, 4), torch.randn(1, 3, STATE_DIM)
         with torch.inference_mode():
             latent = original.core.encode_video(video)
             grown_latent = model.core.encode_video(video)
@@ -103,7 +105,7 @@ class VJEPA500ExpansionTests(unittest.TestCase):
             model, _ = load_vjepa500_checkpoint(source, **self.options())
         model.train()
         optimizer = torch.optim.SGD(model.parameters(), lr=.05)
-        video, actions, states = torch.rand(1, 2, 3, 128, 128), torch.randn(1, 2, 4), torch.randn(1, 2, 90)
+        video, actions, states = torch.rand(1, 2, 3, 128, 128), torch.randn(1, 2, 4), torch.randn(1, 2, STATE_DIM)
         for iteration in range(2):
             optimizer.zero_grad(set_to_none=True)
             latents = model.core.encode_video(video)

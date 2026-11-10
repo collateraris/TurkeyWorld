@@ -1,4 +1,6 @@
 """V5 fixes spatial/event loss scales while preserving the independent AR stream."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import math
 from types import MethodType
@@ -15,10 +17,10 @@ from turkeyworld.trajectory_objectives import circle_wall_penalty, trajectory_st
 
 
 def state(batch=1):
-    value = torch.zeros(batch, 90)
+    value = torch.zeros(batch, STATE_DIM)
     value[:, :2] = 4.5/16
     value[:, 3:6] = 1
-    npc = value[:, 8:88].reshape(batch, 8, 10)
+    npc = value[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     npc[:, :, :2] = 9.5/16
     npc[:, :, 4] = .6; npc[:, :, 5] = 1
     return value
@@ -39,8 +41,8 @@ class TrajectoryV5Tests(unittest.TestCase):
         before = predicted.detach().clone()
         parts, metrics = trajectory_state_losses(predicted, initial, target, torch.zeros(1, 16, 16, dtype=torch.long))
         self.assertEqual(metrics['ar_xy_offsets'], [1, 4, 8, 16])
-        self.assertAlmostEqual(float(parts['ar_xy_npc'].detach()), .5/(8*2))
-        self.assertEqual(metrics['ar_xy_npc_pairs'], 32)
+        self.assertAlmostEqual(float(parts['ar_xy_npc'].detach()), .5/(ENTITY_SLOTS*2))
+        self.assertEqual(metrics['ar_xy_npc_pairs'], 4*ENTITY_SLOTS)
         parts['ar_xy_npc'].backward()
         for offset in (0, 3, 7, 15):
             self.assertGreater(float(predicted.grad[0, offset, 8]), 0.)
@@ -49,18 +51,18 @@ class TrajectoryV5Tests(unittest.TestCase):
         self.assertIsNone(target.grad); self.assertIsNone(initial.grad)
         torch.testing.assert_close(predicted.detach(), before, rtol=0, atol=0)
 
-    def test_source_respawn_excludes_entire_new_life_from_xy_not_other_slots(self):
-        initial = state(); initial[:, 22:24] = 0
+    def test_source_respawn_excludes_new_life_but_preserves_independent_continuing_life(self):
+        initial = state(2); initial[0, 12:14] = 0
         targets = initial[:, None].repeat(1, 16, 1)
-        targets[:, 3:, 22:24] = torch.tensor([.6, 1.])
-        targets[:, 3:, 18:20] = 13.5/16
-        predicted = targets.clone(); predicted[:, :, 8] += 1/16; predicted[:, :, 18] -= 2/16
+        targets[0, 3:, 12:14] = torch.tensor([.6, 1.])
+        targets[0, 3:, 8:10] = 13.5/16
+        predicted = targets.clone(); predicted[:, :, 8] += 1/16
         predicted.requires_grad_()
-        parts, metrics = trajectory_state_losses(predicted, initial, targets, torch.zeros(1, 16, 16, dtype=torch.long))
+        parts, metrics = trajectory_state_losses(predicted, initial, targets, torch.zeros(2, 16, 16, dtype=torch.long))
         parts['ar_xy_npc'].backward()
         self.assertEqual(metrics['ar_source_respawn_exclusions'], 1)
-        self.assertEqual(float(predicted.grad[:, :, 18:20].abs().sum()), 0.)
-        self.assertGreater(float(predicted.grad[:, :, 8:10].abs().sum()), 0.)
+        self.assertEqual(float(predicted.grad[0, :, 8:10].abs().sum()), 0.)
+        self.assertGreater(float(predicted.grad[1, :, 8:10].abs().sum()), 0.)
 
     def test_circle_clearance_walls_radius_boundary_and_inside_center_gradients(self):
         grid = torch.zeros(1, 16, 16, dtype=torch.long); grid[0, 7, 7] = 2
@@ -112,47 +114,46 @@ class AttackAndSpawnV5Tests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def test_balanced_attack_positive_gradient_not_diluted_by_h_or_irrelevant_slots(self):
-        logits = torch.zeros(1, 8, requires_grad=True)
-        labels = torch.zeros(1, 8); labels[:, 0] = 1
-        eligible = torch.zeros(1, 8, dtype=torch.bool); eligible[:, :2] = True
+        logits = torch.zeros(2, ENTITY_SLOTS, requires_grad=True)
+        labels = torch.zeros(2, ENTITY_SLOTS); labels[0, 0] = 1
+        eligible = torch.ones(2, ENTITY_SLOTS, dtype=torch.bool)
         loss, event = balanced_attack_loss(logits, labels, eligible)
-        blank_logits = torch.zeros(1, 8, requires_grad=True)
-        _, blank = balanced_attack_loss(blank_logits, torch.zeros(1, 8), torch.zeros(1, 8, dtype=torch.bool))
+        blank_logits = torch.zeros(1, ENTITY_SLOTS, requires_grad=True)
+        _, blank = balanced_attack_loss(blank_logits, torch.zeros(1, ENTITY_SLOTS), torch.zeros(1, ENTITY_SLOTS, dtype=torch.bool))
         aggregate, counts = aggregate_balanced_attack([event]+[blank]*15)
         torch.testing.assert_close(aggregate, loss, rtol=0, atol=0)
         self.assertEqual(float(counts['attack_positive_count']), 1.)
         self.assertEqual(float(counts['attack_negative_count']), 1.)
         aggregate.backward()
         self.assertAlmostEqual(float(logits.grad[0, 0]), -.4)
-        self.assertAlmostEqual(float(logits.grad[0, 1]), .1)
-        self.assertTrue((logits.grad[0, 2:] == 0).all())
+        self.assertAlmostEqual(float(logits.grad[1, 0]), .1)
+        self.assertTrue(blank_logits.grad is None or not bool(blank_logits.grad.any()))
 
     def test_source_near_occluded_negative_and_positive_survive_wrong_predicted_pose_life(self):
-        previous = state(); previous[:, 8:10] = previous[:, :2]+.02; previous[:, 18:20] = previous[:, :2]+.03
+        previous = state(2); previous[:, 8:10] = previous[:, :2]+.02
         target = previous.clone()
         wrong = previous.clone(); wrong[:, :2] = .9
-        wrong[:, 8:88].reshape(1, 8, 10)[:, :, 4:6] = 0
-        target_logits = torch.zeros(1, 9, requires_grad=True)
-        attack_logits = torch.zeros(1, 8, requires_grad=True)
-        flags = torch.zeros(1, 8); flags[:, 0] = 1
-        result = {'state': wrong, 'target_logits': target_logits, 'attack_logits': attack_logits, 'shot': torch.tensor([False])}
-        values = combat_transition_losses(result, previous, target, torch.tensor([-1]), flags,
-                                           torch.zeros(1, 4), game_training_v5=True)
+        wrong[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, 4:6] = 0
+        target_logits = torch.zeros(2, (ENTITY_SLOTS+1), requires_grad=True)
+        attack_logits = torch.zeros(2, ENTITY_SLOTS, requires_grad=True)
+        flags = torch.zeros(2, ENTITY_SLOTS); flags[0, 0] = 1
+        result = {'state': wrong, 'target_logits': target_logits, 'attack_logits': attack_logits, 'shot': torch.tensor([False, False])}
+        values = combat_transition_losses(result, previous, target, torch.tensor([-1, -1]), flags,
+                                           torch.zeros(2, 4), game_training_v5=True)
         self.assertEqual(float(values['attack_positive_count']), 1.)
         self.assertEqual(float(values['attack_negative_count']), 1.)
         values['attack'].backward()
         self.assertLess(float(attack_logits.grad[0, 0]), 0.)
-        self.assertGreater(float(attack_logits.grad[0, 1]), 0.)
-        self.assertTrue((attack_logits.grad[0, 2:] == 0).all())
+        self.assertGreater(float(attack_logits.grad[1, 0]), 0.)
         # Positive labels remain included even if source guard is malformed.
-        scalar, stats = balanced_attack_loss(torch.zeros(1, 8), flags, torch.zeros(1, 8, dtype=torch.bool))
+        scalar, stats = balanced_attack_loss(torch.zeros(1, ENTITY_SLOTS), flags[:1], torch.zeros(1, ENTITY_SLOTS, dtype=torch.bool))
         self.assertEqual(float(stats['attack_positive_count']), 1.)
         self.assertAlmostEqual(float(scalar), math.log(2), places=6)
 
     def test_global_spawn_event_ce_does_not_shrink_with_empty_offsets(self):
         previous = state(); previous[:, 12:14] = 0
         target = previous.clone(); target[:, 12:14] = torch.tensor([.6, 1.])
-        logits = torch.zeros(1, 8, 256, requires_grad=True)
+        logits = torch.zeros(1, ENTITY_SLOTS, 256, requires_grad=True)
         result = {'state': target, 'spawn_logits': logits}
         event = spawn_supervision_statistics(result, previous, target)
         empty = spawn_supervision_statistics(result, target, target)
@@ -169,11 +170,11 @@ class AttackAndSpawnV5Tests(unittest.TestCase):
     def test_hierarchical_spawn_anchor_and_conditional_fallback_are_not_double_counted(self):
         previous = state(); previous[:, 12:14] = 0
         target = previous.clone(); target[:, 12:14] = torch.tensor([.6, 1.])
-        effective = torch.randn(1, 8, 256, requires_grad=True)
-        anchor = torch.zeros(1, 8, 9, requires_grad=True)
-        fallback = torch.zeros(1, 8, 256, requires_grad=True)
+        effective = torch.randn(1, ENTITY_SLOTS, 256, requires_grad=True)
+        anchor = torch.zeros(1, ENTITY_SLOTS, 9, requires_grad=True)
+        fallback = torch.zeros(1, ENTITY_SLOTS, 256, requires_grad=True)
         result = {'state': target, 'spawn_logits': effective, 'spawn_anchor_logits': anchor,
-                  'spawn_fallback_logits': fallback, 'spawn_anchor_legal': torch.zeros(1, 8, 9, dtype=torch.bool)}
+                  'spawn_fallback_logits': fallback, 'spawn_anchor_legal': torch.zeros(1, ENTITY_SLOTS, 9, dtype=torch.bool)}
         target[:, 8:10] = 2.5/16  # Known anchor0, even if own legal metadata says blocked.
         event = spawn_supervision_statistics(result, previous, target)
         loss, _ = aggregate_spawn_supervision([event])

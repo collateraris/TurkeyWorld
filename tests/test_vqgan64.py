@@ -1,4 +1,6 @@
 """Native64 codec training, resolution lineage and unchanged strict gates."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import contextlib
 from dataclasses import asdict
 import io
@@ -19,9 +21,9 @@ def write_clip(directory, *, size=64, split='train', name='episode.npz'):
     events = np.zeros((4, 4), np.float32)
     events[1, 0] = 1
     path = directory/name
-    np.savez_compressed(path, frames=frames, states=np.zeros((5, 90), np.float32),
+    np.savez_compressed(path, frames=frames, states=np.zeros((5, STATE_DIM), np.float32),
         actions=np.zeros((4, 4), np.float32), events=events,
-        hit_ids=np.full(4, -1, np.int64), attack_flags=np.zeros((4, 8), np.float32),
+        hit_ids=np.full(4, -1, np.int64), attack_flags=np.zeros((4, ENTITY_SLOTS), np.float32),
         map=np.zeros((16, 16), np.int8), split=np.asarray(split), dt=np.asarray(1/30),
         policy=np.asarray('combat'), frame_source=np.asarray('engine'))
     return path, frames

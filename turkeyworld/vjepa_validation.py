@@ -215,9 +215,10 @@ def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model
     if step is not None:
         metadata["step"] = int(step)
     metadata["every"] = int(every)
-    rows = [("context", f"CONTEXT input | step {metadata['step']} | held-out", preview["context"]),
-            ("source", "SOURCE future: measurement targets only", preview["source"]),
-            ("generated", "MODEL: free autoregressive future" +
+    labels = metadata.get('row_labels', {})
+    rows = [("context", labels.get('context', f"CONTEXT input | step {metadata['step']} | held-out"), preview["context"]),
+            ("source", labels.get('source', "SOURCE future: measurement targets only"), preview["source"]),
+            ("generated", labels.get('generated', "MODEL: free autoregressive future") +
              (" | INVALID" if not metadata.get("generated_finite", True) else ""), preview["generated"])]
     native = tuple(np.asarray(preview["generated"]).shape[1:3])
     metadata["native_resolution"] = list(native)
@@ -251,7 +252,9 @@ def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model
                      ("bilinear", f"BILINEAR x4: same SR row | {final}x{final}", _uint8(enlarged))])
         cell, stride, canvas_size = final, final+24, (final*4, (final+24)*5+4)
         metadata.update(sr_resolution=[middle, middle], upscaled_resolution=[final, final],
-            sr_training_steps=int(trained), sr_source='generated_free_rollout_rgb',
+            sr_training_steps=int(trained),
+            sr_source=('generated_static_renderer_rgb' if metadata.get('kind') == 'static_scene_query'
+                       else 'generated_free_rollout_rgb'),
             future_source_feedback=False, sr_world_feedback=False,
             upscale_stages=[{'method': 'neural_x4', 'input_resolution': list(native),
                              'output_resolution': [middle, middle], 'scale': 4},

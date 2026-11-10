@@ -1,4 +1,6 @@
 """Conditional PatchGAN, hinge objectives, feature matching and lazy-R1 checks."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import io
 import unittest
 
@@ -29,7 +31,7 @@ class AdversarialTests(unittest.TestCase):
         real = torch.rand(2, 3, 64, 64)
         fake = torch.rand_like(real)
         condition = torch.rand(2, 3, 32, 32, requires_grad=True)
-        state = torch.zeros(2, 90, requires_grad=True)
+        state = torch.zeros(2, STATE_DIM, requires_grad=True)
         real_output, fake_output = discriminator(real, condition, state), discriminator(fake, condition, state)
         self.assertEqual(len(real_output["logits"]), 2)
         self.assertEqual([len(scale) for scale in real_output["features"]], [4, 4])
@@ -70,7 +72,7 @@ class AdversarialTests(unittest.TestCase):
     def test_state_projection_uses_visual_state_and_masks_hud_counters(self):
         discriminator = self.Discriminator(base_channels=8)
         image, condition = torch.rand(1, 3, 64, 64), torch.rand(1, 3, 64, 64)
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, 3:5] = 1
         # Initialize the spectral power-iteration buffers before fixed eval.
         discriminator(image, condition, state)
@@ -101,7 +103,7 @@ class AdversarialTests(unittest.TestCase):
         discriminator = self.Discriminator(base_channels=8).eval().requires_grad_(False)
         fake = torch.rand(1, 3, 64, 64, requires_grad=True)
         condition = torch.rand_like(fake, requires_grad=True)
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         before = {name: value.clone() for name, value in discriminator.named_buffers()}
         self.g_hinge(discriminator(fake, condition, state)).backward()
         self.assertGreater(float(fake.grad.abs().sum()), 0.)
@@ -114,7 +116,7 @@ class AdversarialTests(unittest.TestCase):
         discriminator = self.Discriminator(base_channels=8)
         real = torch.rand(1, 3, 64, 64, requires_grad=True)
         condition = torch.rand_like(real)
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, 3:5] = 1
         with torch.autocast("cpu", enabled=False):
             output = discriminator(real, condition, state)

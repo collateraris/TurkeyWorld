@@ -7,6 +7,8 @@ tools, excluded from the playable generator parameter count.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import argparse
 from dataclasses import asdict
 from datetime import datetime
@@ -59,10 +61,10 @@ def short_rollout_loss(model, ema, batch, *, context=2, render=True, teacher=Non
         dt = 1/model.config.simulation_hz
         player_motion = F.smooth_l1_loss((result['state'][:, :2]-current[:, :2])*(16/(2.4*dt)),
                                         (reference_next[:, :2]-reference_old[:, :2])*(16/(2.4*dt)))
-        predicted_npcs = result['state'][:, 8:88].reshape(-1, 8, 10)
-        previous_npcs = current[:, 8:88].reshape(-1, 8, 10)
-        reference_npcs = reference_next[:, 8:88].reshape(-1, 8, 10)
-        old_reference_npcs = reference_old[:, 8:88].reshape(-1, 8, 10)
+        predicted_npcs = result['state'][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+        previous_npcs = current[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+        reference_npcs = reference_next[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+        old_reference_npcs = reference_old[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
         continuing = (old_reference_npcs[:, :, 5]>.5)&(reference_npcs[:, :, 5]>.5)
         npc_motion = F.smooth_l1_loss((predicted_npcs[:, :, :2]-previous_npcs[:, :, :2])*(16/(1.2*dt)),
             (reference_npcs[:, :, :2]-old_reference_npcs[:, :, :2])*(16/(1.2*dt)), reduction='none')
@@ -147,7 +149,7 @@ class VJEPAExperiment(Experiment):
                 'teacher_seconds_per_update': 2.76, 'student_seconds_per_update': .405,
                 'target_quality_completion_time_known': False},
             training_protocol={'own_predictions': True, 'future_ground_truth_feedback': False,
-                'persistent_map': True, 'persistent_object_slots': 8, 'tbptt_chunk': args.chunk,
+                'persistent_map': True, 'persistent_object_slots': ENTITY_SLOTS, 'tbptt_chunk': args.chunk,
                 'curriculum': [value for value in (32, 128, 512, 2048) if value < target_steps]+[target_steps],
                 'teacher_before_student': True},
             plateau_policy={'enabled': True, 'patience': args.plateau_patience,

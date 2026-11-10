@@ -1,4 +1,6 @@
 """Integrity-evaluator fault injection and active-session qualification."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 import math
 import numpy as np
@@ -41,7 +43,7 @@ class RolloutValidationTests(unittest.TestCase):
         previous = game.state_vector()
         current = previous.copy()
         current[:2] = [6.5/16, 2.5/16]
-        current[89] += (1/30)/300
+        current[-1] += (1/30)/300
         failures = check_transition(tilemap, previous, current, [1, 0, 0, 0], [0]*4)
         codes = {failure["code"] for failure in failures}
         self.assertIn("wall_tunneling", codes)
@@ -52,7 +54,7 @@ class RolloutValidationTests(unittest.TestCase):
         previous = game.state_vector()
         current = previous.copy()
         current[0] -= .04/16
-        current[89] += (1/30)/300
+        current[-1] += (1/30)/300
         failures = check_transition(game.map, previous, current, [1, 0, 0, 0], [0]*4)
         self.assertIn("movement_direction", {failure["code"] for failure in failures})
 
@@ -72,10 +74,10 @@ class RolloutValidationTests(unittest.TestCase):
         game = Game()
         previous = game.state_vector()
         previous[12:14] = 0
-        previous[88] = 1/8
+        previous[-2] = 1/8
         current = previous.copy()
         current[12:14] = [.25, 1]
-        current[89] += (1/30)/300
+        current[-1] += (1/30)/300
         failures = check_transition(game.map, previous, current, [0]*4, [0]*4)
         self.assertIn("revival", {failure["code"] for failure in failures})
 
@@ -84,7 +86,7 @@ class RolloutValidationTests(unittest.TestCase):
         previous = game.state_vector()
         previous[8:10] = [3./16, 2.5/16]
         current = previous.copy()
-        current[89] += (1/30)/300
+        current[-1] += (1/30)/300
         failures = check_transition(game.map, previous, current, [0]*4, [0]*4)
         self.assertIn("missed_ready_attack", {failure["code"] for failure in failures})
 
@@ -104,7 +106,7 @@ class RolloutValidationTests(unittest.TestCase):
         previous = game.state_vector()
         previous[14] = 1.  # NPC0 normalized attack cooldown.
         current = previous.copy()
-        current[89] += (1/30)/300
+        current[-1] += (1/30)/300
         failures = check_transition(game.map, previous, current, [0]*4, [0]*4)
         self.assertIn("npc_attack_timer", {failure["code"] for failure in failures})
 
@@ -114,7 +116,7 @@ class RolloutValidationTests(unittest.TestCase):
         previous = tape["initial_state"].copy()
         for index in range(120):
             current = previous.copy()
-            current[89] += (1/30)/300
+            current[-1] += (1/30)/300
             # This apparently sane state still ignores all movement commands.
             monitor.observe(previous, current, [1., 0., 0., 0.], [0]*4,
                             tape["reference_states"][index], tape["reference_states"][index+1])
@@ -148,7 +150,7 @@ class RolloutValidationTests(unittest.TestCase):
         for index, action in enumerate(tape["actions"]):
             current = previous.copy()
             current[:4] = tape["reference_states"][index+1, :4]
-            current[89] += (1/30)/300
+            current[-1] += (1/30)/300
             monitor.observe(previous, current, action, [0]*4,
                             tape["reference_states"][index], tape["reference_states"][index+1])
             previous = current

@@ -1,4 +1,6 @@
 """Actual generated-RGB metrics, immutable held-out panels and strict gates."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import json
 import math
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ except ImportError:
 class PanelData:
     def __init__(self, lengths=(7, 9, 11), size=16):
         self.count, self.files = sum(lengths), len(lengths)
-        self.data = {'new': np.zeros((self.count, 90), np.float32),
+        self.data = {'new': np.zeros((self.count, STATE_DIM), np.float32),
                      'images': np.zeros((self.count, size, size, 3), np.uint8)}
         self.data['new'][:, 3] = 1.
         self.data['new'][:, 0] = np.arange(self.count)/255

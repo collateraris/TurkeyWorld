@@ -1,4 +1,6 @@
 """Offline missing-NPC negatives preserve GAN isolation and update boundaries."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import unittest
 from unittest.mock import patch
@@ -36,7 +38,7 @@ class CounterfactualAdversarialTests(unittest.TestCase):
         self.source = torch.rand(1, 3, 64, 64)
         self.fake = torch.rand_like(self.source)
         self.base = torch.rand_like(self.source)
-        self.state = torch.zeros(1, 90)
+        self.state = torch.zeros(1, STATE_DIM)
         self.state[:, 3:6] = 1
         self.removed = self.source.clone()
         self.removed[:, :, 16:48, 16:48] = .25

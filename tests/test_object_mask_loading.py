@@ -1,4 +1,6 @@
 """Object sidecars are strict future labels, independent of runtime engines."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import json
 import os
 from pathlib import Path
@@ -26,11 +28,11 @@ class ObjectMaskLoadingTests(unittest.TestCase):
             (masks / split).mkdir(parents=True)
             for index in range(files):
                 path = data / "rgb" / split / f"episode_{index:04d}.npz"
-                states = np.zeros((8, 90), dtype=np.float32)
+                states = np.zeros((8, STATE_DIM), dtype=np.float32)
                 states[:, 0] = np.arange(8)
                 np.savez_compressed(path, frames=np.full((8, 4, 6, 3), index, np.uint8), states=states,
                     actions=np.zeros((7, 4), np.float32), events=np.zeros((7, 4), np.float32),
-                    hit_ids=np.full(7, -1, np.int64), attack_flags=np.zeros((7, 8), np.float32),
+                    hit_ids=np.full(7, -1, np.int64), attack_flags=np.zeros((7, ENTITY_SLOTS), np.float32),
                     map=np.zeros((16, 16), np.int8), dt=np.asarray(1/30),
                     split=np.asarray(split), behavior_version=np.asarray("test_behavior_v3"))
                 label = np.zeros((8, 4, 6), dtype=np.bool_)

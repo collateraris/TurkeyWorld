@@ -8,6 +8,8 @@ qualification decision belongs to the experiment controller, not this module.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 from dataclasses import asdict
 import math
 from pathlib import Path
@@ -62,7 +64,7 @@ class LatentVelocityNetwork(nn.Module):
         self.patch, self.grid, self.width = patch_size, latent_size//patch_size, width
         self.image_input = nn.Conv2d(latent_channels*3, width, self.patch, stride=self.patch)
         self.position = nn.Parameter(torch.randn(1, self.grid*self.grid, width)*.02)
-        self.state_input = nn.Sequential(nn.Linear(90, width), nn.SiLU(), nn.Linear(width, width))
+        self.state_input = nn.Sequential(nn.Linear(STATE_DIM, width), nn.SiLU(), nn.Linear(width, width))
         self.time_input = nn.Sequential(nn.Linear(64, width), nn.SiLU(), nn.Linear(width, width))
         self.blocks = nn.ModuleList(FlowBlock(width, heads, mlp_ratio, mlp_hidden) for _ in range(depth))
         self.final_norm = nn.LayerNorm(width, elementwise_affine=False)
@@ -96,7 +98,7 @@ class LatentVelocityNetwork(nn.Module):
 
 
 class SpatialFlowCondition(nn.Module):
-    """Nine identity-preserving participant conditions read by latent patches.
+    """Two identity-preserving participant conditions read by latent patches.
 
     Uses current continuous coordinates, observed direction/validity, relative
     pose, HP/life/timers and health-derived hit-progress descriptors. Projection
@@ -107,7 +109,7 @@ class SpatialFlowCondition(nn.Module):
         from .spatial_entities import SPATIAL_FEATURE_DIM
         self.grid, self.image_size, self.rank = grid, image_size, rank
         self.features = nn.Sequential(nn.Linear(SPATIAL_FEATURE_DIM+6, rank), nn.SiLU(), nn.Linear(rank, width))
-        self.identity = nn.Embedding(9, width)
+        self.identity = nn.Embedding(ENTITY_SLOTS+1, width)
         self.entity_norm, self.query_norm = nn.LayerNorm(width), nn.LayerNorm(width)
         self.query, self.key, self.value = (nn.Linear(width, rank, bias=False) for _ in range(3))
         self.output = nn.Linear(rank, width)
@@ -121,7 +123,7 @@ class SpatialFlowCondition(nn.Module):
         from .combat_objectives import combat_count_features
         features = torch.cat([entity_spatial_features(state.float()), combat_count_features(state.float())], -1)
         encoded = self.features(features.to(self.features[0].weight.dtype))
-        identities = self.identity(torch.arange(9, device=state.device))[None]
+        identities = self.identity(torch.arange(ENTITY_SLOTS+1, device=state.device))[None]
         return self.entity_norm(encoded+identities.to(encoded.dtype))
 
     def projection_weights(self, state):

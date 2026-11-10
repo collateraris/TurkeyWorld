@@ -184,10 +184,13 @@ class TeacherBudgetRunnerTests(unittest.TestCase):
             experiment.long_curriculum = Mock(side_effect=AssertionError('No teacher long stage after budget'))
             experiment.make_student_model = Mock(side_effect=AssertionError('No student after budget'))
             experiment.evaluate_9000 = Mock(side_effect=AssertionError('No automatic handoff evaluation'))
+            loaded_model = Mock()
+            loaded_model.to.return_value = loaded_model
             with patch('turkeyworld.train_250m.SequenceData', side_effect=[data, validation]), \
-                 patch('turkeyworld.train_250m.load_world_checkpoint', return_value=(object(), {})), \
+                 patch('turkeyworld.train_250m.load_world_checkpoint', return_value=(loaded_model, {})), \
                  patch.object(MassiveExperiment, 'save', autospec=True, side_effect=self.parent_save):
                 self.assertIsNone(LatentWorldExperiment.run(experiment))
+            loaded_model.to.assert_called_once_with(experiment.device)
             self.assertEqual(experiment.fit.call_count, 1)
             self.assertEqual(experiment.global_step, 6020)
             experiment.long_curriculum.assert_not_called()

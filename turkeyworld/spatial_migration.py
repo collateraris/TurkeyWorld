@@ -15,6 +15,7 @@ import tempfile
 
 import torch
 
+from .structured_state import ENTITY_SLOTS, STATE_DIM
 from .models import NeuralWorldModel, WorldModelConfig
 from .training_pipeline import atomic_json, now, replace_file
 from .vqgan_pipeline import process_alive
@@ -83,9 +84,9 @@ def enable_spatial_checkpoint(saved, seed=173):
         state[name] = state[name].detach().clone()
     count = sum(parameter.numel() for parameter in parameters.values())
     profile = {'teacher_parameters': count, 'teacher_config_fingerprint': config_fingerprint(config),
-               'spatial_entities': True, 'spatial_entity_count': 9}
+               'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM}
     report = {'status': 'already_enabled' if source_config.spatial_entities else 'expanded',
-        'seed': int(seed), 'spatial_entities': True, 'spatial_entity_count': 9,
+        'seed': int(seed), 'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM,
         'source_step': int(saved.get('training_steps', 0)),
         'start_optimizer_step': int(saved.get('global_training_step', saved.get('training_steps', 0))),
         'source_parameters': sum(parameter.numel() for name, parameter in parameters.items() if name in source),
@@ -198,7 +199,7 @@ def migrate_spatial_run(run_dir, target_seconds=30., seed=173, sr_checkpoint=Non
     upgraded_initial, initial_report = enable_spatial_checkpoint(origin, seed)
     profile = {'teacher_parameters': main_report['generator_parameters'],
         'teacher_config_fingerprint': main_report['teacher_config_fingerprint'],
-        'spatial_entities': True, 'spatial_entity_count': 9}
+        'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM}
     upgraded_marker = {**marker, **profile}
     staged = []
     try:
@@ -207,7 +208,7 @@ def migrate_spatial_run(run_dir, target_seconds=30., seed=173, sr_checkpoint=Non
         backups = {str(path): str(_backup_once(path)) for path in (main, initial, initialization)}
         config = _read_json(root/'experiment_config175vq.json', {})
         report = {**previous, 'format_version': 1, 'status': 'pending', 'run_dir': str(root),
-            'spatial_entities': True, 'spatial_entity_count': 9, 'target_seconds': float(target_seconds),
+            'spatial_entities': True, 'spatial_entity_count': ENTITY_SLOTS+1, 'enemy_slots': ENTITY_SLOTS, 'state_dim': STATE_DIM, 'target_seconds': float(target_seconds),
             'sr_checkpoint': str(sr_path), 'source_step': main_report['source_step'],
             'start_optimizer_step': main_report['start_optimizer_step'], 'seed': int(seed),
             'generator_parameters': main_report['generator_parameters'],

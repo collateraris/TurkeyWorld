@@ -1,4 +1,6 @@
 """Generator/discriminator isolation, lazy regularization and exact continuation."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import io
 import copy
 import unittest
@@ -22,7 +24,7 @@ class AdversarialTrainerTests(unittest.TestCase):
         torch.manual_seed(122)
         self.real = torch.rand(1, 3, 64, 64)
         self.condition = torch.rand_like(self.real)
-        self.state = torch.zeros(1, 90)
+        self.state = torch.zeros(1, STATE_DIM)
         self.state[:, 3:5] = 1
 
     def trainer(self, **options):

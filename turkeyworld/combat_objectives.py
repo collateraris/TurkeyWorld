@@ -7,6 +7,8 @@ is introduced. This module never changes runtime state or predicts sprite yaw.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 
 import torch
@@ -29,12 +31,12 @@ COMBAT_COUNT_FEATURE_SLICES = {name: slice(index, index+1)
 
 
 def _check_state(state):
-    if not torch.is_tensor(state) or state.ndim != 2 or state.shape[1] != 90 or not state.is_floating_point():
-        raise ValueError('Combat state must be floating point[B,90]')
+    if not torch.is_tensor(state) or state.ndim != 2 or state.shape[1] != STATE_DIM or not state.is_floating_point():
+        raise ValueError('Combat state must be floating point[B,20]')
 
 
 def combat_count_features(state):
-    """Return[B,9,6], player then8NPCs, with straight-through nominal rounding.
+    """Return[B,2,6], player then oneNPC, with straight-through nominal rounding.
 
     NPC60→25→0HP means nominal0→1→2hits; respawn60HP resets to0.
     Player100HP with8HP melee means nominal13hits to death. HP35 source
@@ -46,11 +48,11 @@ def combat_count_features(state):
     _check_state(state)
     dtype = torch.float64 if state.dtype == torch.float64 else torch.float32
     values = state.to(dtype=dtype)
-    npc = values[:, 8:88].reshape(-1, 8, 10)
+    npc = values[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     hp = torch.cat([values[:, 4:5], npc[:, :, 4]], -1)
     alive = torch.cat([values[:, 4:5] > 0, (npc[:, :, 5] >= .5) & (npc[:, :, 4] > 0)], -1)
-    initial = hp.new_tensor([PLAYER_INITIAL_HP]+[NPC_INITIAL_HP]*8)[None]
-    damage = hp.new_tensor([MELEE_DAMAGE]+[SHOT_DAMAGE]*8)[None]
+    initial = hp.new_tensor([PLAYER_INITIAL_HP]+[NPC_INITIAL_HP]*ENTITY_SLOTS)[None]
+    damage = hp.new_tensor([MELEE_DAMAGE]+[SHOT_DAMAGE]*ENTITY_SLOTS)[None]
     maximum = (initial/damage).ceil()
     continuous = ((initial-hp)/damage).clamp_min(0)
     continuous = torch.minimum(continuous, maximum)
@@ -83,7 +85,7 @@ def _shot_gate(result, previous, action, dt, endless):
 
 
 def _attack_count_distribution(probabilities):
-    """Exact differentiable Poisson-binomial count distribution[B,9]."""
+    """Exact differentiable Poisson-binomial count distribution[B,2]."""
     distribution = probabilities.new_ones((len(probabilities), 1))
     for probability in probabilities.unbind(-1):
         p = probability[:, None]
@@ -118,10 +120,10 @@ def balanced_attack_loss(logits, labels, eligible=None, *, positive_weight=4., f
     positions/life/logits. ``eligible`` selects Source-legal negatives only.
     Optional focal weighting is disabled by default and changes no threshold.
     """
-    if (logits.shape != labels.shape or logits.shape[-1] != 8
+    if (logits.shape != labels.shape or logits.shape[-1] != ENTITY_SLOTS
             or not math.isfinite(positive_weight) or positive_weight < 0
             or not math.isfinite(focal_gamma) or focal_gamma < 0):
-        raise ValueError('Balanced attack requires matching[...,8] heads/labels and nonnegative finite weights')
+        raise ValueError('Balanced attack requires matching[...,1] heads/labels and nonnegative finite weights')
     labels, values = labels.detach().float(), logits.float()
     positive = labels > .5
     allowed = torch.ones_like(positive) if eligible is None else eligible.detach().bool()
@@ -159,16 +161,16 @@ def combat_image_state(result, previous, target_pose, *, action=None, dt=1/30, e
     targets = result['target_logits'].float()
     attacks = result['attack_logits'].float()
     batch = len(previous)
-    if targets.shape != (batch, 9) or attacks.shape != (batch, 8):
-        raise ValueError('Combat heads must provide target_logits[B,9] and attack_logits[B,8]')
-    old = previous[:, 8:88].reshape(batch, 8, 10)
-    accepted = hard[:, 8:88].reshape_as(old)
-    base = pose[:, 8:88].reshape_as(old)
+    if targets.shape != (batch, ENTITY_SLOTS+1) or attacks.shape != (batch, ENTITY_SLOTS):
+        raise ValueError('Combat heads must provide target_logits[B,2] and attack_logits[B,1]')
+    old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+    accepted = hard[:, GLOBAL_DIM:-2].reshape_as(old)
+    base = pose[:, GLOBAL_DIM:-2].reshape_as(old)
     old_alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
     respawn = result.get('respawn_flags', torch.zeros_like(old_alive)).detach().bool()
     valid = old_alive & ~respawn
     shot = _shot_gate(result, previous, action, dt, endless)
-    hit_probability = targets.softmax(-1)[:, :8]*shot[:, None]*valid.to(targets.dtype)
+    hit_probability = targets.softmax(-1)[:, :ENTITY_SLOTS]*shot[:, None]*valid.to(targets.dtype)
     lethal_probability = hit_probability*(old[:, :, 4] <= SHOT_DAMAGE+1e-6)
     npc_hp = old[:, :, 4].clamp_min(0)-hit_probability*old[:, :, 4].clamp(0, SHOT_DAMAGE)
     alive = old_alive.to(targets.dtype)-lethal_probability
@@ -183,7 +185,7 @@ def combat_image_state(result, previous, target_pose, *, action=None, dt=1/30, e
                 & (separation.square().sum(-1) <= 1.))
     attack_probability = attacks.sigmoid()*eligible.to(attacks.dtype)
     distribution = _attack_count_distribution(attack_probability)
-    nominal_damage = torch.arange(9, device=hard.device, dtype=hard.dtype)[None]*MELEE_DAMAGE
+    nominal_damage = torch.arange(ENTITY_SLOTS+1, device=hard.device, dtype=hard.dtype)[None]*MELEE_DAMAGE
     actual_damage = torch.minimum(nominal_damage, previous[:, 4:5].clamp_min(0))
     player_hp = previous[:, 4]-(distribution*actual_damage).sum(-1)
 
@@ -201,7 +203,7 @@ def combat_image_state(result, previous, target_pose, *, action=None, dt=1/30, e
         base[:, :, 9:10]], -1)
     globals_ = torch.cat([pose[:, :4], physical_forward(hard[:, 4], player_hp)[:, None],
                           pose[:, 5:7], hard[:, 7:8]], -1)
-    return torch.cat([globals_, entities.flatten(1), pose[:, 88:90]], -1)
+    return torch.cat([globals_, entities.flatten(1), pose[:, -2:]], -1)
 
 
 def combat_transition_losses(result, previous, target, hit_ids, attack_flags, events, *,
@@ -228,21 +230,21 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
     targets = result['target_logits'].float()
     attacks = result['attack_logits'].float()
     batch = previous.shape[0]
-    if targets.shape != (batch, 9) or attacks.shape != (batch, 8):
-        raise ValueError('Combat heads must provide target_logits[B,9] and attack_logits[B,8]')
+    if targets.shape != (batch, ENTITY_SLOTS+1) or attacks.shape != (batch, ENTITY_SLOTS):
+        raise ValueError('Combat heads must provide target_logits[B,2] and attack_logits[B,1]')
     zero = targets.sum()*0+attacks.sum()*0
     losses = {'events': zero, 'target': zero, 'attack': zero,
               'damage_npc': zero, 'damage_player': zero, 'death_npc': zero}
     if 'event_logits' in result:
         losses['events'] = F.binary_cross_entropy_with_logits(result['event_logits'], events.detach())
-    labels = torch.where(hit_ids < 0, torch.full_like(hit_ids, 8), hit_ids).detach().long()
-    class_weights = targets.new_ones(9); class_weights[-1] = none_class_weight
+    labels = torch.where(hit_ids < 0, torch.full_like(hit_ids, ENTITY_SLOTS), hit_ids).detach().long()
+    class_weights = targets.new_ones(ENTITY_SLOTS+1); class_weights[-1] = none_class_weight
     losses['target'] = F.cross_entropy(targets, labels, weight=class_weights, reduction='none').mean()
     losses['attack'] = F.binary_cross_entropy_with_logits(attacks, attack_flags.detach(),
-        pos_weight=attacks.new_full((8,), attack_pos_weight))
-    old = previous[:, 8:88].reshape(batch, 8, 10)
-    expected = target[:, 8:88].reshape_as(old)
-    predicted = result['state'][:, 8:88].reshape_as(old)
+        pos_weight=attacks.new_full((ENTITY_SLOTS,), attack_pos_weight))
+    old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+    expected = target[:, GLOBAL_DIM:-2].reshape_as(old)
+    predicted = result['state'][:, GLOBAL_DIM:-2].reshape_as(old)
     if game_training_v5:
         # Only Source legality chooses negative examples. A wrong own death,
         # range or player pose must not discard a genuine positive/negative.
@@ -259,7 +261,7 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
         old_alive = old_alive & ~result['respawn_flags'].detach().bool()
     old_hp = old[:, :, 4].clamp_min(0)
     shot = _shot_gate(result, previous, action, dt, endless)
-    probabilities = targets.softmax(-1)[:, :8]*shot[:, None]*old_alive.to(targets.dtype)
+    probabilities = targets.softmax(-1)[:, :ENTITY_SLOTS]*shot[:, None]*old_alive.to(targets.dtype)
     expected_npc_damage = probabilities*old_hp.clamp_max(SHOT_DAMAGE)
     observed_npc_damage = (old_hp-expected[:, :, 4]).clamp_min(0)
     npc_error = F.smooth_l1_loss(expected_npc_damage/SHOT_DAMAGE,
@@ -275,7 +277,7 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
                 & ready & (separation.detach().square().sum(-1) <= 1.))
     attack_probabilities = attacks.sigmoid()*eligible.to(attacks.dtype)
     distribution = _attack_count_distribution(attack_probabilities)
-    nominal = torch.arange(9, device=previous.device, dtype=previous.dtype)[None]*MELEE_DAMAGE
+    nominal = torch.arange(ENTITY_SLOTS+1, device=previous.device, dtype=previous.dtype)[None]*MELEE_DAMAGE
     capped = torch.minimum(nominal, previous[:, 4:5].clamp_min(0))
     expected_player_damage = (distribution*capped).sum(-1)
     observed_player_damage = (previous[:, 4]-target[:, 4]).clamp_min(0)
@@ -286,8 +288,8 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
     killable = old_alive & (old_hp <= SHOT_DAMAGE+1e-6) & (shot[:, None] > .5)
     death_labels = (expected[:, :, 5] < .5).to(targets.dtype)
     log_z = targets.logsumexp(-1, keepdim=True)
-    log_p = targets[:, :8]-log_z
-    diagonal = torch.arange(9, device=targets.device)[None, :] == torch.arange(8, device=targets.device)[:, None]
+    log_p = targets[:, :ENTITY_SLOTS]-log_z
+    diagonal = torch.arange(ENTITY_SLOTS+1, device=targets.device)[None, :] == torch.arange(ENTITY_SLOTS, device=targets.device)[:, None]
     log_not_p = targets[:, None, :].masked_fill(diagonal[None], -torch.inf).logsumexp(-1)-log_z
     death_error = -death_labels*log_p-(1-death_labels)*log_not_p
     losses['death_npc'] = death_weight*(death_error*killable).sum()/killable.sum().clamp_min(1)

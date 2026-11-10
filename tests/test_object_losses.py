@@ -1,4 +1,6 @@
 """Visible-object losses preserve legacy reductions and train only predictions."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import torch
@@ -15,10 +17,10 @@ class ObjectLossTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def state(self):
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[:, :2] = .5
         state[:, 3:6] = 1.
-        slots = state[:, 8:88].reshape(1, 8, 10)
+        slots = state[:, GLOBAL_DIM:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         slots[:, :, :2] = torch.tensor([.25, .5])  # All behind the player.
         slots[:, :, 4:6] = torch.tensor([.6, 1.])
         return state

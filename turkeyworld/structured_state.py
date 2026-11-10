@@ -13,10 +13,11 @@ import math
 import torch
 from torch.nn import functional as F
 
-STATE_DIM = 90
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
-ENTITY_SLOTS = 8
+ENTITY_SLOTS = 1
+STATE_DIM = GLOBAL_DIM + ENTITY_DIM*ENTITY_SLOTS + 2
+STATE_SCHEMA_VERSION = "single_enemy_v1"
 ACTION_DIM = 4
 MAP_EXTENT = 16.0
 SHOT_DAMAGE = 0.35
@@ -56,10 +57,10 @@ def _straight_through(hard, soft, training):
 def structured_transition(previous, candidate, action, target_logits,
                           attack_logits, dt=1 / 30, training=False,
                           endless=False, spawn_positions=None, spawn_valid=None):
-    """Return a coherent 90D state and accepted events without a simulator.
+    """Return a coherent 20D state and accepted events without a simulator.
 
     Args:
-        previous, candidate: float tensors [B,90]. Only candidate player/NPC XY
+        previous, candidate: float tensors [B,20]. Only candidate player/NPC XY
             coordinates are used. Heading, health, flags, ammunition, timers,
             animation phase, kills and time use the rules stated in this file.
         action: [B,4] = forward, strafe, turn, fire. Turn is integrated exactly;
@@ -67,9 +68,9 @@ def structured_transition(previous, candidate, action, target_logits,
             Endless mode also bounds each proposed XY component by the signed
             command after turning. Walls may reduce a component; the network
             cannot invent movement along an uncommanded or opposite axis.
-        target_logits: [B,9]; classes 0..7 identify NPCs, class 8 means no hit.
+        target_logits: [B,2]; class0 identifies the only NPC, class1 means no hit.
             Argmax chooses a target; choosing an already dead target is rejected.
-        attack_logits: [B,8]; >=0 proposes an attack. Range, life, terminal state
+        attack_logits: [B,1]; >=0 proposes an attack. Range, life, terminal state
             and cooldown guards must also hold. Occlusion remains learned.
         dt: positive finite seconds, normally 1/30; rules are otherwise rate aware.
         training: preserve hard forward decisions but use straight-through
@@ -77,9 +78,9 @@ def structured_transition(previous, candidate, action, target_logits,
             Train the two heads with their target-CE/attack-BCE labels;
             ``events`` itself is hard-valued.
 
-    Return values include state[B,90], events[B,4], event_probs/event_logits,
-    accepted_target[B] (-1 for no accepted hit), accepted_attacks[B,8] bool,
-    shot/hit/kill/player_hit[B] bool, npc_damage[B,8] and player_damage[B].
+    Return values include state[B,20], events[B,4], event_probs/event_logits,
+    accepted_target[B] (-1 for no accepted hit), accepted_attacks[B,1] bool,
+    shot/hit/kill/player_hit[B] bool, npc_damage[B,1] and player_damage[B].
     Half/bfloat16 inputs are promoted to authoritative float32 output state;
     network logits can have a different floating dtype on the same device.
     Damage values are normalized by 100 HP; player_damage is nominal summed
@@ -88,7 +89,7 @@ def structured_transition(previous, candidate, action, target_logits,
     if not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
         raise ValueError("dt must be positive and finite")
     if previous.ndim != 2 or previous.shape[-1] != STATE_DIM:
-        raise ValueError("previous must have shape [B,90]")
+        raise ValueError("previous must have shape [B,20]")
     batch = previous.shape[0]
     for name, value, shape in (
         ("candidate", candidate, (batch, STATE_DIM)),
@@ -118,9 +119,9 @@ def structured_transition(previous, candidate, action, target_logits,
     respawn = torch.zeros_like(original_alive)
     if endless and spawn_positions is not None:
         if spawn_positions.shape != (batch, ENTITY_SLOTS, 2):
-            raise ValueError("spawn_positions must have shape [B,8,2]")
+            raise ValueError("spawn_positions must have shape [B,1,2]")
         if spawn_valid is None or spawn_valid.shape != (batch, ENTITY_SLOTS):
-            raise ValueError("spawn_valid must have shape [B,8]")
+            raise ValueError("spawn_valid must have shape [B,1]")
         respawn = (~original_alive & spawn_valid.bool()
                    & (old[:, :, 8] * DEATH_DURATION + dt >= RESPAWN_DELAY - 1e-6)
                    & (previous[:, 4:5] > 0))

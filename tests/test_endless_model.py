@@ -1,4 +1,6 @@
 """Endless neural bookkeeping, legal learned spawns and checkpoint defaults."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import math
 import tempfile
 import unittest
@@ -25,28 +27,28 @@ class EndlessModelTests(unittest.TestCase):
         game = Game(endless=True)
         return game, torch.from_numpy(game.state_vector())[None]
 
-    def transition(self, state, *, endless=True, valid=True, fire=False, target=8):
+    def transition(self, state, *, endless=True, valid=True, fire=False, target=ENTITY_SLOTS):
         from turkeyworld.structured_state import structured_transition
-        positions = state[:, 8:-2].reshape(1, 8, 10)[:, :, :2].clone()
+        positions = state[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2].clone()
         positions[:, 0] = torch.tensor([10.5 / 16, 2.5 / 16])
-        targets = torch.full((1, 9), -10.)
+        targets = torch.full((1, (ENTITY_SLOTS+1)), -10.)
         targets[:, target] = 10.
         return structured_transition(state, state.clone(),
-            torch.tensor([[0., 0., 0., float(fire)]]), targets, torch.full((1, 8), -10.),
-            endless=endless, spawn_positions=positions, spawn_valid=torch.full((1, 8), valid))
+            torch.tensor([[0., 0., 0., float(fire)]]), targets, torch.full((1, ENTITY_SLOTS), -10.),
+            endless=endless, spawn_positions=positions, spawn_valid=torch.full((1, ENTITY_SLOTS), valid))
 
     def test_ready_slot_revives_with_fresh_health_and_keeps_cumulative_kills(self):
         _, state = self.state()
         state[:, 12:14] = 0  # Slot zero HP and alive flag.
         state[:, 16] = 5.
-        state[:, -2] = 21 / 8
+        state[:, -2] = 21 / ENTITY_SLOTS
         result = self.transition(state)
         enemy = result['state'][:, 8:18]
         self.assertTrue(result['respawn_flags'][0, 0])
         self.assertAlmostEqual(float(enemy[0, 4]), .6, places=6)
         self.assertEqual(float(enemy[0, 5]), 1.)
         self.assertEqual(float(enemy[0, 8]), 0.)
-        self.assertEqual(float(result['state'][0, -2]), 21 / 8)
+        self.assertEqual(float(result['state'][0, -2]), 21 / ENTITY_SLOTS)
         torch.testing.assert_close(enemy[0, :2], torch.tensor([10.5 / 16, 2.5 / 16]))
 
     def test_respawn_requires_delay_living_player_and_legal_candidate(self):
@@ -73,18 +75,18 @@ class EndlessModelTests(unittest.TestCase):
         _, state = self.state()
         state[:, 5] = 0.
         state[:, 12] = .35
-        state[:, -2] = 40 / 8
+        state[:, -2] = 40 / ENTITY_SLOTS
         result = self.transition(state, fire=True, target=0)
         self.assertEqual(result['events'][0, :3].tolist(), [1., 1., 1.])
         self.assertEqual(float(result['state'][0, 5]), 0.)
-        self.assertEqual(float(result['state'][0, -2]), 41 / 8)
+        self.assertEqual(float(result['state'][0, -2]), 41 / ENTITY_SLOTS)
 
     def movement_result(self, state, candidate, action, *, training=False):
         from turkeyworld.structured_state import structured_transition
-        logits = torch.full((1, 9), -10.)
-        logits[:, 8] = 10.
+        logits = torch.full((1, (ENTITY_SLOTS+1)), -10.)
+        logits[:, ENTITY_SLOTS] = 10.
         return structured_transition(state, candidate, torch.tensor([action], dtype=torch.float32),
-            logits, torch.full((1, 8), -10.), endless=True, training=training)
+            logits, torch.full((1, ENTITY_SLOTS), -10.), endless=True, training=training)
 
     def test_player_motion_respects_commanded_axes_and_both_signs(self):
         _, state = self.state()
@@ -126,34 +128,40 @@ class EndlessModelTests(unittest.TestCase):
                 self.assertTrue(torch.isfinite(candidate.grad).all())
                 self.assertGreater(float(candidate.grad[0, 0])*gradient_sign, 0.)
 
-    def test_decoder_rejects_walls_near_player_and_occupied_tiles(self):
+    def test_decoder_rejects_walls_and_near_player_but_not_own_dead_slot(self):
         from turkeyworld.spawn import decode_spawn_positions
         game, state = self.state()
         state[:, 12:14] = 0.
         state[:, 16] = 5.
-        logits = torch.zeros(1, 8, 256)
+        state[:, 8:10] = torch.tensor([12.5 / 16, 2.5 / 16])
+        logits = torch.zeros(1, ENTITY_SLOTS, 256)
         logits[0, 0, 0] = 1000.  # Wall.
         logits[0, 0, 2 * 16 + 2] = 900.  # Player's tile.
-        logits[0, 0, 2 * 16 + 12] = 800.  # Another living enemy.
-        logits[0, 0, 1 * 16 + 14] = 700.  # Legal tile.
+        logits[0, 0, 2 * 16 + 12] = 800.  # Own dead position is a legal respawn.
+        logits[0, 0, 1 * 16 + 14] = 700.  # Lower-scoring legal tile.
         positions, valid = decode_spawn_positions(logits, state, torch.tensor(game.map == 0), 1 / 30)
         self.assertTrue(valid[0, 0])
-        torch.testing.assert_close(positions[0, 0], torch.tensor([14.5 / 16, 1.5 / 16]))
-        self.assertFalse(valid[0, 1:].any())
+        torch.testing.assert_close(positions[0, 0], torch.tensor([12.5 / 16, 2.5 / 16]))
+        self.assertEqual(tuple(valid.shape), (1, ENTITY_SLOTS))
+        self.assertGreaterEqual(float(torch.linalg.vector_norm(positions[0, 0]-state[0, :2])*16), 4.)
 
-    def test_simultaneous_spawns_are_separated_and_no_candidate_can_wait(self):
+    def test_ready_slot_uses_available_floor_and_waits_when_no_candidate_is_legal(self):
         from turkeyworld.spawn import decode_spawn_positions
         game, state = self.state()
-        entities = state[:, 8:-2].reshape(1, 8, 10)
+        entities = state[:, 8:-2].reshape(1, ENTITY_SLOTS, ENTITY_DIM)
         entities[:, :, 4:6] = 0.
         entities[:, :, 8] = 5.
-        logits = torch.zeros(1, 8, 256)
+        logits = torch.zeros(1, ENTITY_SLOTS, 256)
         positions, valid = decode_spawn_positions(logits, state, torch.tensor(game.map == 0), 1 / 30)
         self.assertTrue(valid.all())
-        distances = torch.cdist(positions, positions)[0] * 16
-        distances.fill_diagonal_(float('inf'))
-        self.assertTrue((distances >= 1.0 - 1e-5).all())
+        x, y = (positions[0, 0]*16).long().tolist()
+        self.assertEqual(game.map[y, x], 0)
+        self.assertGreaterEqual(float(torch.linalg.vector_norm(positions[0, 0]-state[0, :2])*16), 4.)
         _, valid = decode_spawn_positions(logits, state, torch.zeros(16, 16, dtype=torch.bool), 1 / 30)
+        self.assertFalse(valid.any())
+        only_near_player = torch.zeros(16, 16, dtype=torch.bool)
+        only_near_player[2, 2] = True
+        _, valid = decode_spawn_positions(logits, state, only_near_player, 1 / 30)
         self.assertFalse(valid.any())
 
     def test_both_architectures_predict_trainable_spawn_logits_without_engine_queries(self):
@@ -170,7 +178,7 @@ class EndlessModelTests(unittest.TestCase):
                      patch.object(Game, 'render', side_effect=AssertionError('No runtime engine render')):
                     features = model.encode_map(torch.tensor(game.map, dtype=torch.long)[None])
                     result = model.transition(state, torch.zeros(1, 4), features)
-                self.assertEqual(result['spawn_logits'].shape, (1, 8, 256))
+                self.assertEqual(result['spawn_logits'].shape, (1, ENTITY_SLOTS, 256))
                 self.assertTrue(result['respawn_flags'][0, 0])
                 target = torch.tensor([1 * 16 + 14])
                 loss = torch.nn.functional.cross_entropy(result['spawn_logits'][:, 0], target)

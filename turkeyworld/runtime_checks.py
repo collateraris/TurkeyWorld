@@ -5,6 +5,8 @@ oracles only, with no connection back into the model state or its memory.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections import Counter
 import math
 import numpy as np
@@ -15,7 +17,7 @@ POSE_TOL, HP_TOL, AMMO_TOL = .002, .05, .02
 
 
 def entities(state):
-    return np.asarray(state)[8:88].reshape(8, 10)
+    return np.asarray(state)[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
 
 
 def circle_is_clear(tilemap, point, radius):
@@ -95,7 +97,7 @@ def event_flags(events):
 def check_transition(tilemap, previous, current, action, events, dt=1/30, *, endless=False):
     """Return violation dictionaries; all input arrays remain untouched.
 
-    The 90-value normalized state contract is the game's public interface.
+    The STATE_DIM-value normalized state contract is the game's public interface.
     Boolean/discrete-state checks are intentional: fractional ammo/alive values
     cannot be hidden by rounding an invalid legacy prediction into a valid one.
     """
@@ -103,7 +105,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
     failures = []
     def fail(code, message):
         failures.append({"code": code, "message": message})
-    if previous.shape != (90,) or current.shape != (90,) or action.shape != (4,):
+    if previous.shape != (STATE_DIM,) or current.shape != (STATE_DIM,) or action.shape != (4,):
         fail("shape", "Expected previous/current state90 and action4")
         return failures
     if not np.isfinite(current).all():
@@ -123,13 +125,13 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
     original_alive = (original_old[:, 5] >= .5) & (original_old[:, 4] > .0005)
     alive1 = new[:, 5] >= .5
     revived = ~original_alive & alive1
-    valid_respawns = np.zeros(8, dtype=bool)
+    valid_respawns = np.zeros(ENTITY_SLOTS, dtype=bool)
     if endless:
         # Construct a virtual pre-combat spawn state only for measurement. It
         # never replaces a model prediction or feeds a correction into rollout.
-        occupied = [old[i, :2]*scale for i in range(8) if original_alive[i]]
+        occupied = [old[i, :2]*scale for i in range(ENTITY_SLOTS) if original_alive[i]]
         floor_centers = np.argwhere(tilemap == 0)[:, ::-1].astype(float) + .5
-        for i in range(8):
+        for i in range(ENTITY_SLOTS):
             ready = (not original_alive[i] and previous[4] > .0005
                      and original_old[i, 8]*.6+dt >= 3.-1e-5)
             if revived[i]:
@@ -168,7 +170,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
     elif revived.any():
         fail("revival", "A dead persistent NPC slot became alive")
     npc0 = old[:, :2]*scale
-    bounded_indices = [0, 1, 4, 5, 6, 7] + ([] if endless else [88])
+    bounded_indices = [0, 1, 4, 5, 6, 7] + ([] if endless else [-2])
     if np.any(current[bounded_indices] < -1e-5) or np.any(current[bounded_indices] > 1+1e-5):
         fail("player_range", "Player coordinates/HP/ammo/timers or kill count outside normalized range")
     if abs(np.linalg.norm(current[2:4])-1) > .002:
@@ -188,14 +190,14 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
         fail("npc_healing", "NPC HP increased although the game has no healing")
     if (current[4]-previous[4])*100 > HP_TOL:
         fail("player_healing", "Player HP increased without a respawn/healing mechanic")
-    kills = current[88]*8
-    expected_kills = previous[88]*8+np.count_nonzero(alive0 & ~alive1) if endless else np.count_nonzero(~alive1)
+    kills = current[-2]*ENTITY_SLOTS
+    expected_kills = previous[-2]*ENTITY_SLOTS+np.count_nonzero(alive0 & ~alive1) if endless else np.count_nonzero(~alive1)
     if kills < -.01 or abs(kills-round(kills)) > .01 or abs(kills-expected_kills) > .01:
         fail("kill_count", "Kill count is fractional or disagrees with persistent dead slots")
-    if abs((current[89]-previous[89])*300-dt) > .002:
+    if abs((current[-1]-previous[-1])*300-dt) > .002:
         fail("clock", "Simulation clock does not advance by the configured fixed timestep")
     for label, start, end, radius in [("player", p0, p1, PLAYER_RADIUS)] + [
-            (f"npc_{i}", npc0[i], npc1[i], NPC_RADIUS) for i in range(8)]:
+            (f"npc_{i}", npc0[i], npc1[i], NPC_RADIUS) for i in range(ENTITY_SLOTS)]:
         if not circle_is_clear(tilemap, end, radius):
             fail("wall_collision", f"{label} overlaps a wall or map boundary")
         elif not segment_is_clear(tilemap, start, end, radius):
@@ -246,7 +248,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
         direction = np.array([current[3], current[2]])
         wall_limit = wall_distance(tilemap, p1, direction)
         candidates = []
-        for i in range(8):
+        for i in range(ENTITY_SLOTS):
             relative = npc0[i]-p1
             along = float(relative @ direction)
             perpendicular = abs(relative[0]*direction[1]-relative[1]*direction[0])
@@ -277,7 +279,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
             if wall_distance(tilemap, p1, direction) < entry-POSE_TOL:
                 fail("hit_through_wall", "A wall blocked the damaged NPC on the firing ray")
             closer = []
-            for i in range(8):
+            for i in range(ENTITY_SLOTS):
                 delta = npc0[i]-p1
                 d = float(delta @ direction)
                 q = abs(delta[0]*direction[1]-delta[1]*direction[0])
@@ -298,7 +300,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
         fail("player_hit_hp", "Player-hit event and player HP change disagree")
     eligible_attackers = []
     strictly_ready_attackers = []
-    for i in range(8):
+    for i in range(ENTITY_SLOTS):
         if alive1[i] and np.linalg.norm(npc0[i]-p1) <= 1.+POSE_TOL and old[i, 6]*1.2-dt <= 1e-5 and line_is_clear(tilemap, npc0[i], p1):
             eligible_attackers.append(i)
             if np.linalg.norm(npc0[i]-p1) <= 1.-POSE_TOL:
@@ -307,7 +309,7 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
         required_damage = min(previous[4]*100, 8*len(strictly_ready_attackers))
         if not player_hit or hp_loss < required_damage-HP_TOL:
             fail("missed_ready_attack", "Ready living NPCs in clear melee range must attack; a permanently silent attack head is not correct combat")
-    for i in range(8):
+    for i in range(ENTITY_SLOTS):
         decayed = max(0., old[i, 6]-dt/1.2)
         allowed = [1.] if previous[4] > .0005 and i in strictly_ready_attackers else [decayed]
         # At the narrow range-boundary tolerance either discrete branch may
@@ -341,9 +343,9 @@ class RolloutMonitor:
         self.turn_commands = self.fire_commands = 0
         self.terminal_step = self.reference_terminal_step = None
         self.visited_cells = set()
-        self.npc_path_tiles = np.zeros(8, dtype=float)
-        self.reference_npc_path_tiles = np.zeros(8, dtype=float)
-        self.latest_model_alive = np.ones(8, dtype=bool)
+        self.npc_path_tiles = np.zeros(ENTITY_SLOTS, dtype=float)
+        self.reference_npc_path_tiles = np.zeros(ENTITY_SLOTS, dtype=float)
+        self.latest_model_alive = np.ones(ENTITY_SLOTS, dtype=bool)
         self.event_counts, self.reference_event_counts = Counter(), Counter()
         self.respawn_count = self.reference_respawn_count = 0
         self.model_player_alive = self.reference_player_alive = True
@@ -381,7 +383,7 @@ class RolloutMonitor:
             self.turn_commands += int(abs(action[2]) > .1)
             self.fire_commands += int(action[3] >= .5)
             if self.terminal_step is None and (current[4] <= .0005 or
-                                               (not self.endless and current[88]*8 >= 7.99)):
+                                               (not self.endless and current[-2]*ENTITY_SLOTS >= ENTITY_SLOTS-.01)):
                 self.terminal_step = self.steps
             if reference_current is not None:
                 ref_distance = float(np.linalg.norm((np.asarray(reference_current)[:2]-np.asarray(reference_previous)[:2])*scale))
@@ -395,10 +397,10 @@ class RolloutMonitor:
                 self.reference_respawn_count += int(ref_revived.sum())
                 self.reference_player_alive = bool(reference_current[4] > .0005)
                 self.reference_event_counts['kill'] += int(round(max(0.,
-                    (reference_current[88]-reference_previous[88])*8)))
+                    (reference_current[-2]-reference_previous[-2])*ENTITY_SLOTS)))
                 self.reference_movement_steps += int(commanded and ref_distance > .005)
                 if self.reference_terminal_step is None and (reference_current[4] <= .0005 or
-                        (not self.endless and reference_current[88]*8 >= 7.99)):
+                        (not self.endless and reference_current[-2]*ENTITY_SLOTS >= ENTITY_SLOTS-.01)):
                     self.reference_terminal_step = self.steps
         return violations
 
@@ -412,7 +414,7 @@ class RolloutMonitor:
                              and len(self.visited_cells) >= min(6, max(2, self.requested_steps//30)))
         required_npcs = (self.reference_npc_path_tiles >= 1.) & self.latest_model_alive
         ratios = np.divide(self.npc_path_tiles, self.reference_npc_path_tiles,
-                           out=np.zeros(8), where=self.reference_npc_path_tiles > 1e-8)
+                           out=np.zeros(ENTITY_SLOTS), where=self.reference_npc_path_tiles > 1e-8)
         frozen_npcs = np.flatnonzero(required_npcs & (ratios < .1)).tolist()
         npc_response_pass = not frozen_npcs
         model_ended_early = self.terminal_step is not None and self.terminal_step < self.requested_steps

@@ -6,6 +6,8 @@ different outcomes. This runner never declares success from step counts alone.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import argparse
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -96,8 +98,8 @@ class MemoryData:
         self.grid = torch.as_tensor(grid, dtype=torch.long, device=device)[None]
         self.device, self.count, self.files = device, len(self.data["old"]), len(paths)
         self.positive = np.flatnonzero((self.data["hits"] >= 0) | (self.data["attacks"] > .5).any(-1))
-        old_alive = self.data["old"][:, 8:88].reshape(-1, 8, 10)[:, :, 5] > .5
-        new_alive = self.data["new"][:, 8:88].reshape(-1, 8, 10)[:, :, 5] > .5
+        old_alive = self.data["old"][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] > .5
+        new_alive = self.data["new"][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] > .5
         self.respawns = np.flatnonzero((~old_alive & new_alive).any(-1))
         self.sdf = torch.as_tensor(map_signed_distance(grid), device=device)[None, None]
 
@@ -127,9 +129,9 @@ def transition_losses(model, batch, map_features, teacher=None, teacher_features
     dt = 1 / model.config.simulation_hz
     losses["player_motion"] = F.smooth_l1_loss((result["state"][:, :2] - old[:, :2]) * (16 / (2.4 * dt)),
                                                (target[:, :2] - old[:, :2]) * (16 / (2.4 * dt)))
-    previous_entities = old[:, 8:88].reshape(-1, 8, 10)
-    target_entities = target[:, 8:88].reshape(-1, 8, 10)
-    predicted_entities = result["state"][:, 8:88].reshape(-1, 8, 10)
+    previous_entities = old[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    target_entities = target[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    predicted_entities = result["state"][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     continuing = (previous_entities[:, :, 5] > .5) & (target_entities[:, :, 5] > .5)
     movement = F.smooth_l1_loss((predicted_entities[:, :, :2] - previous_entities[:, :, :2]) * (16 / (1.2 * dt)),
                                 (target_entities[:, :, :2] - previous_entities[:, :, :2]) * (16 / (1.2 * dt)), reduction="none")
@@ -137,7 +139,7 @@ def transition_losses(model, batch, map_features, teacher=None, teacher_features
     if "spawn_logits" in result:
         revived = (previous_entities[:, :, 5] < .5) & (target_entities[:, :, 5] > .5)
         labels = (target_entities[:, :, 0] * 16).long().clamp(0, 15) + 16 * (target_entities[:, :, 1] * 16).long().clamp(0, 15)
-        values = F.cross_entropy(result["spawn_logits"].reshape(-1, 256), labels.reshape(-1), reduction="none").reshape(-1, 8)
+        values = F.cross_entropy(result["spawn_logits"].reshape(-1, 256), labels.reshape(-1), reduction="none").reshape(-1, ENTITY_SLOTS)
         losses["spawn"] = (values * revived).sum() / revived.sum().clamp_min(1)
     geometry = model.geometry(target, map_features)
     losses["depth"] = F.smooth_l1_loss(torch.log1p(geometry["depth"].clamp_min(0)), torch.log1p(batch["depth"].clamp_min(0)))

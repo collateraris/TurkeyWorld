@@ -1,4 +1,6 @@
 """Combat sampling uses Source supervision only, never predictor inputs."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 import hashlib
 import json
@@ -17,7 +19,7 @@ from turkeyworld.motion_curriculum import MotionCurriculum
 class CombatSamplingTests(unittest.TestCase):
     @staticmethod
     def payload(kind='idle', count=32, moving=True):
-        states = np.zeros((count+1, 90), dtype=np.float32)
+        states = np.zeros((count+1, STATE_DIM), dtype=np.float32)
         states[:, :2] = [2.5/16, 2.5/16]
         states[:, 3:6] = 1.
         states[:, 8:10] = [6.5/16, 2.5/16]
@@ -28,7 +30,7 @@ class CombatSamplingTests(unittest.TestCase):
             states[:, 0] += np.arange(count+1)*(.08/16)
         events = np.zeros((count, 4), np.float32)
         hits = np.full(count, -1, np.int64)
-        attacks = np.zeros((count, 8), np.float32)
+        attacks = np.zeros((count, ENTITY_SLOTS), np.float32)
         tilemap = np.zeros((16, 16), np.int8)
         tilemap[0] = tilemap[-1] = 1
         tilemap[:, 0] = tilemap[:, -1] = 1
@@ -39,13 +41,14 @@ class CombatSamplingTests(unittest.TestCase):
             events[index, 1] = 1.
             hits[index] = 0
         if kind == 'attack':
-            attacks[index, 7] = events[index, 3] = 1.
+            attacks[index, 0] = events[index, 3] = 1.
         if kind == 'death':
             states[index+1:, 13] = 0
             states[index+1:, 12] = 0
         if kind == 'spawn':
-            states[index+1:, 78:80] = [13.5/16, 13.5/16]
-            states[index+1:, 82:84] = [.6, 1.]
+            states[:, 12:14] = 0.
+            states[index+1:, 8:10] = [13.5/16, 13.5/16]
+            states[index+1:, 12:14] = [.6, 1.]
         if kind == 'wall_negative':
             tilemap[2, 4] = 1
         return {'states': states, 'actions': actions, 'events': events, 'hit_ids': hits,
@@ -82,7 +85,7 @@ class CombatSamplingTests(unittest.TestCase):
                 if name == 'death':
                     self.assertFalse(masks['hit'].any())
         payload = self.payload('attack')
-        payload['states'][5:, 88] = 1
+        payload['states'][5:, -2] = 1
         self.assertTrue(self.masks(payload)['attack'][4])
 
     def test_wall_negative_matches_real_source_shot_geometry_and_not_other_misses(self):
@@ -102,7 +105,7 @@ class CombatSamplingTests(unittest.TestCase):
         self.assertEqual(event['hit_id'], -1)
         states = np.stack([old, game.state_vector()])
         args = (states, action[None], game.event_vector(event)[None], np.asarray([-1]),
-                np.zeros((1, 8)), game.map.copy())
+                np.zeros((1, ENTITY_SLOTS)), game.map.copy())
         # The classifier neither steps nor renders the engine, even for walls.
         with patch.object(Game, 'step', side_effect=AssertionError('runtime oracle')),\
                 patch.object(Game, 'render', side_effect=AssertionError('RGB decode')):
@@ -263,7 +266,7 @@ class CombatSamplingTests(unittest.TestCase):
                 else:
                     if issue == 'declared_val': payload['split'] = np.asarray('val')
                     elif issue == 'nan': payload['states'][0, 0] = np.nan
-                    elif issue == 'hit_range': payload['hit_ids'][0] = 8
+                    elif issue == 'hit_range': payload['hit_ids'][0] = ENTITY_SLOTS
                     else: payload['dt'] = np.asarray(0.)
                     np.savez(path, **payload)
                 with self.assertRaises(ValueError): CombatSampling(data, 4)
@@ -312,18 +315,19 @@ class CombatSamplingTests(unittest.TestCase):
     def test_spawn_case_matches_actual_source_respawn_of_persistent_npc_slot(self):
         from turkeyworld.engine import Game
         game = Game(73, endless=True)
-        game.enemies[7].update(alive=False, hp=0., death_timer=game.RESPAWN_DELAY)
+        game.enemies[0].update(alive=False, hp=0., death_timer=game.RESPAWN_DELAY)
         old = game.state_vector()
         action = np.zeros(4, dtype=np.float32)
         event = game.step(action)
         new = game.state_vector()
-        self.assertEqual(old[83], 0.)
-        self.assertEqual(new[83], 1.)
-        self.assertGreater(new[82], 0.)
+        self.assertEqual(old[13], 0.)
+        self.assertEqual(new[13], 1.)
+        self.assertGreater(new[12], 0.)
+        self.assertEqual(game.enemies[0]['id'], 0)
         with patch.object(Game, 'step', side_effect=AssertionError('No runtime engine')),\
                 patch.object(Game, 'render', side_effect=AssertionError('No RGB')):
             masks = classify_combat(np.stack([old, new]), action[None], game.event_vector(event)[None],
-                np.asarray([event['hit_id']], np.int64), np.zeros((1, 8), np.float32), game.map)
+                np.asarray([event['hit_id']], np.int64), np.zeros((1, ENTITY_SLOTS), np.float32), game.map)
         np.testing.assert_array_equal(masks['spawn'], [True])
         self.assertFalse(masks['death'][0])
 
@@ -333,7 +337,8 @@ class CombatSamplingTests(unittest.TestCase):
             path = Path(data.episodes[0]['path'])
             for transition in (0, 4, 5, 7):
                 payload = self.payload('idle', count=8)
-                payload['states'][transition+1:, 82:84] = [.6, 1.]
+                payload['states'][:, 12:14] = 0.
+                payload['states'][transition+1:, 12:14] = [.6, 1.]
                 np.savez(path, **payload)
                 sampler = CombatSampling(data, 4)
                 self.assertEqual(sampler.counts['spawn'], 1)

@@ -1,4 +1,6 @@
 """Shared-codec world runner guards, profile hooks and frozen optimizer behavior."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -45,8 +47,8 @@ class VQWorldRunnerTests(unittest.TestCase):
             with patch('turkeyworld.train_vq_world.validate_frozen_codec', return_value=self.codec_info()):
                 experiment = LatentWorldExperiment(args)
             self.assertEqual(experiment.PROFILE, '500vq')
-            self.assertEqual(experiment.state['model_parameters']['teacher_total'], 504_857_752)
-            self.assertEqual(experiment.state['model_parameters']['target_student_total'], 22_475_096)
+            self.assertEqual(experiment.state['model_parameters']['teacher_total'], 503_825_084)
+            self.assertEqual(experiment.state['model_parameters']['target_student_total'], 21_847_868)
             self.assertTrue(experiment.state['codec_training']['frozen'])
             self.assertEqual(experiment.state['codec_training']['consecutive_passes'], 3)
             self.assertEqual(experiment.state['student_plan']['config']['renderer_codec'], 'vqgan')
@@ -68,7 +70,7 @@ class VQWorldRunnerTests(unittest.TestCase):
 
         with torch.device('meta'), patch.object(LatentFlowRenderer, 'load_codec', autospec=True, side_effect=load_codec):
             model = experiment.make_student_model()
-        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 22_475_096)
+        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 21_847_868)
         self.assertEqual(model.config.renderer_codec, 'vqgan')
         self.assertEqual((model.core.width, len(model.core.encoder.blocks), len(model.core.predictor.blocks)), (320, 4, 5))
         self.assertEqual(model.flow_renderer.steps, 4)
@@ -95,7 +97,7 @@ class VQWorldRunnerTests(unittest.TestCase):
         self.assertTrue(all(not parameter.requires_grad for parameter in model.flow_renderer.codec.parameters()))
         optimizer = torch.optim.AdamW(parent.parameters(), lr=1e-3, weight_decay=.1)
         before = {name: value.clone() for name, value in model.flow_renderer.codec.state_dict().items()}
-        state, base = torch.zeros(1, 90), torch.rand(1, 3, 128, 128)
+        state, base = torch.zeros(1, STATE_DIM), torch.rand(1, 3, 128, 128)
         state[:, 4] = 1.
         image = model.flow_renderer.sample(base, state)
         image.square().mean().backward()

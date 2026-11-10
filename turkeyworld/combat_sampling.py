@@ -6,6 +6,8 @@ indices in the caller's existing ordered training split.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections import Counter
 import hashlib
 import json
@@ -42,14 +44,14 @@ def _validated_labels(states, actions, events, hit_ids, attack_flags, tilemap, d
     arrays = [np.asarray(value) for value in (states, actions, events, hit_ids, attack_flags, tilemap)]
     states, actions, events, hit_ids, attack_flags, tilemap = arrays
     count = len(actions) if actions.ndim == 2 else 0
-    if (not count or actions.shape != (count, 4) or states.shape != (count+1, 90)
+    if (not count or actions.shape != (count, 4) or states.shape != (count+1, STATE_DIM)
             or events.shape != (count, 4) or hit_ids.shape != (count,)
-            or attack_flags.shape != (count, 8) or tilemap.shape != (16, 16)
+            or attack_flags.shape != (count, ENTITY_SLOTS) or tilemap.shape != (16, 16)
             or any(not np.issubdtype(value.dtype, np.number) and value.dtype != bool
                    or np.issubdtype(value.dtype, np.complexfloating) for value in arrays)
             or any(not np.isfinite(value).all() for value in arrays)
             or not np.issubdtype(hit_ids.dtype, np.integer)
-            or ((hit_ids < -1) | (hit_ids >= 8)).any()
+            or ((hit_ids < -1) | (hit_ids >= ENTITY_SLOTS)).any()
             or ((events < 0) | (events > 1)).any()
             or ((attack_flags < 0) | (attack_flags > 1)).any()
             or not math.isfinite(dt) or not 0 < dt <= .25):
@@ -79,13 +81,13 @@ def _wall_blocked_shots(states, misses, tilemap):
                 or tilemap[math.floor(y), math.floor(x)] != 0):
             continue
         sine, cosine = sine/length, cosine/length
-        entities = old[8:88].reshape(8, 10)
+        entities = old[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
         positions = entities[:, :2]*np.asarray([width, height])
         delta = positions-np.asarray([x, y])
         along = delta[:, 0]*cosine+delta[:, 1]*sine
         perpendicular = np.abs(delta[:, 0]*sine-delta[:, 1]*cosine)
         inside = ((positions >= 0) & (positions < [width, height])).all(1)
-        free = np.zeros(8, dtype=bool)
+        free = np.zeros(ENTITY_SLOTS, dtype=bool)
         free[inside] = tilemap[positions[inside, 1].astype(int), positions[inside, 0].astype(int)] == 0
         candidate = ((entities[:, 5] > .5) & (entities[:, 4] > 0) & free
                      & (along > 0) & (perpendicular < .25))
@@ -107,7 +109,7 @@ def classify_combat(states, actions, events, hit_ids, attack_flags, tilemap, dt=
         states, actions, events, hit_ids, attack_flags, tilemap, dt)
     shot, hit = events[:, 0] > .5, hit_ids >= 0
     miss = shot & ~hit
-    alive = states[:, 8:88].reshape(-1, 8, 10)[:, :, 5] > .5
+    alive = states[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] > .5
     return {'hit': hit, 'miss': miss, 'attack': (attack_flags > .5).any(1),
             'death': (alive[:-1] & ~alive[1:]).any(1),
             'spawn': (~alive[:-1] & alive[1:]).any(1),

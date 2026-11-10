@@ -1,4 +1,6 @@
 """Behavioral checks for continuous TBPTT, state-only data and checkpoints."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from contextlib import redirect_stdout
 from dataclasses import asdict
 import io
@@ -17,14 +19,15 @@ except ImportError:
 
 
 def make_state_episode(path, steps=8):
-    states = np.zeros((steps + 1, 90), dtype=np.float32)
+    states = np.zeros((steps + 1, STATE_DIM), dtype=np.float32)
     states[:, 0] = .2 + np.arange(steps + 1) * .001
     states[:, 1] = .2
     states[:, 3:6] = 1
-    states[:, -2] = 1  # all eight slots are corpses in this controlled fixture
+    states[:, -2] = 1  # The sole enemy is a corpse in this controlled fixture.
     states[:, -1] = np.arange(steps + 1) / 9000
-    for slot in range(8):
-        states[:, 8 + slot * 10:10 + slot * 10] = [.5, .5]
+    for slot in range(ENTITY_SLOTS):
+        start = GLOBAL_DIM+slot*ENTITY_DIM
+        states[:, start:start+2] = [.5, .5]
     actions = np.zeros((steps, 4), dtype=np.float32)
     actions[:, 0] = .5
     grid = np.zeros((16, 16), dtype=np.int8)
@@ -32,7 +35,7 @@ def make_state_episode(path, steps=8):
     grid[:, [0, -1]] = 1
     np.savez(path, states=states, actions=actions, events=np.zeros((steps, 4), np.float32),
              map=grid, hit_ids=np.full(steps, -1, np.int64),
-             attack_flags=np.zeros((steps, 8), np.float32), dt=np.asarray(1 / 30))
+             attack_flags=np.zeros((steps, ENTITY_SLOTS), np.float32), dt=np.asarray(1 / 30))
 
 
 @unittest.skipIf(torch is None, "Optional PyTorch dependency is not installed")
@@ -129,7 +132,7 @@ class StatefulTrainingTests(unittest.TestCase):
         grid = np.zeros((16, 16), np.int8)
         grid[:, 5] = 1
         sdf = torch.tensor(map_signed_distance(grid))[None, None]
-        state = torch.zeros(1, 90)
+        state = torch.zeros(1, STATE_DIM)
         state[0, :2] = torch.tensor([4.9 / 16, 4.5 / 16])
         state.requires_grad_()
         loss = collision_barrier(state, sdf)
@@ -144,7 +147,7 @@ class StatefulTrainingTests(unittest.TestCase):
             path = Path(directory) / "early_hit.npz"
             make_state_episode(path, steps=10)
             episode = load_episode(path)
-            episode.hit_ids[0] = 3
+            episode.hit_ids[0] = 0
             chosen, prefix, burn, sampling = choose_segment([episode], random.Random(3),
                 horizon=4, burn_in=32, event_fraction=1.)
             self.assertIs(chosen, episode)

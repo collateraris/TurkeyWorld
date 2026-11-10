@@ -1,6 +1,6 @@
 """Play a loaded neural world checkpoint without ground-truth corrections.
 
-The reference engine supplies a map and initial 90-value state exactly once.
+The reference engine supplies a map and initial single-enemy20-value state once.
 V-JEPA models additionally encode one initial source RGB frame before rollout.
 Every subsequent transition and base image comes from the loaded world model.
 No trained checkpoints are bundled. A successful run proves executable shapes,

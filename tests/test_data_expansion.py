@@ -33,7 +33,9 @@ class DataExpansionTests(unittest.TestCase):
                         np.testing.assert_array_equal(game.state_vector(), episode["states"][index+1])
                         np.testing.assert_array_equal([float(event[key]) for key in EVENT_NAMES], episode["events"][index])
                     if policy == "attack":
-                        self.assertGreater(int(episode["events"][1:, 3].sum()), 1)
+                        # One enemy can attack once in this32/30-second clip;
+                        # the delayed event must still be after context.
+                        self.assertEqual(int(episode["events"][1:, 3].sum()), 1)
                     if policy == "kill":
                         self.assertGreater(int(episode["events"][1:, 2].sum()), 0)
                     if policy == "perturbed":

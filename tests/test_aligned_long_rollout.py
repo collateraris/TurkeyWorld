@@ -1,4 +1,6 @@
 """Independent long-rollout auxiliary memory and checkpoint continuation."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from copy import deepcopy
 from types import SimpleNamespace
 import unittest
@@ -12,10 +14,10 @@ except ImportError:
 
 
 def episode(steps=9):
-    states = np.zeros((steps + 1, 90), np.float32)
+    states = np.zeros((steps + 1, STATE_DIM), np.float32)
     states[:, 0] = .2 + np.arange(steps + 1) * .001
     states[:, 1], states[:, 3:6] = .2, 1
-    enemies = states[:, 8:88].reshape(steps + 1, 8, 10)
+    enemies = states[:, GLOBAL_DIM:-2].reshape(steps + 1, ENTITY_SLOTS, ENTITY_DIM)
     enemies[:, :, :2], enemies[:, :, 4:6] = [.5, .6], [.6, 1]
     enemies[:4, 0, 4:6] = 0
     grid = np.zeros((16, 16), np.int8)
@@ -23,9 +25,9 @@ def episode(steps=9):
     events = np.zeros((steps, 4), np.float32)
     events[1, :2], events[2, 3] = 1, 1
     hits = np.full(steps, -1, np.int64)
-    hits[1] = 2
-    attacks = np.zeros((steps, 8), np.float32)
-    attacks[2, 2] = 1
+    hits[1] = 0
+    attacks = np.zeros((steps, ENTITY_SLOTS), np.float32)
+    attacks[2, 0] = 1
     return {"states": states, "actions": np.zeros((steps, 4), np.float32), "events": events,
             "hit_ids": hits, "attack_flags": attacks, "map": grid, "dt": 1 / 30,
             "initial_rgb": np.full((8, 8, 3), 64, np.uint8),
@@ -44,9 +46,9 @@ class AlignedLongRolloutTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.motion = torch.nn.Parameter(torch.tensor(.003))
-                self.hit = torch.nn.Linear(2, 9)
-                self.attack = torch.nn.Linear(2, 8)
-                self.spawn = torch.nn.Linear(2, 2048)
+                self.hit = torch.nn.Linear(2, ENTITY_SLOTS+1)
+                self.attack = torch.nn.Linear(2, ENTITY_SLOTS)
+                self.spawn = torch.nn.Linear(2, ENTITY_SLOTS*256)
                 self.event = torch.nn.Linear(2, 4)
                 self.config = SimpleNamespace(architecture="vjepa2_ac", simulation_hz=30., image_size=8, endless=True)
                 self.inputs, self.outputs, self.render_states, self.initial_images = [], [], [], []
@@ -66,7 +68,7 @@ class AlignedLongRolloutTests(unittest.TestCase):
                 result = {"state": result_state, "memory": memory + 1 + state[:, :1, None] * .1,
                           "features": value[:, :1].expand(-1, 128),
                           "target_logits": self.hit(value), "attack_logits": self.attack(value),
-                          "spawn_logits": self.spawn(value).reshape(-1, 8, 256), "event_logits": self.event(value)}
+                          "spawn_logits": self.spawn(value).reshape(-1, ENTITY_SLOTS, 256), "event_logits": self.event(value)}
                 for name in ("target_logits", "attack_logits", "spawn_logits", "event_logits"):
                     if result[name].requires_grad:
                         result[name].retain_grad()

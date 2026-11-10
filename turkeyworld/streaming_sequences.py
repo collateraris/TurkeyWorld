@@ -1,6 +1,8 @@
 """Bounded LRU storage used by SequenceData(mode='stream')."""
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections import OrderedDict
 from collections.abc import Mapping
 import math
@@ -57,9 +59,9 @@ def _small_fields(saved, path, expected_split):
         raise ValueError(f"{path.name}: refusing to mix dataset splits {declared}/{expected_split}")
     episode = {key: np.asarray(saved[key]) for key in REQUIRED if key != "frames"}
     count = len(episode["actions"])
-    if (count < 1 or episode["states"].shape != (count+1, 90) or episode["actions"].shape != (count, 4)
+    if (count < 1 or episode["states"].shape != (count+1, STATE_DIM) or episode["actions"].shape != (count, 4)
             or episode["events"].shape != (count, 4) or episode["hit_ids"].shape != (count,)
-            or episode["attack_flags"].shape != (count, 8) or episode["map"].shape != (16, 16)):
+            or episode["attack_flags"].shape != (count, ENTITY_SLOTS) or episode["map"].shape != (16, 16)):
         raise ValueError(f"{path.name}: incompatible state/action/event schema")
     dt = float(saved["dt"]) if "dt" in saved.files else 1/30
     if not math.isfinite(dt) or not 0 < dt <= .25:
@@ -73,9 +75,9 @@ def _small_fields(saved, path, expected_split):
     if "respawn_flags" in saved.files:
         episode["respawn_flags"] = np.asarray(saved["respawn_flags"], dtype=np.float32)
     else:
-        alive = episode["states"][:, 8:88].reshape(-1, 8, 10)[:, :, 5] >= .5
+        alive = episode["states"][:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] >= .5
         episode["respawn_flags"] = (~alive[:-1]&alive[1:]).astype(np.float32)
-    if episode["respawn_flags"].shape != (count, 8):
+    if episode["respawn_flags"].shape != (count, ENTITY_SLOTS):
         raise ValueError(f"{path.name}: expected respawn_flags [T,8]")
     episode.update(path=str(path), dt=dt)
     return episode, declared, count

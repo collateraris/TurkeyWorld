@@ -1,4 +1,6 @@
 """Stop-gradient EMA targets and episode-aligned image/action supervision."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import io
 from pathlib import Path
 import tempfile
@@ -90,13 +92,13 @@ class JEPATrainingUtilsTests(unittest.TestCase):
         values = np.arange(transitions + 1, dtype=np.float32)
         frames = np.broadcast_to((values + episode_id * 40).astype(np.uint8)[:, None, None, None],
                                  (transitions + 1, 16, 16, 3)).copy()
-        states = np.zeros((transitions + 1, 90), dtype=np.float32)
+        states = np.zeros((transitions + 1, STATE_DIM), dtype=np.float32)
         states[:, 0], states[:, 1] = values, episode_id
         actions = np.broadcast_to(values[:-1, None], (transitions, 4)).copy()
         np.savez_compressed(path, frames=frames, states=states, actions=actions,
                             events=np.zeros((transitions, 4), np.float32),
                             hit_ids=np.full(transitions, -1, np.int64),
-                            attack_flags=np.zeros((transitions, 8), np.float32),
+                            attack_flags=np.zeros((transitions, ENTITY_SLOTS), np.float32),
                             map=np.full((16, 16), episode_id, np.int8),
                             dt=np.asarray(1 / 30), split=np.asarray(split))
 

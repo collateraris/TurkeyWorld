@@ -1,4 +1,6 @@
 """Qualified-codec migration retains dynamics and valid optimizer progress."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 import tempfile
@@ -71,8 +73,8 @@ class VQWorldTests(unittest.TestCase):
         with torch.device('meta'):
             model = NeuralWorldModel(config)
         self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), STUDENT_VQ_PARAMETERS)
-        self.assertEqual(STUDENT_VQ_PARAMETERS, 22_475_096)
-        self.assertEqual(TEACHER_VQ_PARAMETERS, 504_857_752)
+        self.assertEqual(STUDENT_VQ_PARAMETERS, 21_847_868)
+        self.assertEqual(TEACHER_VQ_PARAMETERS, 503_825_084)
         self.assertEqual(WorldModelConfig().renderer_codec, 'pixel')
         self.assertEqual(WorldModelConfig().vjepa_encoder_depth, 0)
 

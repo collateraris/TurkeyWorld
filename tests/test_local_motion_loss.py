@@ -1,3 +1,5 @@
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import unittest
 
 import torch
@@ -9,11 +11,11 @@ from turkeyworld.spatial_entities import entity_motion_basis, local_to_world
 
 class LocalMotionLossTests(unittest.TestCase):
     def state(self):
-        value = torch.zeros(2, 90)
+        value = torch.zeros(2, STATE_DIM)
         value[:, :2] = .25
         value[:, 3] = 1
         value[:, 4] = 1
-        entities = value[:, 8:88].reshape(2, 8, 10)
+        entities = value[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)
         entities[:, :, :2] = .5
         entities[:, :, 4:6] = 1
         return value
@@ -22,28 +24,28 @@ class LocalMotionLossTests(unittest.TestCase):
         previous = self.state()
         action = torch.tensor([[1., 0., .7, 0.], [1., 0., -.3, 0.]])
         basis = entity_motion_basis(previous, action=action)
-        local = torch.zeros(2, 9, 2)
+        local = torch.zeros(2, (ENTITY_SLOTS+1), 2)
         local[:, :, 0] = .001
         movement = local_to_world(local, basis)
         target = previous.clone()
         target[:, :2] += movement[:, 0]
-        target[:, 8:88].reshape(2, 8, 10)[:, :, :2] += movement[:, 1:]
+        target[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2] += movement[:, 1:]
         predicted = previous.clone().requires_grad_()
         player, npc = motion_error_parts(predicted, previous, target, local_motion=True, action=action)
         self.assertGreater(float(player), 0)
         self.assertGreater(float(npc), 0)
         (player+npc).backward()
         self.assertGreater(float(predicted.grad[:, :2].abs().sum()), 0)
-        self.assertTrue(bool((predicted.grad[:, 8:88].reshape(2, 8, 10)[:, :, :2].abs().sum(-1) > 0).all()))
+        self.assertTrue(bool((predicted.grad[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2].abs().sum(-1) > 0).all()))
         first, second = motion_error_parts(target, previous, target, local_motion=True, action=action)
         self.assertEqual(float(first+second), 0)
 
     def test_respawn_teleport_is_excluded_without_hiding_player_motion_error(self):
         previous = self.state()
-        previous[:, 8:88].reshape(2, 8, 10)[:, :, 5] = 0
+        previous[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] = 0
         target = previous.clone()
-        target[:, 8:88].reshape(2, 8, 10)[:, :, :2] = .9
-        target[:, 8:88].reshape(2, 8, 10)[:, :, 5] = 1
+        target[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2] = .9
+        target[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] = 1
         target[:, :2] += .001
         player, npc = motion_error_parts(previous, previous, target, local_motion=True)
         self.assertGreater(float(player), 0)
@@ -54,13 +56,13 @@ class LocalMotionLossTests(unittest.TestCase):
         torch.manual_seed(17)
         predicted = previous+torch.randn_like(previous)*.001
         target = previous+torch.randn_like(previous)*.001
-        target[:, 8:88].reshape(2, 8, 10)[:, :, 5] = 1
+        target[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)[:, :, 5] = 1
         player, npc = motion_error_parts(predicted, previous, target)
         expected_player = F.smooth_l1_loss((predicted[:, :2]-previous[:, :2])*200,
                                           (target[:, :2]-previous[:, :2])*200)
-        old = previous[:, 8:88].reshape(2, 8, 10)
-        a = predicted[:, 8:88].reshape(2, 8, 10)
-        b = target[:, 8:88].reshape(2, 8, 10)
+        old = previous[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)
+        a = predicted[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)
+        b = target[:, GLOBAL_DIM:-2].reshape(2, ENTITY_SLOTS, ENTITY_DIM)
         expected_npc = F.smooth_l1_loss((a[:, :, :2]-old[:, :, :2])*400,
                                        (b[:, :, :2]-old[:, :, :2])*400)
         torch.testing.assert_close(player, expected_player, rtol=0, atol=0)

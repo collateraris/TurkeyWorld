@@ -1,4 +1,6 @@
 """Own-prediction TBPTT, checkpoint continuation and return-memory labels."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from copy import deepcopy
 from pathlib import Path
 import tempfile
@@ -15,18 +17,19 @@ from turkeyworld.vjepa_long_rollout import (CURRICULUM_SCHEDULE, curriculum_hori
 
 
 def episode(steps=70):
-    states = np.zeros((steps + 1, 90), np.float32)
+    states = np.zeros((steps + 1, STATE_DIM), np.float32)
     states[:, 0] = .2 + np.arange(steps + 1) * .001
     states[:, 1] = .2
     states[:, 3:6] = 1
-    for slot in range(8):
-        states[:, 8 + 10 * slot:10 + 10 * slot] = [.4 + slot * .04, .6]
+    for slot in range(ENTITY_SLOTS):
+        start = GLOBAL_DIM+slot*ENTITY_DIM
+        states[:, start:start+2] = [.4 + slot * .04, .6]
     grid = np.zeros((16, 16), np.int8)
     grid[[0, -1]] = 1
     grid[:, [0, -1]] = 1
     return {"states": states, "actions": np.zeros((steps, 4), np.float32),
             "events": np.zeros((steps, 4), np.float32), "hit_ids": np.full(steps, -1, np.int64),
-            "attack_flags": np.zeros((steps, 8), np.float32), "map": grid, "dt": 1 / 30,
+            "attack_flags": np.zeros((steps, ENTITY_SLOTS), np.float32), "map": grid, "dt": 1 / 30,
             "initial_rgb": np.full((8, 8, 3), 64, np.uint8)}
 
 
@@ -126,19 +129,22 @@ class VJEPALongRolloutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not fit"):
             train_autoregressive_episode(CounterWorld(), episode(100), horizon=9000)
 
-    def test_memory_probe_catches_hp_loss_identity_swaps_and_false_resurrection(self):
+    def test_memory_probe_catches_hp_position_loss_and_false_resurrection(self):
         states = episode(3)["states"]
         states[:, 12] = .25
         states[:, 13] = 1
-        visible = np.zeros((4, 8), np.float32)
+        visible = np.zeros((4, ENTITY_SLOTS), np.float32)
         visible[[0, 3], 0] = 1
         predicted = states.copy()
         predicted[1:, 12] = .60
-        predicted[-1, 8:10] = states[-1, 18:20]
+        predicted[-1, GLOBAL_DIM:GLOBAL_DIM+2] = [.8, .6]
         report = object_memory_metrics(predicted, states, visible)
         self.assertAlmostEqual(report["reappearance_hp_mae"], 35, places=4)
         self.assertEqual(report["reappearance_samples"], 1)
-        self.assertEqual(report["reappearance_object_id_accuracy"], 0.)
+        # One persistent actor cannot swap identity with another slot. Its
+        # wrong recalled position remains measurable independently of ID.
+        self.assertEqual(report["reappearance_object_id_accuracy"], 1.)
+        self.assertAlmostEqual(report["reappearance_position_error_tiles"], 6.4, places=4)
         states[:, 13] = 0
         predicted = states.copy()
         predicted[-1, 13] = 1
@@ -206,7 +212,7 @@ class VJEPALongRolloutTests(unittest.TestCase):
             states.append(game.state_vector())
             events.append([float(event[name]) for name in EVENT_NAMES])
             hits.append(event["hit_id"])
-            attacking = np.zeros(8, np.float32)
+            attacking = np.zeros(ENTITY_SLOTS, np.float32)
             attacking[event["attacker_ids"]] = 1
             attacks.append(attacking)
         data = dict(states=np.asarray(states), actions=np.asarray(actions), events=np.asarray(events, np.float32),

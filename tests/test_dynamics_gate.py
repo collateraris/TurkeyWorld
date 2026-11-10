@@ -1,4 +1,6 @@
 """Short dynamics cannot qualify from silent events or empty source coverage."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -22,15 +24,15 @@ class DynamicsGateTests(unittest.TestCase):
     @staticmethod
     def data(folder, stationary=False, empty_events=False):
         from turkeyworld.jepa_training_utils import SequenceData
-        states = np.zeros((6, 90), np.float32)
+        states = np.zeros((6, STATE_DIM), np.float32)
         states[:, 0] = (1.82 + (0 if stationary else np.arange(6) * .08)) / 16
         states[:, 1], states[:, 3:6] = 2.5 / 16, 1
-        enemies = states[:, 8:88].reshape(6, 8, 10)
+        enemies = states[:, GLOBAL_DIM:-2].reshape(6, ENTITY_SLOTS, ENTITY_DIM)
         enemies[:, :, :2], enemies[:, :, 4:6] = 5.5 / 16, [.6, 1]
         actions = np.zeros((5, 4), np.float32)
         actions[:, 0] = 0 if stationary else 1
         actions[:, 2], actions[:, 3] = [0, 0, 1, 0, 1], [0, 1, 0, 1, 0]
-        events, attacks = np.zeros((5, 4), np.float32), np.zeros((5, 8), np.float32)
+        events, attacks = np.zeros((5, 4), np.float32), np.zeros((5, ENTITY_SLOTS), np.float32)
         if not empty_events:
             events[:, 0] = events[:, 1] = actions[:, 3]
             events[:, 3], attacks[:, 0] = actions[:, 2], actions[:, 2]
@@ -66,7 +68,7 @@ class DynamicsGateTests(unittest.TestCase):
                 if collision:
                     predicted[:, 0] = .01
                 events = state.new_zeros(len(state), 4)
-                attacks = torch.zeros(len(state), 8, device=state.device, dtype=torch.bool)
+                attacks = torch.zeros(len(state), ENTITY_SLOTS, device=state.device, dtype=torch.bool)
                 if not silent:
                     events[:, 1] = action[:, 3]
                     events[:, 3] = action[:, 2]

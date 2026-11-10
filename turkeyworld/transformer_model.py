@@ -6,6 +6,8 @@ This module contains no Conv2d, engine import, or ground-truth visibility call.
 """
 from __future__ import annotations
 
+from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+
 import math
 import torch
 from torch import nn
@@ -13,7 +15,7 @@ from torch.nn import functional as F
 
 from .camera import sample_camera_frustum, object_camera_features, project_sprite_bounds
 
-STATE_DIM, ENTITY_DIM, ENTITY_SLOTS = 90, 10, 8
+STATE_DIM, ENTITY_DIM, ENTITY_SLOTS = 20, 10, 1
 FEATURE_DIM, OBJECT_CAMERA_DIM = 128, 18
 RAY_COUNT, RAY_SAMPLES, MAX_DEPTH = 32, 64, 24.0
 
@@ -211,7 +213,7 @@ class CameraTransformerWorldModel(nn.Module):
             self.player_token = nn.Sequential(nn.Linear(10, width), nn.GELU(), nn.Linear(width, width))
             self.action_token = nn.Linear(4, width)
             self.memory_token = nn.Linear(hidden, width)
-            self.scene_type_embeddings = nn.Parameter(torch.randn(11, width) * .02)
+            self.scene_type_embeddings = nn.Parameter(torch.randn(ENTITY_SLOTS+3, width) * .02)
             self.scene_blocks = nn.ModuleList([TokenReadBlock(width, heads) for _ in range(layers)])
             self.recurrent = nn.GRUCell(width, hidden)
             self.delta_head = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, STATE_DIM))
@@ -222,8 +224,8 @@ class CameraTransformerWorldModel(nn.Module):
                 self.event_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 4))
             else:
                 from .models import initialize_event_heads
-                self.hit_target_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 9))
-                self.attack_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, 8))
+                self.hit_target_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, ENTITY_SLOTS+1))
+                self.attack_head = nn.Sequential(nn.Linear(hidden, 128), nn.SiLU(), nn.Linear(128, ENTITY_SLOTS))
                 initialize_event_heads(self.hit_target_head, self.attack_head)
             self.feature_head = nn.Sequential(nn.Linear(hidden, FEATURE_DIM), nn.SiLU())
             nn.init.zeros_(self.delta_head[-1].weight)
@@ -283,7 +285,7 @@ class CameraTransformerWorldModel(nn.Module):
 
     def transition(self, state, action, map_features, memory, projection):
         if state.ndim != 2 or state.shape[-1] != STATE_DIM:
-            raise ValueError("state must be [B,90]")
+            raise ValueError("state must be [B,20]")
         if action.shape != (state.shape[0], 4):
             raise ValueError("action must be [B,4]")
         authoritative_state = state.float() if self.config.transition_mode == "event_v1" else state

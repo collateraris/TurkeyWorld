@@ -1,4 +1,6 @@
 """Own-model state collection remains separate from oracle-labelled branches."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import json
 from pathlib import Path
 import tempfile
@@ -66,10 +68,10 @@ class ModelVisitedCollectionTests(unittest.TestCase):
                 self.assertEqual(int(data['visited_step']), 8)
                 np.testing.assert_allclose(data['model_visited_state'], model.outputs[-1][0].numpy(), rtol=0, atol=0)
                 np.testing.assert_allclose(data['states'][0], data['model_visited_state'], rtol=0, atol=2e-6)
-                self.assertEqual(data['states'].shape, (7, 90))
+                self.assertEqual(data['states'].shape, (7, STATE_DIM))
                 self.assertEqual(data['frames'].shape, (7, 128, 128, 3))
                 self.assertEqual(data['depth'].shape, (7, 32))
-                self.assertEqual(data['visibility'].shape, (7, 8))
+                self.assertEqual(data['visibility'].shape, (7, ENTITY_SLOTS))
                 self.assertFalse(bool(data['future_oracle_feedback']))
                 self.assertEqual(int(data['model_state_repairs']), 0)
 

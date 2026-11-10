@@ -1,4 +1,4 @@
-"""175M/500M teacher CFM and22.48M student RF sharing one frozen VQGAN."""
+"""175M/500M teacher CFM and21.85M single-enemy student RF sharing one frozen VQGAN."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 import torch
 
+from .structured_state import ENTITY_SLOTS, STATE_DIM
 from .models import NeuralWorldModel, WorldModelConfig
 from .power_guard import KeepAwake
 from .train_500m import MassiveExperiment, build_parser
@@ -247,7 +248,8 @@ class LatentWorldExperiment(MassiveExperiment):
         result = {'teacher_size': self.teacher_size, 'teacher_parameters': self.teacher_parameter_count(),
                   'teacher_config_fingerprint': fingerprint}
         if getattr(self, 'spatial_entities', False):
-            result.update(spatial_entities=True, spatial_entity_count=9)
+            result.update(spatial_entities=True, spatial_entity_count=ENTITY_SLOTS+1,
+                          enemy_slots=ENTITY_SLOTS, state_dim=STATE_DIM)
         if getattr(self, 'spatial_combat', False):
             result['spatial_combat'] = True
         if getattr(self, 'game_training_v5', False):

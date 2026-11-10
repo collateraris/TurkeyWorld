@@ -5,6 +5,8 @@ cohorts stay separate; event-enriched averages are not population estimates.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,10 +116,10 @@ def _measure(result, batch, context, metrics, hz, endless, game_training_v5=Fals
     if not all(bool(torch.isfinite(value).all()) for value in (predicted, logits, attack_logits)):
         raise FloatingPointError('Nonfinite state or combat heads')
     size = len(previous)
-    old, expected, actual = [value[:, 8:88].reshape(size, 8, 10) for value in (previous, target, predicted)]
+    old, expected, actual = [value[:, GLOBAL_DIM:-2].reshape(size, ENTITY_SLOTS, ENTITY_DIM) for value in (previous, target, predicted)]
     old_alive, next_alive = old[:, :, 5] >= .5, expected[:, :, 5] >= .5
     revived, continuing = ~old_alive & next_alive, old_alive & next_alive
-    labels = torch.where(hit_ids < 0, 8, hit_ids).long()
+    labels = torch.where(hit_ids < 0, ENTITY_SLOTS, hit_ids).long()
     target_class = logits.argmax(-1)
     metrics.counts['transitions'] += size
     metrics.counts['hit_positives'] += int((hit_ids >= 0).sum())
@@ -144,7 +146,7 @@ def _measure(result, batch, context, metrics, hz, endless, game_training_v5=Fals
             metrics.binary('event_accepted_'+name, result['events'][:, index] >= .5, events[:, index] >= .5)
     # Genuine source legal-shot opportunities; unshootable/dead slots are excluded.
     killable = old_alive & (old[:, :, 4] > 0) & (old[:, :, 4] <= SHOT_DAMAGE+1e-6) & (events[:, :1] >= .5)
-    slot = torch.arange(8, device=previous.device)[None]
+    slot = torch.arange(ENTITY_SLOTS, device=previous.device)[None]
     deaths = old_alive & ~next_alive
     metrics.binary('npc_death_head_on_killable', (target_class[:, None] == slot)[killable], deaths[killable])
     metrics.binary('npc_death_accepted_on_killable', (actual[:, :, 5] < .5)[killable], deaths[killable])
@@ -162,7 +164,7 @@ def _measure(result, batch, context, metrics, hz, endless, game_training_v5=Fals
             metrics.add('spawn_ce_on_revived', spawn_logits.new_empty(0))
             metrics.weighted('spawn_ce_on_revived', statistics['spawn_sum']/max(1, count), count)
         else:
-            ce = F.cross_entropy(spawn_logits.reshape(-1, 256), tile_labels.flatten(), reduction='none').reshape(size, 8)
+            ce = F.cross_entropy(spawn_logits.reshape(-1, 256), tile_labels.flatten(), reduction='none').reshape(size, ENTITY_SLOTS)
             metrics.add('spawn_ce_on_revived', ce[revived])
         metrics.add('spawn_raw_top1_tile_accuracy', (spawn_logits.argmax(-1) == tile_labels)[revived])
         positions = result['spawn_positions'].float()
@@ -174,7 +176,7 @@ def _measure(result, batch, context, metrics, hz, endless, game_training_v5=Fals
     else:
         metrics.counts['missing_spawn_head_transitions'] += size
     deltas = [torch.cat([(value[:, :2]-previous[:, :2])[:, None],
-                         value[:, 8:88].reshape(size, 8, 10)[:, :, :2]-old[:, :, :2]], 1)*16
+                         value[:, GLOBAL_DIM:-2].reshape(size, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2]-old[:, :, :2]], 1)*16
               for value in (predicted, target)]
     error = deltas[0]-deltas[1]
     basis = entity_motion_basis(previous, action=action, dt=1/hz)
@@ -194,7 +196,7 @@ def _measure(result, batch, context, metrics, hz, endless, game_training_v5=Fals
             metrics.attack_class_sums[name][1] += int(terms[f'attack_{name}_count'])
     valid = old_alive & ~result.get('respawn_flags', torch.zeros_like(old_alive)).bool()
     own_shot = result['shot'].reshape(-1, 1) > .5
-    denominators = {'events': size*4, 'target': size, 'attack': size*8,
+    denominators = {'events': size*4, 'target': size, 'attack': size*ENTITY_SLOTS,
         'damage_npc': int(valid.sum()), 'damage_player': int((previous[:, 4] > 0).sum()),
         'death_npc': int((valid & (old[:, :, 4] <= SHOT_DAMAGE+1e-6) & own_shot).sum())}
     for name in denominators:

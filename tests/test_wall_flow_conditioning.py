@@ -1,4 +1,6 @@
 """Immutable raw-map wall tokens condition both velocity nets without an oracle."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import copy
 from dataclasses import asdict
 import unittest
@@ -11,11 +13,11 @@ from turkeyworld.vqgan import VQGAN
 
 
 def state(batch=1):
-    value = torch.zeros(batch, 90)
+    value = torch.zeros(batch, STATE_DIM)
     value[:, :2] = torch.tensor([.2, .35])
     value[:, 3:6] = 1
-    npc = value[:, 8:88].reshape(batch, 8, 10)
-    npc[:, :, 0] = torch.linspace(.4, .8, 8)
+    npc = value[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
+    npc[:, :, 0] = torch.linspace(.4, .8, ENTITY_SLOTS)
     npc[:, :, 1] = .4
     npc[:, :, 4] = .6; npc[:, :, 5] = 1
     return value
@@ -58,7 +60,7 @@ class WallFlowConditioningTests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(2)
 
-    def test_default_keeps_old_keys_values_and_standalone_nine_branch_needs_no_map(self):
+    def test_default_keeps_old_keys_values_and_standalone_entity_branch_needs_no_map(self):
         torch.manual_seed(846)
         legacy = renderer(enabled=False)
         torch.manual_seed(846)

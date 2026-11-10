@@ -3,11 +3,16 @@
 English | [Русский](README_RU.md)
 
 TurkeyWorld contains a first-person reference game and an experimental neural
-world model. The current run trains **a new VQGAN, learned x4 upscaler, 175M
-teacher world model, neural renderer and GAN from scratch**, using new native
-**32×32** game data. Playback is **neural RGB32 → learned SR128 → bilinear512**.
+world model. The active configuration has **one persistent enemy**,
+a **20-value state** and **two participant conditions: player + NPC**. All
+conditions and losses use that one enemy. Single-enemy staged training is running
+in `training_runs/staged_single_20261110`; its first optimizer update is saved.
+The locally trained VQGAN and SR remain frozen. Native **32×32** playback is
+**neural RGB32 → learned SR128 → bilinear512**.
 
-The new run has started; the dashboard reports its actual stage. **Training
+The [staged curriculum](#staged-game-curriculum) is active. The
+eight-enemy/90-value corpus, checkpoints and measurements below are explicitly
+historical and do not describe the new one-enemy configuration. **Training
 completion, image similarity and 15 seconds of correct autonomous gameplay
 are separate results.** Fifteen seconds remains a target. A saved checkpoint does
 not establish that result; future artifact names below do not mean those
@@ -37,15 +42,22 @@ not pretrained world, codec, SR or image-generator weights.
 
 Controls: **WASD** to move, **Q/E or left/right arrows** to turn, **Space or left
 mouse button** to fire, **Esc** to exit. **R** restarts the reference game.
-Simulation runs at 30Hz. The default game has unlimited ammunition, eight
-persistent enemy slots, respawns after three seconds and cumulative kills.
+Simulation runs at 30Hz. The revised game has unlimited ammunition and one
+persistent enemy slot. Respawn uses a simple game-time cycle without hashing;
+kills remain cumulative.
 Player death ends the session. `--classic` selects the finite-enemy mode.
 This command uses the original engine and classical display resizing; neural
 playback is a separate command below.
 
-## Current data
+## Historical eight-enemy data
 
-The new corpus is in `training_runs/fresh32_128k_20261109/data`.
+New one-enemy/20-value data has been collected in
+`training_runs/staged_single_20261110/data_v2` for the four-stage curriculum.
+The archived 128k corpus below contains eight enemies/90-value states and must
+not be loaded into the new profile. Current stage counts come from the staged
+manifest and dashboard `current_data`, rather than these historical totals.
+
+The archived eight-enemy corpus is in `training_runs/fresh32_128k_20261109/data`.
 
 | Split | Clips | Transitions per clip | Total transitions |
 |---|---:|---:|---:|
@@ -66,8 +78,8 @@ clip has 33 observations and 32 controls: action `t` belongs to transition
 `state[t] → state[t+1]`. NPZ files also contain maps, events, hit/attack/spawn
 labels and initialization metadata. No long episodes are included here.
 
-The current corpus is already prepared. Its reproducible collection command
-is shown below; repeat it only to validate/resume the same data plan:
+The old corpus was prepared with the following historical command. It is not
+a command for regenerating the new one-enemy corpus in that same directory:
 
 ```powershell
 & $twPython -m turkeyworld.data_expansion training_runs/fresh32_128k_20261109/data `
@@ -84,9 +96,13 @@ The controller pins 4,000 training filenames in
 uses only this immutable membership. Training samples windows with replacement:
 optimizer updates are not counts of unique examples or full dataset epochs.
 
-## Train codec, SR and world
+## Historical initial codec, SR and world run
 
-The controller runs one GPU training worker at a time. Active configuration:
+The following command and launch history describe the earlier eight-enemy
+pipeline. Current one-enemy commands are in the
+[staged curriculum](#staged-game-curriculum) section. VQGAN/SR are reused frozen.
+
+The earlier controller runs one GPU training worker at a time. Its last configuration:
 microbatch 16 and accumulation 1, effective batch 16,
 target 15 seconds / 450 steps:
 
@@ -196,7 +212,7 @@ metadata. Plateau/stop reasons remain separate from reaching 0.90. Monitoring us
 the independent page http://127.0.0.1:8766/ after its local server is started;
 Teacher progress stays on 8765. Parallel GPU training depends on available VRAM.
 
-## Nine-participant spatial extension
+## Historical nine-participant spatial extension
 
 The optional `spatial_entities` profile encodes the player and eight persistent
 NPC IDs as nine spatial tokens: position, camera-relative forward/side offsets,
@@ -226,7 +242,7 @@ Training on 29-step clips does not establish 450-step training or qualification.
 The real GPU probe completed the 29-step, batch 21 forward/backward/sampler update
 with 15.75 GiB peak allocated memory; it does not qualify autonomous gameplay.
 
-## Spatial combat, spawn and renderer conditioning
+## Historical eight-enemy combat, spawn and renderer conditioning
 
 The optional `spatial_combat` extension requires `spatial_entities`. Migration
 completed at optimizer step 147; training resumed with the extension enabled,
@@ -273,7 +289,7 @@ phase and `loss_protocol`; a missing field is “—”, never an invented zero.
 This extension does not qualify the **15-second / 450-step** target or change
 the selected SR result: clean mean SSIM **0.852550**, below its 0.90 goal.
 
-## Training improvements V5
+## Training improvements V5: eight-enemy baseline history
 
 V5 is **active: training resumed from checkpoint 725 and completed update 726
 was verified**, including generator/discriminator optimizer and EMA counters.
@@ -337,7 +353,96 @@ new parameters start without moments. Patch resizing does not promise identical
 rendered outputs. V4 and V5 have different objectives: their raw loss totals
 cannot be compared directly; use matching-protocol held-out measurements.
 
-## Architecture and execution
+## Staged game curriculum
+
+The **one-enemy** staged curriculum is running in
+`training_runs/staged_single_20261110`. Checkpoint update **1** is verified:
+one optimizer update, 16 fragments, accumulation 1 and no pending microsteps.
+Its source is the archived eight-enemy checkpoint **818**. Compatible model
+weights were transferred with changed state/head shapes checked separately;
+the changed schema started **new Adam and discriminator states**. New global
+step numbering starts at 0 with the **5,182 updates remaining** from the prior
+6,000-update budget. The configuration stays **batch16 × accumulation1 = effective16**. VQGAN and
+the selected SR remain frozen. Every newly collected stage uses the 20-value
+state and at most one NPC; the earlier 90-value recordings are not replay data.
+The current Teacher has **180,071,125 parameters**. A production CUDA probe with
+batch 16 and horizon 29 passed all four backward paths in 38.6 seconds, using
+11,919 MiB peak memory; this probe does not establish gameplay quality.
+
+The audited dataset is `training_runs/staged_single_20261110/data_v2`:
+
+| Stage | Train | Validation |
+|---|---:|---:|
+| Navigation | 1,000 clips / 32,000 transitions | 64 clips / 2,048 transitions |
+| Static NPC | 32,000 independent images | 2,048 independent images |
+| Moving NPC | 2,000 clips / 64,000 transitions | 64 clips / 2,048 transitions |
+| Full game | 64 clips / 28,864 transitions | 32 clips / 14,432 transitions |
+
+The full-game recordings have 451 continuous transitions after a valid seeded
+initial pose, without resets or health repair. Static images have no motion
+targets and are not counted as world transitions. The collection command is:
+
+```powershell
+& $twPython -m turkeyworld.staged_data `
+  --root training_runs/staged_single_20261110/data_v2 `
+  --navigation-clips 1000 --static-clips 1000 --moving-clips 2000 `
+  --val-clips 64 --full-train-clips 64 --full-val-clips 32 `
+  --full-frames 451 --workers 4
+```
+
+For this prepared run, `curriculum_plan.json`, `training_ready.json` and the
+transferred `checkpoints/single_enemy_initial.pt` already exist. To resume the
+standalone trainer after its existing worker has stopped:
+
+```powershell
+& $twPython -m turkeyworld.train_staged_world `
+  --run-dir training_runs/staged_single_20261110 `
+  --source training_runs/staged_single_20261110/checkpoints/single_enemy_initial.pt `
+  --curriculum-manifest training_runs/staged_single_20261110/curriculum_plan.json `
+  --sr-checkpoint training_runs/sr32x4_quality_20261109/checkpoints/sr_for_game.pt `
+  --device cuda --batch 16 --gradient-accumulation-steps 1 `
+  --target-seconds 15 --updates 5182 --cache-mb 128
+```
+
+The exact active arguments are also saved in the run's `launch_command.json`.
+Request a checkpointed stop by creating `stop_training` in this run directory;
+wait until its supervisor and worker exit, then remove that marker before
+resuming. Restart this staged runner, rather than the historical `fresh_pipeline`.
+
+The four stages are navigation with no active NPC → one static NPC with
+**renderer-only** training → one moving NPC → the full game with that same
+single NPC. Static-image supervision does not invent world-motion targets.
+Source version `deterministic_enemy_v4_single_spawn_cycle` uses
+`anchor=(game_tick//90)%8`, scanning to the next legal anchor when necessary.
+This is a three-second phase and a 24-second spawn cycle without hashes; eight
+anchors are possible locations for the **one enemy**, not eight enemy slots.
+The neural spawn head still learns its choice; agreement is measured separately.
+Earlier-stage replay is configured at **25%** when earlier-stage data is
+available; the dashboard reports the actual fraction and current stage's
+train/validation selection separately.
+
+Held-out stage gates run every **100 optimizer updates**, with an initial
+baseline allowed. Preview cadence stays **10 updates**. A failed gate keeps
+training the same stage; elapsed time alone does not promote it. The local
+dashboard at **http://127.0.0.1:8765/** lists all four stages, their current
+states and passed step/time, plus each phase's measured metrics, thresholds
+and report history. The last gate step and its age remain visible while a new
+report is pending.
+
+The initial navigation gate at step 0 **did not pass**: mean player drift was
+0.8395 tile, RGB SSIM 0.4649 and one collision window was observed. Navigation
+training continues; these baseline measurements are not completion evidence.
+
+Passing an intermediate gate does not qualify gameplay. The independent final
+target remains **15 seconds / 450 autonomous transitions**, and only an explicit
+successful full-game check can set `staged_curriculum.final_qualified=true`.
+There is no promised completion time or automatic Student start.
+
+## Historical eight-enemy architecture and execution
+
+This section documents the archived 90-value/eight-NPC model. The current
+single-NPC profile uses 20 state values and two participant tokens; actual
+post-transfer parameter counts will come from the new run, not this table.
 
 The world adapts principles from the
 [official V-JEPA2 repository](https://github.com/facebookresearch/vjepa2) and

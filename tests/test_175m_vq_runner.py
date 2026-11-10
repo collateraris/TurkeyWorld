@@ -37,13 +37,13 @@ class Teacher175RunnerTests(unittest.TestCase):
         self.assertEqual(experiment.PROFILE, '175vq')
         self.assertEqual(experiment.PARAMETER_TARGET, 175_000_000)
         self.assertEqual(experiment.state['teacher_size'], '175m_vqgan')
-        self.assertEqual(experiment.state['model_parameters']['teacher_total'], 174_910_616)
+        self.assertEqual(experiment.state['model_parameters']['teacher_total'], 173_877_948)
         self.assertNotIn('ema_target_total', experiment.state['model_parameters'])
         self.assertEqual(experiment.state['training_protocol']['effective_batch_size'], 16)
         self.assertEqual(experiment.global_step, 0)
         self.assertEqual(experiment.state['student_plan']['status'], 'pending')
-        self.assertEqual(experiment.state['student_plan']['parameters'], 22_475_096)
-        self.assertEqual(experiment.state['initialization']['teacher_parameters'], 174_910_616)
+        self.assertEqual(experiment.state['student_plan']['parameters'], 21_847_868)
+        self.assertEqual(experiment.state['initialization']['teacher_parameters'], 173_877_948)
 
     def test175_requires_fresh_mode_instead_of_silently_migrating500m(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -8,6 +8,8 @@ can persist the returned resume state at any completed chunk boundary.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 from collections.abc import Mapping
 from contextlib import nullcontext
 import hashlib
@@ -75,9 +77,9 @@ def _episode_arrays(episode):
     events = np.asarray(_field(episode, "events"), dtype=np.float32)
     grid = np.asarray(_field(episode, "grid", _field(episode, "map")), dtype=np.int64)
     count = len(actions)
-    if (count < 1 or states.shape != (count + 1, 90) or actions.shape != (count, 4)
+    if (count < 1 or states.shape != (count + 1, STATE_DIM) or actions.shape != (count, 4)
             or events.shape != (count, 4) or grid.shape != (16, 16)):
-        raise ValueError("Expected states[T+1,90], actions/events[T,4], map[16,16]")
+        raise ValueError("Expected states[T+1,STATE_DIM], actions/events[T,4], map[16,16]")
     if not all(np.isfinite(value).all() for value in (states, actions, events)):
         raise ValueError("Episode contains non-finite values")
     labels = {"states": states, "actions": actions}
@@ -162,7 +164,7 @@ def frustum_visibility(states):
     It is not a neural runtime input or an engine visibility correction.
     """
     states = torch.as_tensor(states, dtype=torch.float32)
-    entities = states[:, 8:88].reshape(-1, 8, 10)
+    entities = states[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     delta = entities[:, :, :2] - states[:, None, :2]
     sine, cosine = states[:, 2:3], states[:, 3:4]
     forward = delta[:, :, 0] * cosine + delta[:, :, 1] * sine
@@ -180,13 +182,13 @@ def object_memory_metrics(predicted_states, target_states, visibility=None):
     """
     predicted = torch.as_tensor(predicted_states, dtype=torch.float32).detach().cpu()
     targets = torch.as_tensor(target_states, dtype=torch.float32).detach().cpu()
-    if predicted.shape != targets.shape or predicted.ndim != 2 or predicted.shape[1] != 90:
-        raise ValueError("Expected matching [T+1,90] predicted/target states")
+    if predicted.shape != targets.shape or predicted.ndim != 2 or predicted.shape[1] != STATE_DIM:
+        raise ValueError("Expected matching [T+1,STATE_DIM] predicted/target states")
     visible = frustum_visibility(targets) if visibility is None else torch.as_tensor(visibility).cpu() > .5
-    if visible.shape != (len(targets), 8):
+    if visible.shape != (len(targets), ENTITY_SLOTS):
         raise ValueError("Visibility must align as [T+1,8]")
-    p = predicted[:, 8:88].reshape(-1, 8, 10)
-    t = targets[:, 8:88].reshape(-1, 8, 10)
+    p = predicted[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    t = targets[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     seen = visible.to(torch.int64).cummax(0).values.bool()
     reappeared = visible[1:] & ~visible[:-1] & seen[:-1]
     hidden = ~visible[1:] & seen[:-1]
@@ -198,10 +200,10 @@ def object_memory_metrics(predicted_states, target_states, visibility=None):
     target_respawns = (t[:-1, :, 5] < .5) & (t[1:, :, 5] >= .5)
     distances = torch.cdist(p[1:, :, :2], t[1:, :, :2]) * 16
     target_distances = torch.cdist(t[1:, :, :2], t[1:, :, :2]) * 16
-    target_distances = target_distances + torch.eye(8)[None] * 1000
+    target_distances = target_distances + torch.eye(ENTITY_SLOTS)[None] * 1000
     unambiguous = target_distances.min(-1).values > .10
     identity_mask = reappeared & unambiguous
-    associated = distances.argmin(-1) == torch.arange(8)[None]
+    associated = distances.argmin(-1) == torch.arange(ENTITY_SLOTS)[None]
 
     def mean(value, mask):
         return float(value[mask].float().mean()) if bool(mask.any()) else None
@@ -238,21 +240,21 @@ def autoregressive_losses(result, previous_prediction, target_previous, target_n
     elif "events" in result:
         losses["events"] = F.mse_loss(result["events"].float(), target_events)
     if "target_logits" in result:
-        labels = torch.where(hit_ids < 0, torch.full_like(hit_ids, 8), hit_ids)
-        weights = prediction.new_ones(9)
+        labels = torch.where(hit_ids < 0, torch.full_like(hit_ids, ENTITY_SLOTS), hit_ids)
+        weights = prediction.new_ones(ENTITY_SLOTS+1)
         weights[-1] = .2
         losses["target"] = F.cross_entropy(result["target_logits"].float(), labels,
                                             weight=weights, reduction="none").mean()
     if "attack_logits" in result:
         losses["attack"] = F.binary_cross_entropy_with_logits(result["attack_logits"].float(), attack_flags,
-                                                               pos_weight=prediction.new_full((8,), 4.))
+                                                               pos_weight=prediction.new_full((ENTITY_SLOTS,), 4.))
     dt = 1 / simulation_hz
     losses["motion"] = F.smooth_l1_loss((prediction[:, :2] - previous_prediction[:, :2]) * (16 / (2.4 * dt)),
                                        (target_next[:, :2] - target_previous[:, :2]) * (16 / (2.4 * dt)))
-    pred = prediction[:, 8:88].reshape(-1, 8, 10)
-    prev = previous_prediction[:, 8:88].reshape(-1, 8, 10)
-    old = target_previous[:, 8:88].reshape(-1, 8, 10)
-    target = target_next[:, 8:88].reshape(-1, 8, 10)
+    pred = prediction[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    prev = previous_prediction[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    old = target_previous[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
+    target = target_next[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
     continuing = (old[:, :, 5] >= .5) & (target[:, :, 5] >= .5)
     npc_motion = F.smooth_l1_loss((pred[:, :, :2] - prev[:, :, :2]) * (16 / (1.2 * dt)),
                                 (target[:, :, :2] - old[:, :, :2]) * (16 / (1.2 * dt)), reduction="none")
@@ -265,7 +267,7 @@ def autoregressive_losses(result, previous_prediction, target_previous, target_n
         revived = (old[:, :, 5] < .5) & (target[:, :, 5] >= .5)
         tiles = (target[:, :, :2] * 16).long().clamp(0, 15)
         labels = tiles[:, :, 0] + 16 * tiles[:, :, 1]
-        spawn = F.cross_entropy(result["spawn_logits"].float().reshape(-1, 256), labels.flatten(), reduction="none").reshape(-1, 8)
+        spawn = F.cross_entropy(result["spawn_logits"].float().reshape(-1, 256), labels.flatten(), reduction="none").reshape(-1, ENTITY_SLOTS)
         losses["spawn"] = (spawn * revived).sum() / revived.sum().clamp_min(1)
     if signed_distance is not None:
         losses["collision"] = collision_barrier(prediction, signed_distance)
@@ -325,7 +327,7 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
     signed_distance = torch.as_tensor(map_signed_distance(grid), device=device)[None, None] if collision_weight else None
     visibility = _field(episode, "visibility")
     visible = frustum_visibility(states) if visibility is None else torch.as_tensor(visibility) > .5
-    if visible.shape != (count + 1, 8):
+    if visible.shape != (count + 1, ENTITY_SLOTS):
         raise ValueError("Visibility must align with all episode states")
     visible_device = visible.to(device)
     frames = _field(episode, "frames")
@@ -354,7 +356,7 @@ def train_autoregressive_episode(model, episode, optimizer=None, *, horizon=None
             raise ValueError('Aligned rollout resume is missing its separate auxiliary memory')
         auxiliary_memory = _tree_map(resume.get('auxiliary_memory'), lambda value: value.to(device).detach())
         history = [torch.as_tensor(resume["predicted_states"], device="cpu").detach().clone()]
-        if current.shape != (1, 90) or history[0].shape != (offset + 1, 90):
+        if current.shape != (1, STATE_DIM) or history[0].shape != (offset + 1, STATE_DIM):
             raise ValueError("Invalid carried state/history dimensions")
         sums.update(resume.get("metric_sums", {}))
         if "rng_torch" in resume:
@@ -586,7 +588,7 @@ class ReturnCombatPolicy:
 def _source_visibility(game):
     p = game.player
     c, s = math.cos(p["angle"]), math.sin(p["angle"])
-    result = np.zeros(8, np.float32)
+    result = np.zeros(ENTITY_SLOTS, np.float32)
     for i, enemy in enumerate(game.enemies):
         dx, dy = enemy["x"] - p["x"], enemy["y"] - p["y"]
         forward, lateral = dx * c + dy * s, -dx * s + dy * c
@@ -633,7 +635,7 @@ def generate_return_episode(path, *, seed=73, split="train", steps=512, hz=30.,
         actions.append(action)
         events.append([float(bool(event[name])) for name in EVENT_NAMES])
         hits.append(event.get("hit_id", -1))
-        attacking = np.zeros(8, np.float32)
+        attacking = np.zeros(ENTITY_SLOTS, np.float32)
         attacking[event.get("attacker_ids", [])] = 1.
         attacks.append(attacking)
         respawns.append((~old_alive & np.array([enemy["alive"] for enemy in game.enemies])).astype(np.float32))

@@ -1,4 +1,6 @@
 """Requested-duration qualification retains the independent legacy 300s gate."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
@@ -110,7 +112,7 @@ class RequestedDurationEvaluatorTests(unittest.TestCase):
 
             def transition(self, state, action, map_features, memory):
                 result = state.clone()
-                result[:, 89] += 1 / 9000
+                result[:, -1] += 1 / 9000
                 return {"state": result, "memory": memory + 1,
                         "features": state.new_zeros(len(state), 1),
                         "events": state.new_zeros(len(state), 4)}
@@ -126,7 +128,7 @@ class RequestedDurationEvaluatorTests(unittest.TestCase):
         monitor.observe = Mock(return_value=[])
         if not integrity:
             monitor.first_failure = {"code": "wall_tunneling"}
-        initial = np.zeros(90, dtype=np.float32)
+        initial = np.zeros(STATE_DIM, dtype=np.float32)
         initial[3:6] = 1.
         tape = {"map": np.zeros((16, 16), dtype=np.uint8), "initial_state": initial,
                 "actions": np.zeros((2, 4), dtype=np.float32), "reference_states": None,

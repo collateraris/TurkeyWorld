@@ -1,4 +1,6 @@
 """A frozen episode manifest cannot silently grow with the streamed corpus."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -13,13 +15,13 @@ except ImportError:
 
 
 def write_episode(path, identity=0, count=8, split='train'):
-    states = np.zeros((count+1, 90), np.float32)
+    states = np.zeros((count+1, STATE_DIM), np.float32)
     states[:, 0] = np.arange(count+1)
     states[:, 1] = identity
     np.savez_compressed(path, frames=np.full((count+1, 16, 16, 3), identity, np.uint8),
         states=states, actions=np.zeros((count, 4), np.float32),
         events=np.zeros((count, 4), np.float32), hit_ids=np.full(count, -1, np.int64),
-        attack_flags=np.zeros((count, 8), np.float32), map=np.zeros((16, 16), np.int8),
+        attack_flags=np.zeros((count, ENTITY_SLOTS), np.float32), map=np.zeros((16, 16), np.int8),
         split=np.asarray(split), dt=np.asarray(1/30))
 
 

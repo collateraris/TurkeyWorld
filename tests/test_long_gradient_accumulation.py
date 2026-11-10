@@ -1,4 +1,6 @@
 """TBPTT accumulation means, safe checkpoint boundaries and unchanged own states."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -42,14 +44,14 @@ class LongGradientAccumulationTests(unittest.TestCase):
         return World()
 
     def episode(self, steps):
-        states = np.zeros((steps+1, 90), np.float32)
+        states = np.zeros((steps+1, STATE_DIM), np.float32)
         states[:, 0] = .3+np.arange(steps+1)*.01
         states[:, 1], states[:, 3:6] = .2, 1.
         grid = np.zeros((16, 16), np.int8)
         grid[[0, -1], :] = grid[:, [0, -1]] = 1
         return dict(states=states, actions=np.zeros((steps, 4), np.float32),
             events=np.zeros((steps, 4), np.float32), hit_ids=np.full(steps, -1, np.int64),
-            attack_flags=np.zeros((steps, 8), np.float32), map=grid, dt=1/30,
+            attack_flags=np.zeros((steps, ENTITY_SLOTS), np.float32), map=grid, dt=1/30,
             initial_rgb=np.full((8, 8, 3), 64, np.uint8))
 
     @staticmethod

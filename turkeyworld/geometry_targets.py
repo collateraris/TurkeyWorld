@@ -11,6 +11,8 @@ their corpses remain visible in the game.
 """
 from __future__ import annotations
 
+from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
+
 import math
 import numpy as np
 
@@ -87,8 +89,8 @@ def build_geometry_targets(tilemap, state_vector, rays=32, max_depth=24.0,
     if not np.isfinite(tilemap).all():
         raise ValueError("tilemap must contain finite tile IDs")
     state = np.asarray(state_vector, dtype=np.float64)
-    if state.shape != (90,) or not np.isfinite(state).all():
-        raise ValueError("state_vector must contain exactly 90 finite values")
+    if state.shape != (STATE_DIM,) or not np.isfinite(state).all():
+        raise ValueError("state_vector must contain exactly STATE_DIM finite values")
 
     height, width = tilemap.shape
     x, y = state[:2] * (width, height)
@@ -98,13 +100,13 @@ def build_geometry_targets(tilemap, state_vector, rays=32, max_depth=24.0,
         sine, cosine = sine / heading_norm, cosine / heading_norm
     else:
         sine, cosine = 0.0, 1.0
-    entities = state[8:88].reshape(8, 10)
+    entities = state[GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
     delta = entities[:, :2] * (width, height) - (x, y)
     forward = delta[:, 0] * cosine + delta[:, 1] * sine
     right = -delta[:, 0] * sine + delta[:, 1] * cosine
     result = {
         "depth": np.full(rays, .02, dtype=np.float32),
-        "visibility": np.zeros(8, dtype=np.float32),
+        "visibility": np.zeros(ENTITY_SLOTS, dtype=np.float32),
         "entity_forward": forward.astype(np.float32),
     }
     if not (0 <= x < width and 0 <= y < height):
@@ -124,7 +126,7 @@ def build_geometry_targets(tilemap, state_vector, rays=32, max_depth=24.0,
     object_x, object_y = entities[:, 0] * width, entities[:, 1] * height
     inside = ((object_x >= 0) & (object_x < width) &
               (object_y >= 0) & (object_y < height))
-    free = np.zeros(8, dtype=bool)
+    free = np.zeros(ENTITY_SLOTS, dtype=bool)
     free[inside] = tilemap[object_y[inside].astype(int), object_x[inside].astype(int)] == 0
     candidate = (forward > .12) & (np.abs(centre_screen_x) <= 1) & free
 

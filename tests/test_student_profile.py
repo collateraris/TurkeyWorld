@@ -1,4 +1,6 @@
-"""Selected 22.48M student capacity, causal gameplay and real RF4 rendering."""
+"""Selected 21.85M single-enemy student capacity, causal gameplay and real RF4 rendering."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -35,7 +37,7 @@ class StudentProfileTests(unittest.TestCase):
                 chunk=16, plateau_patience=6, plateau_delta=.005, teacher_until_quality=True)
             experiment = MassiveExperiment(args)
             self.assertEqual(experiment.state['student_plan']['status'], 'pending')
-            self.assertEqual(experiment.state['model_parameters']['target_student_total'], 22475013)
+            self.assertEqual(experiment.state['model_parameters']['target_student_total'], 21847785)
             self.assertNotIn('student_total', experiment.state['model_parameters'])
             self.assertNotIn('training_steps', experiment.state['student_plan'])
 
@@ -48,12 +50,12 @@ class StudentProfileTests(unittest.TestCase):
             first = MassiveExperiment(args)
             plan = first.state['student_plan']
             plan.update(status='training', last_phase='student_vjepa500_distill', last_phase_step=73,
-                        actual_parameters=22475013, training_steps=0)
+                        actual_parameters=21847785, training_steps=0)
             (Path(directory)/'student_plan.json').write_text(json.dumps(plan), encoding='utf-8')
             resumed = MassiveExperiment(args)
             self.assertEqual(resumed.state['student_plan']['status'], 'training')
             self.assertEqual(resumed.state['student_plan']['last_phase_step'], 73)
-            self.assertEqual(resumed.state['student_plan']['actual_parameters'], 22475013)
+            self.assertEqual(resumed.state['student_plan']['actual_parameters'], 21847785)
             self.assertNotIn('training_steps', resumed.state['student_plan'])
 
     def test_selected_profile_and_all_used_component_counts_are_exact(self):
@@ -68,16 +70,16 @@ class StudentProfileTests(unittest.TestCase):
             self.assertEqual(getattr(config, name), value, name)
         with torch.device('meta'):
             model = NeuralWorldModel(config)
-        self.assertEqual(STUDENT_22M_PARAMETERS, 22_475_013)
+        self.assertEqual(STUDENT_22M_PARAMETERS, 21_847_785)
         self.assertEqual(parameter_counts(model)['world_total'], STUDENT_22M_PARAMETERS)
         self.assertEqual(sum(parameter.numel() for parameter in model.core.encoder.parameters()), 10_110_400)
-        self.assertEqual(sum(parameter.numel() for parameter in model.core.predictor.parameters()), 6_402_560)
-        self.assertEqual(sum(parameter.numel() for parameter in model.flow_renderer.parameters()), 3_040_896)
+        self.assertEqual(sum(parameter.numel() for parameter in model.core.predictor.parameters()), 6_380_160)
+        self.assertEqual(sum(parameter.numel() for parameter in model.flow_renderer.parameters()), 3_027_456)
         self.assertEqual((model.core.memory_tokens, model.core.width), (264, 320))
         self.assertTrue(all(parameter.requires_grad for parameter in model.parameters()))
         self.assertFalse(any('discriminator' in name or 'ema' in name for name, _ in model.named_parameters()))
 
-    def test_teacher_and_legacy_student_configuration_remain_unchanged(self):
+    def test_teacher_and_legacy_student_width_depth_stay_fixed_with_one_enemy(self):
         from turkeyworld.models import NeuralWorldModel, WorldModelConfig, parameter_counts
         from turkeyworld.student_profile import student_config_22m
         from turkeyworld.vjepa2_ac import VJEPA500_PROFILE
@@ -93,8 +95,8 @@ class StudentProfileTests(unittest.TestCase):
             teacher_model = NeuralWorldModel(teacher)
             legacy = NeuralWorldModel(WorldModelConfig(kind='student', architecture='vjepa2_ac', image_size=128,
                 endless=True, renderer_mode='rectified_flow', flow_steps=4))
-        self.assertEqual(parameter_counts(teacher_model)['world_total'], 500_044_741)
-        self.assertEqual(parameter_counts(legacy)['world_total'], 11_747_077)
+        self.assertEqual(parameter_counts(teacher_model)['world_total'], 499_012_073)
+        self.assertEqual(parameter_counts(legacy)['world_total'], 11_244_393)
 
     def test_expanded_runner_selects_the_new_student_without_changing_legacy_default(self):
         from turkeyworld.train_250m import ExpandedExperiment

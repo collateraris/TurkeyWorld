@@ -1,4 +1,6 @@
 """Teacher advancement requires checkpoint-backed, held-out visual qualification."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from argparse import Namespace
 import contextlib
 import io
@@ -27,7 +29,7 @@ def report(passed=True, fingerprint="fixed-panel"):
 class TinyData:
     def __init__(self):
         self.count, self.files = 4, 2
-        self.data = {"new": np.zeros((4, 90), dtype=np.float32),
+        self.data = {"new": np.zeros((4, STATE_DIM), dtype=np.float32),
                      "images": np.zeros((4, 16, 16, 3), dtype=np.uint8)}
         self.data["new"][:, 3:5] = 1
         self.grid = torch.zeros(1, 16, 16, dtype=torch.long)

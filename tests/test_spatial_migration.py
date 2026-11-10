@@ -137,7 +137,7 @@ class SpatialMigrationTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(backup.read_bytes()).hexdigest(), hashes[path])
             marker = json.loads((root/'initialization.json').read_text())
             self.assertTrue(marker['spatial_entities'])
-            self.assertEqual(marker['spatial_entity_count'], 9)
+            self.assertEqual(marker['spatial_entity_count'], 2)
             self.assertEqual(marker['teacher_config_fingerprint'], config_fingerprint(torch.load(main, weights_only=False)['config']))
             mtimes = {path: path.stat().st_mtime_ns for path in (main, origin, root/'initialization.json')}
             self.assertEqual(migrate_spatial_run(root, sr_checkpoint=sr), report)

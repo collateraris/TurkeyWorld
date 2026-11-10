@@ -1,4 +1,6 @@
 """Actual native32 aligned world/CFM/Heun/GAN gradients without RGB resizing."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -52,9 +54,9 @@ class Native32WorldTests(unittest.TestCase):
         model.flow_renderer.load_codec({'codec_config': codec.get_config(), 'model': codec.state_dict()})
         frozen = {name: value.clone() for name, value in model.flow_renderer.codec.state_dict().items()}
         frames = torch.rand(1, 4, 3, 32, 32)
-        states = torch.zeros(1, 4, 90)
+        states = torch.zeros(1, 4, STATE_DIM)
         states[:, :, :2], states[:, :, 3:6] = .5, 1.
-        entities = states[:, :, 8:88].reshape(1, 4, 8, 10)
+        entities = states[:, :, GLOBAL_DIM:-2].reshape(1, 4, ENTITY_SLOTS, ENTITY_DIM)
         entities[:, :, :, :2] = torch.tensor([.7, .6])
         entities[:, :, :, 4:6] = torch.tensor([.6, 1.])
         masks = torch.zeros(1, 2, 1, 32, 32)
@@ -63,7 +65,7 @@ class Native32WorldTests(unittest.TestCase):
             'target_frames': frames[:, 2:], 'previous_states': states[:, 1:-1],
             'target_states': states[:, 2:], 'actions': torch.ones(1, 2, 4),
             'events': torch.zeros(1, 2, 4), 'hit_ids': torch.full((1, 2), -1, dtype=torch.long),
-            'attack_flags': torch.zeros(1, 2, 8), 'target_object_masks': masks,
+            'attack_flags': torch.zeros(1, 2, ENTITY_SLOTS), 'target_object_masks': masks,
             'map': torch.zeros(1, 16, 16, dtype=torch.long)}
         loss, metrics, endpoint = aligned_short_rollout_loss(model, EMATargetEncoder(model.core.encoder), batch,
             object_region_boost=4., detach_flow_base=True)

@@ -1,4 +1,6 @@
 """Partial sprite overlap remains available to neural appearance conditioning."""
+
+from turkeyworld.engine import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
 import io
 import unittest
 from unittest.mock import patch
@@ -11,8 +13,8 @@ except ImportError:
     torch = None
 
 
-# Exact camera and NPC XY from preview340's first three predicted states.
-# These compact coordinates reproduce the bug without checkpoints or datasets.
+# Archived camera/NPC coordinate pairs from preview340. Each pair is now an
+# independent one-NPC scene, preserving the regression cases without eight actors.
 PREVIEW340 = [
     ([.7859240770339966, .5858250260353088, .4283638000488281, .9036063551902771],
      [[.8294886946678162, .5660632848739624], [.7578681111335754, .5468447804450989],
@@ -40,12 +42,13 @@ class SpriteRenderVisibilityTests(unittest.TestCase):
 
     @staticmethod
     def preview_states():
-        states = torch.zeros(3, 90)
+        cases = [(camera, xy) for camera, positions in PREVIEW340 for xy in positions]
+        states = torch.zeros(len(cases), STATE_DIM)
         states[:, 4:6] = 1.
-        for index, (camera, xy) in enumerate(PREVIEW340):
+        for index, (camera, xy) in enumerate(cases):
             states[index, :4] = torch.tensor(camera)
-            entities = states[index, 8:88].reshape(8, 10)
-            entities[:, :2] = torch.tensor(xy)
+            entities = states[index, GLOBAL_DIM:-2].reshape(ENTITY_SLOTS, ENTITY_DIM)
+            entities[0, :2] = torch.tensor(xy)
             entities[:, 4:6] = torch.tensor([.6, 1.])
         return states
 
@@ -54,42 +57,44 @@ class SpriteRenderVisibilityTests(unittest.TestCase):
         from turkeyworld.transformer_model import CameraGeometry
         states = self.preview_states()
         old = object_camera_features(states)
-        self.assertEqual(old["features"].shape, (3, 8, 18))
+        self.assertEqual(old["features"].shape, (len(states), ENTITY_SLOTS, 18))
         self.assertFalse(bool(old["frustum"].any()))
         projected = project_sprite_bounds(states)
-        self.assertTrue(bool(projected["sprite_frustum"].any(-1).all()))
+        per_preview = projected["sprite_frustum"].reshape(len(PREVIEW340), -1)
+        self.assertTrue(bool(per_preview.any(-1).all()))
+        self.assertTrue(bool((~projected["sprite_frustum"]).any()))
         geometry = CameraGeometry(32)
         with torch.no_grad():
             geometry.visibility_head[-1].weight.zero_()
             geometry.visibility_head[-1].bias.fill_(-100.)
         with patch("turkeyworld.engine.Game.render", side_effect=AssertionError("Runtime renderer oracle")), \
              patch("turkeyworld.geometry_targets.build_geometry_targets", side_effect=AssertionError("Visibility oracle")):
-            result = geometry(states, torch.randn(3, 32, 16, 16))
+            result = geometry(states, torch.randn(len(states), 32, 16, 16))
         self.assertFalse(bool(result["frustum"].any()))
-        torch.testing.assert_close(result["visibility_logits"], torch.full((3, 8), -20.), rtol=0, atol=0)
-        torch.testing.assert_close(result["visibility"], torch.zeros(3, 8), rtol=0, atol=0)
+        torch.testing.assert_close(result["visibility_logits"], torch.full((len(states), ENTITY_SLOTS), -20.), rtol=0, atol=0)
+        torch.testing.assert_close(result["visibility"], torch.zeros(len(states), ENTITY_SLOTS), rtol=0, atol=0)
         self.assertTrue(bool((result["render_gate"][result["sprite_frustum"]] >= .5).all()))
         torch.testing.assert_close(result["render_gate"][~result["sprite_frustum"]],
                                    torch.full_like(result["render_gate"][~result["sprite_frustum"]], .05))
 
     def test_clipped_edge_near_plane_behind_and_corpse_rectangles_are_finite(self):
         from turkeyworld.camera import object_camera_features, project_sprite_bounds
-        state = torch.zeros(1, 90)
+        state = torch.zeros(8, STATE_DIM)
         state[:, :6] = torch.tensor([2.5/16, 2.5/16, 0., 1., 1., 1.])
-        entities = state[:, 8:88].reshape(1, 8, 10)
-        entities[0, :, :2] = torch.tensor([[2.63, 2.5], [2.5, 2.5], [2., 2.5], [3.5, 12.5],
+        entities = state[:, GLOBAL_DIM:-2].reshape(8, ENTITY_SLOTS, ENTITY_DIM)
+        entities[:, 0, :2] = torch.tensor([[2.63, 2.5], [2.5, 2.5], [2., 2.5], [3.5, 12.5],
                                           [3.5, 3.3], [3.5, 1.7], [5.5, 2.5], [5.5, 2.5]])/16
         entities[:, :, 4:6] = torch.tensor([.6, 1.])
-        entities[:, 7, 4:6] = 0.  # Same square projection for the corpse atlas.
+        entities[7, 0, 4:6] = 0.  # Same square projection for the corpse atlas.
         result = project_sprite_bounds(state)
-        self.assertEqual(result["sprite_frustum"].tolist(), [[True, False, False, False, True, True, True, True]])
+        self.assertEqual(result["sprite_frustum"][:, 0].tolist(), [True, False, False, False, True, True, True, True])
         self.assertTrue(bool(torch.isfinite(result["unclipped_boxes"]).all()))
         self.assertTrue(bool(((result["boxes"] >= 0) & (result["boxes"] <= 1)).all()))
-        self.assertFalse(bool(object_camera_features(state)["frustum"][0, 4:6].any()))
-        self.assertEqual(float(result["boxes"][0, 4, 2]), 1.)
-        self.assertEqual(float(result["boxes"][0, 5, 0]), 0.)
-        torch.testing.assert_close(result["boxes"][0, 6], result["boxes"][0, 7])
-        torch.testing.assert_close(result["boxes"][0, 1:4], torch.zeros(3, 4))
+        self.assertFalse(bool(object_camera_features(state)["frustum"][4:6, 0].any()))
+        self.assertEqual(float(result["boxes"][4, 0, 2]), 1.)
+        self.assertEqual(float(result["boxes"][5, 0, 0]), 0.)
+        torch.testing.assert_close(result["boxes"][6, 0], result["boxes"][7, 0])
+        torch.testing.assert_close(result["boxes"][1:4, 0], torch.zeros(3, 4))
         self.assertGreater(float(result["area_fraction"][0, 0]), 0.)
 
     def test_projected_full_rectangles_match_actual_source_blit_for_live_and_corpse(self):
@@ -128,8 +133,8 @@ class SpriteRenderVisibilityTests(unittest.TestCase):
             result = model.render_with_aux(state, torch.zeros(1, 128), map_features)
         context = first.call_args.args[1]
         gate = geometry["render_gate"]
-        torch.testing.assert_close(first.call_args.kwargs["key_weights"][:, 32:40], gate)
-        torch.testing.assert_close(context[:, 32:40], geometry["object_identity_tokens"]
+        torch.testing.assert_close(first.call_args.kwargs["key_weights"][:, 32:32+ENTITY_SLOTS], gate)
+        torch.testing.assert_close(context[:, 32:32+ENTITY_SLOTS], geometry["object_identity_tokens"]
                                    + gate[..., None]*geometry["object_appearance_tokens"])
         result["rgb"].square().mean().backward()
         gradient = model.geometry_reader.object_encoder[0].weight.grad
@@ -139,7 +144,7 @@ class SpriteRenderVisibilityTests(unittest.TestCase):
     def test_parameter_shapes_and_strict_checkpoint_load_are_unchanged(self):
         from turkeyworld.transformer_model import CameraGeometry
         model = CameraGeometry(32)
-        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 7650)
+        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 7426)
         snapshot = io.BytesIO()
         torch.save(model.state_dict(), snapshot)
         snapshot.seek(0)
