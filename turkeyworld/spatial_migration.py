@@ -31,6 +31,11 @@ def config_fingerprint(config):
         value.pop('spatial_combat', None)
     if not value.get('spatial_entities', False):
         value.pop('spatial_entities', None)
+    for flag in ('game_training_v5', 'flow_block_conditioning'):
+        if not value.get(flag, False):
+            value.pop(flag, None)
+    if value.get('flow_patch_size', 4) == 4:
+        value.pop('flow_patch_size', None)
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 

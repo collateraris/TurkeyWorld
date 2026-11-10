@@ -14,6 +14,63 @@ from .jepa_training_utils import latent_prediction_loss, variance_covariance_los
 from .train import image_loss, state_loss, supervised_event_losses
 
 
+def spawn_supervision_statistics(result, previous, target):
+    """Raw event sums for v5 global BxH hierarchical spawn supervision.
+
+    Anchor CE is unmasked by own earlier simultaneous choices. Fallback CE is
+    conditional on a non-anchor Source label and excludes the eight anchors;
+    it is not another copy of the effective256-way hierarchical loss.
+    """
+    from .spawn import SPAWN_ANCHORS
+    old = previous.detach().float()[:, 8:88].reshape(-1, 8, 10)
+    expected = target.detach().float()[:, 8:88].reshape_as(old)
+    revived = ~((old[..., 5] >= .5) & (old[..., 4] > 0)) & (expected[..., 5] >= .5) & (expected[..., 4] > 0)
+    zero = result['state'].sum()*0
+    if 'spawn_logits' not in result:
+        return {'spawn_sum': zero, 'spawn_count': zero.detach(),
+                'spawn_anchor_sum': zero, 'spawn_fallback_sum': zero, 'spawn_tile_sum': zero}
+    tiles = (expected[..., :2]*16).long().clamp(0, 15)
+    labels = tiles[..., 0]+16*tiles[..., 1]
+    count = revived.to(torch.float32).sum()
+    anchor_sum = fallback_sum = tile_sum = result['spawn_logits'].float().sum()*0
+    if 'spawn_anchor_logits' in result:
+        anchor_logits = result['spawn_anchor_logits'].float()
+        if anchor_logits.shape != (*labels.shape, 9):
+            raise ValueError('Expected spawn_anchor_logits[B,8,9]')
+        anchor_tiles = labels.new_tensor([x+16*y for x, y in SPAWN_ANCHORS])
+        matches = labels[..., None] == anchor_tiles
+        anchor_labels = torch.where(matches.any(-1), matches.long().argmax(-1), torch.full_like(labels, 8))
+        errors = F.cross_entropy(anchor_logits.reshape(-1, 9), anchor_labels.reshape(-1), reduction='none').reshape_as(labels)
+        anchor_sum = (errors*revived).sum()
+        fallback = revived & (anchor_labels == 8)
+        if bool(fallback.any()):
+            if 'spawn_fallback_logits' not in result:
+                raise ValueError('Fallback Source spawns require raw spawn_fallback_logits')
+            raw = result['spawn_fallback_logits'].float()
+            if raw.shape != (*labels.shape, 256):
+                raise ValueError('Expected spawn_fallback_logits[B,8,256]')
+            forbidden = torch.zeros(256, dtype=torch.bool, device=raw.device)
+            forbidden[anchor_tiles] = True
+            fallback_sum = F.cross_entropy(raw[fallback].masked_fill(forbidden[None], -torch.inf), labels[fallback], reduction='sum')
+        total = anchor_sum+fallback_sum
+    else:
+        errors = F.cross_entropy(result['spawn_logits'].float().reshape(-1, 256), labels.reshape(-1), reduction='none').reshape_as(labels)
+        tile_sum = (errors*revived).sum()
+        total = tile_sum
+    return {'spawn_sum': total, 'spawn_count': count, 'spawn_anchor_sum': anchor_sum,
+            'spawn_fallback_sum': fallback_sum, 'spawn_tile_sum': tile_sum}
+
+
+def aggregate_spawn_supervision(statistics):
+    sums = {name: torch.stack([value[name] for value in statistics]).sum()
+            for name in ('spawn_sum', 'spawn_count', 'spawn_anchor_sum', 'spawn_fallback_sum', 'spawn_tile_sum')}
+    denominator = sums['spawn_count'].clamp_min(1)
+    return sums['spawn_sum']/denominator, {'spawn_event_count': sums['spawn_count'],
+        'spawn_anchor_ce': sums['spawn_anchor_sum']/denominator,
+        'spawn_fallback_ce': sums['spawn_fallback_sum']/denominator,
+        'spawn_tile_ce': sums['spawn_tile_sum']/denominator}
+
+
 @torch.no_grad()
 def npc_motion_diagnostics(result, previous, target, *, simulation_hz=30.):
     """Measure masked proposal saturation without adding it to any loss."""
@@ -55,7 +112,7 @@ def motion_error_parts(prediction, previous, target, *, simulation_hz=30., local
 
 def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags, events,
                                 *, simulation_hz=30., none_class_weight=.2, attack_pos_weight=4.,
-                                local_motion=False, action=None, spatial_combat=False):
+                                local_motion=False, action=None, spatial_combat=False, game_training_v5=False):
     """Label a transition computed at exactly GT previous state/observations.
 
     Callers must keep this query separate from their persistent AR stream.
@@ -67,7 +124,7 @@ def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags,
         from .combat_objectives import combat_transition_losses
         losses = combat_transition_losses(result, previous, target, hit_ids.detach(), attack_flags.detach(),
             events.detach(), action=action, dt=1/simulation_hz, none_class_weight=none_class_weight,
-            attack_pos_weight=attack_pos_weight)
+            attack_pos_weight=attack_pos_weight, game_training_v5=game_training_v5)
     else:
         losses = supervised_event_losses(result, hit_ids.detach(), attack_flags.detach(), events.detach(),
                                         none_class_weight=none_class_weight, attack_pos_weight=attack_pos_weight)
@@ -78,7 +135,11 @@ def aligned_auxiliary_step_loss(result, previous, target, hit_ids, attack_flags,
                                     local_motion=local_motion, action=action)
     losses["motion"] = player+npc
     losses["spawn"] = result["state"].new_zeros(())
-    if "spawn_logits" in result:
+    if game_training_v5:
+        statistics = spawn_supervision_statistics(result, previous, target)
+        losses.update(statistics)
+        losses['spawn'] = statistics['spawn_sum']/statistics['spawn_count'].clamp_min(1)
+    elif "spawn_logits" in result:
         revived = (old[:, :, 5] < .5) & (expected[:, :, 5] > .5)
         tiles = (expected[:, :, :2] * 16).long().clamp(0, 15)
         labels = tiles[:, :, 0] + tiles[:, :, 1] * 16
@@ -108,6 +169,7 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     """
     actions = batch["actions"].detach()
     spatial_combat = bool(getattr(model.config, 'spatial_combat', False))
+    game_training_v5 = bool(getattr(model.config, 'game_training_v5', False))
     horizon = actions.shape[1]
     if context < 1 or horizon < 1 or batch["frames"].shape[1] < context + horizon:
         raise ValueError("A complete positive context and future horizon are required")
@@ -115,8 +177,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     previous = batch["previous_states"].detach()
     targets = batch["target_states"].detach()
     images = batch["target_frames"].detach()
-    object_masks = batch.get('target_object_masks') if object_region_boost > 1 else None
-    if object_region_boost > 1 and object_masks is None:
+    object_masks = batch.get('target_object_masks') if object_region_boost > 1 or game_training_v5 else None
+    if (object_region_boost > 1 or game_training_v5) and object_masks is None:
         raise ValueError('Object-aware image supervision requires offline target NPC masks')
     pixel_weights = None
     hits = batch["hit_ids"] if "hit_ids" in batch else batch["hits"]
@@ -127,12 +189,15 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     memory = model.vjepa_backend.initialize_from_latents(context_latents, states[:, :context], map_features)
     current = states[:, context - 1]
     main_latents, main_states = [], []
+    trajectory_predictions = []
     # Complete the main forward trajectory BEFORE encoding any future source
     # observations for the auxiliary stream. No auxiliary tensor feeds it.
     for index in range(horizon):
         main = model.transition(current, actions[:, index], map_features, memory)
         main_latents.append(main["latent_prediction"])
         main_states.append(state_loss(main["state"], targets[:, index]))
+        if game_training_v5:
+            trajectory_predictions.append(main['state'])
         current, memory = main["state"], main["memory"]
     ar_state, ar_features, ar_memory = current, main["features"], memory
     with torch.no_grad():
@@ -140,6 +205,12 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
     regularizer, regularizer_metrics = variance_covariance_loss(context_latents)
     latent, latent_metrics = latent_prediction_loss(torch.stack(main_latents, 1), target_latents)
     parts = {"regularizer": .1 * regularizer, "state": 10 * torch.stack(main_states).mean(), "jepa": latent}
+    trajectory_metrics = {}
+    if game_training_v5:
+        from .trajectory_objectives import trajectory_state_losses
+        trajectory_parts, trajectory_metrics = trajectory_state_losses(torch.stack(trajectory_predictions, 1),
+            states[:, context-1], targets, batch['map'])
+        parts.update(trajectory_parts)
 
     teacher_map = teacher_observed = teacher_current = None
     if teacher is not None:
@@ -169,7 +240,7 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
         auxiliary.append(aligned_auxiliary_step_loss(result, previous[:, index], targets[:, index],
             hits[:, index], attacks[:, index], events[:, index], simulation_hz=model.config.simulation_hz,
             local_motion=getattr(model.config, 'spatial_entities', False), action=actions[:, index],
-            spatial_combat=spatial_combat))
+            spatial_combat=spatial_combat, game_training_v5=game_training_v5))
         if spatial_combat:
             combat_contexts.append({name: result['combat_context'][name].detach()
                                     for name in ('state', 'pooled', 'spatial')})
@@ -195,7 +266,14 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
         render_state = targets[:, index]
         base = model.render_base(render_state, result["features"], map_features)
         target_rgb = images[:, index]
-        if object_masks is not None:
+        if game_training_v5:
+            from .object_losses import balanced_image_l1, balanced_edge_l1
+            base_values.append(balanced_image_l1(base, target_rgb, object_masks[:, index])
+                               +.2*balanced_edge_l1(base, target_rgb, object_masks[:, index]))
+            if object_masks is not None:
+                from .object_losses import object_region_weights
+                pixel_weights = object_region_weights(object_masks[:, index], object_region_boost)
+        elif object_masks is not None:
             from .object_losses import object_region_weights, weighted_image_loss
             pixel_weights = object_region_weights(object_masks[:, index], object_region_boost)
             base_values.append(weighted_image_loss(base, target_rgb, pixel_weights))
@@ -208,7 +286,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
             foreground_values.append(.25*foreground_contrastive_loss(base, target_rgb,
                 batch['target_background_frames'][:, index], object_masks[:, index]))
         if render:
-            options = {'pixel_weights': pixel_weights} if pixel_weights is not None else {}
+            options = ({'object_mask': object_masks[:, index]} if game_training_v5
+                       else {'pixel_weights': pixel_weights} if pixel_weights is not None else {})
             if detach_flow_base:
                 options['detach_base'] = True
             if spatial_combat:
@@ -223,6 +302,8 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
                 teacher_options = {'map_condition': batch['map'][:count].detach()} if getattr(teacher.config, 'spatial_combat', False) else {}
                 endpoint = teacher.flow_renderer.sample(teacher_base, render_state[:count], noise=noise, **teacher_options)
             reflow_options = {'detach_base': True} if detach_flow_base else {}
+            if game_training_v5:
+                reflow_options['object_mask'] = object_masks[:, index][:count]
             if spatial_combat:
                 reflow_options['map_condition'] = batch['map'][:count].detach()
             reflow, _ = model.flow_renderer.loss(target_rgb[:count], base[:count], render_state[:count],
@@ -230,9 +311,22 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
                                                  **reflow_options)
             reflow_values.append(reflow)
     combat_names = ('events', 'target', 'attack', 'damage_npc', 'damage_player', 'death_npc') if spatial_combat else ('events', 'target', 'attack')
-    parts["combat"] = torch.stack([sum(value[name] for name in combat_names) for value in auxiliary]).mean()
+    balanced_attack_metrics = {}
+    if game_training_v5 and spatial_combat:
+        from .combat_objectives import aggregate_balanced_attack
+        attack_loss, balanced_attack_metrics = aggregate_balanced_attack(auxiliary)
+        combat_parts = {name: torch.stack([value[name] for value in auxiliary]).mean() for name in combat_names}
+        combat_parts['attack'] = attack_loss
+        parts['combat'] = sum(combat_parts.values())
+    else:
+        parts["combat"] = torch.stack([sum(value[name] for name in combat_names) for value in auxiliary]).mean()
     parts["motion"] = 5 * torch.stack([value["motion"] for value in auxiliary]).mean()
-    parts["spawn"] = .5 * torch.stack([value["spawn"] for value in auxiliary]).mean()
+    spawn_metrics = {}
+    if game_training_v5:
+        spawn_loss, spawn_metrics = aggregate_spawn_supervision(auxiliary)
+        parts['spawn'] = .5*spawn_loss
+    else:
+        parts["spawn"] = .5 * torch.stack([value["spawn"] for value in auxiliary]).mean()
     parts["aux_state"] = 2 * torch.stack([value["state"] for value in auxiliary]).mean()
     auxiliary_latent, _ = latent_prediction_loss(torch.stack(auxiliary_latents, 1), target_latents)
     parts["aux_jepa"] = .5 * auxiliary_latent
@@ -247,7 +341,14 @@ def aligned_short_rollout_loss(model, ema, batch, *, context=2, render=True, tea
         parts["reflow"] = torch.stack(reflow_values).mean()
     metrics = {name: float(value.detach()) for name, value in parts.items()}
     for name in combat_names:
-        metrics['combat_'+name] = float(torch.stack([value[name].detach() for value in auxiliary]).mean())
+        metrics['combat_'+name] = (float(combat_parts[name].detach()) if game_training_v5 and spatial_combat
+            else float(torch.stack([value[name].detach() for value in auxiliary]).mean()))
+    if game_training_v5:
+        metrics.update(trajectory_metrics)
+        metrics.update({'combat_'+name: float(value.detach()) for name, value in balanced_attack_metrics.items()})
+        metrics.update({'global_'+name: float(value.detach()) for name, value in spawn_metrics.items()})
+        metrics.update(game_training_v5=True, spawn_normalization='real_respawn_slots_BxH',
+                       attack_normalization='present_class_means_positive4_negative1_BxH')
     for name in ('npc_saturated_fraction', 'npc_stopped_target_fraction', 'npc_stopped_saturated_fraction',
                  'motion_player', 'motion_npc'):
         if all(name in value for value in motion_diagnostics):

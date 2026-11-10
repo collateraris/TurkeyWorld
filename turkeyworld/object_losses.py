@@ -123,6 +123,96 @@ def weighted_mse(prediction, target, weights=None):
     return ((prediction-target).square()*weights).sum()/denominator
 
 
+def balanced_region_losses(prediction, target, mask=None, *, squared=False):
+    """Per-image errors giving each present region equal mass.
+
+    Foreground and background are each normalized by their own channel/pixel
+    area, then averaged over present regions. Empty foreground means ordinary
+    background loss; a full foreground means foreground loss. The mask is a
+    detached actual occupancy mask, not mean-one boosted image weights. Area
+    resizing preserves fractional occupancy on a smaller latent grid.
+    """
+    prediction, target, _ = _loss_inputs(prediction, target, None)
+    foreground = (prediction.new_zeros((prediction.shape[0], 1, *prediction.shape[-2:]))
+                  if mask is None else _mask_tensor(mask).to(device=prediction.device, dtype=prediction.dtype))
+    if foreground.shape[0] not in (1, prediction.shape[0]):
+        raise ValueError('Region mask batch must match prediction or be a singleton')
+    if foreground.shape[-2:] != prediction.shape[-2:]:
+        foreground = F.interpolate(foreground, size=prediction.shape[-2:], mode='area')
+    foreground = foreground.expand_as(prediction)
+    error = (prediction-target).square() if squared else (prediction-target).abs()
+    mass_fg, mass_bg = foreground.flatten(1).sum(-1), (1-foreground).flatten(1).sum(-1)
+    present_fg, present_bg = mass_fg > 0, mass_bg > 0
+    fg = (error*foreground).flatten(1).sum(-1)/mass_fg.clamp_min(torch.finfo(error.dtype).tiny)
+    bg = (error*(1-foreground)).flatten(1).sum(-1)/mass_bg.clamp_min(torch.finfo(error.dtype).tiny)
+    denominator = present_fg.to(error.dtype)+present_bg.to(error.dtype)
+    per_image = (fg+bg)/denominator.clamp_min(1)
+    return {'per_image': per_image, 'foreground': fg, 'background': bg,
+            'foreground_present': present_fg, 'background_present': present_bg}
+
+
+def balanced_image_l1(prediction, target, mask=None):
+    """Equal present-region RGB L1, averaged over images, with no boost factor."""
+    return balanced_region_losses(prediction, target, mask)['per_image'].mean()
+
+
+def balanced_mse(prediction, target, mask=None):
+    """Equal present-region feature/velocity MSE, averaged over images."""
+    return balanced_region_losses(prediction, target, mask, squared=True)['per_image'].mean()
+
+
+def balanced_edge_l1(prediction, target, mask=None):
+    """Mean horizontal/vertical edge L1 with separately normalized regions."""
+    prediction, target, _ = _loss_inputs(prediction, target, None)
+    foreground = None if mask is None else _mask_tensor(mask).to(prediction.device)
+    if foreground is not None and foreground.shape[-2:] != prediction.shape[-2:]:
+        foreground = F.interpolate(foreground, prediction.shape[-2:], mode='area')
+    errors = []
+    if prediction.shape[-1] > 1:
+        edge_mask = None if foreground is None else .5*(foreground[..., 1:]+foreground[..., :-1])
+        errors.append(balanced_image_l1(prediction[..., 1:]-prediction[..., :-1],
+            target[..., 1:]-target[..., :-1], edge_mask))
+    if prediction.shape[-2] > 1:
+        edge_mask = None if foreground is None else .5*(foreground[..., 1:, :]+foreground[..., :-1, :])
+        errors.append(balanced_image_l1(prediction[..., 1:, :]-prediction[..., :-1, :],
+            target[..., 1:, :]-target[..., :-1, :], edge_mask))
+    return torch.stack(errors).mean() if errors else prediction.sum()*0
+
+
+def decoded_ssim_loss(prediction, target, mask=None):
+    """Differentiable Gaussian-window RGB SSIM, computed safely in float32.
+
+    This training term is not a held-out quality pass. The standard11-pixel,
+    sigma1.5 window is used when possible; tiny diagnostic images use the
+    largest fitting odd window. An optional actual occupancy mask is averaged
+    over each valid SSIM receptive field before separate region normalization.
+    """
+    prediction, target, _ = _loss_inputs(prediction, target, None)
+    if prediction.shape[1] != 3:
+        raise ValueError('Decoded SSIM requires RGB images')
+    with torch.autocast(prediction.device.type, enabled=False):
+        first, second = prediction.float(), target.detach().float()
+        size = min(11, *first.shape[-2:])
+        size -= 1-size % 2
+        axis = torch.arange(size, device=first.device, dtype=torch.float32)-(size-1)/2
+        gaussian = torch.exp(-axis.square()/(2*1.5**2)); gaussian /= gaussian.sum()
+        window = (gaussian[:, None]*gaussian[None]).expand(3, 1, size, size).contiguous()
+        mu1, mu2 = F.conv2d(first, window, groups=3), F.conv2d(second, window, groups=3)
+        var1 = (F.conv2d(first.square(), window, groups=3)-mu1.square()).clamp_min(0)
+        var2 = (F.conv2d(second.square(), window, groups=3)-mu2.square()).clamp_min(0)
+        covariance = F.conv2d(first*second, window, groups=3)-mu1*mu2
+        ssim = ((2*mu1*mu2+.01**2)*(2*covariance+.03**2)
+                /((mu1.square()+mu2.square()+.01**2)*(var1+var2+.03**2)))
+        if mask is None:
+            return 1-ssim.flatten(1).mean(-1).clamp(-1, 1).mean()
+        foreground = _mask_tensor(mask).to(device=first.device, dtype=torch.float32)
+        if foreground.shape[-2:] != first.shape[-2:]:
+            foreground = F.interpolate(foreground, first.shape[-2:], mode='area')
+        receptive_occupancy = F.avg_pool2d(foreground, kernel_size=size, stride=1)
+        error = 1-ssim.clamp(-1, 1)
+        return balanced_region_losses(error, torch.zeros_like(error), receptive_occupancy)['per_image'].mean()
+
+
 def foreground_contrastive_loss(prediction, target, background, mask, margin_fraction=.25):
     """Prefer actual NPC pixels over the same scene with NPCs removed.
 

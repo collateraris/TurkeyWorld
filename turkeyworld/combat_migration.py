@@ -41,9 +41,11 @@ COMBAT_PREFIXES = (
 def config_fingerprint(config):
     """Default-false flags do not change legacy configuration identities."""
     value = dict(config)
-    for flag in ('spatial_entities', 'spatial_combat'):
+    for flag in ('spatial_entities', 'spatial_combat', 'game_training_v5', 'flow_block_conditioning'):
         if not value.get(flag, False):
             value.pop(flag, None)
+    if value.get('flow_patch_size', 4) == 4:
+        value.pop('flow_patch_size', None)
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 

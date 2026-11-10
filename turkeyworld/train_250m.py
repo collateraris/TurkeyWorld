@@ -252,13 +252,18 @@ class ExpandedExperiment(VJEPAExperiment):
         handoff_path = self.root/f'teacher_handoff_vjepa{self.PROFILE}.json'
         if handoff_path.exists():
             handoff = json.loads(handoff_path.read_text(encoding='utf-8'))
-            teacher, metadata = load_world_checkpoint(handoff['checkpoint'], self.device)
+            # Deserialize trusted weights on CPU before the single explicit
+            # device transfer. Avoid CUDA enumeration during tensor unpickling
+            # and retaining a second full GPU checkpoint beside the model.
+            teacher, metadata = load_world_checkpoint(handoff['checkpoint'], 'cpu')
+            teacher.to(self.device)
             if model_fingerprint(teacher) != handoff['teacher_fingerprint']:
                 raise ValueError(f'{self.PROFILE}M teacher handoff fingerprint mismatch')
             self.global_step = handoff['global_training_step']
             self.state.update(teacher_fingerprint=handoff['teacher_fingerprint'], teacher_handoff_reason=handoff['reason'])
         else:
-            teacher, _ = load_world_checkpoint(initial, self.device)
+            teacher, _ = load_world_checkpoint(initial, 'cpu')
+            teacher.to(self.device)
             if self.world_until_ready(teacher, data):
                 self.long_curriculum(teacher, f'teacher{self.PROFILE}')
                 original_lr = self.args.lr

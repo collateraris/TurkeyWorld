@@ -69,6 +69,9 @@ class WorldModelConfig:
     vjepa_gradient_checkpointing: bool = False
     spatial_entities: bool = False
     spatial_combat: bool = False
+    game_training_v5: bool = False
+    flow_patch_size: int = 4
+    flow_block_conditioning: bool = False
 
     def __post_init__(self):
         if not isinstance(self.spatial_entities, bool):
@@ -77,6 +80,18 @@ class WorldModelConfig:
             raise ValueError('spatial_combat must be a boolean')
         if self.spatial_combat and not self.spatial_entities:
             raise ValueError('spatial_combat requires spatial_entities=True')
+        if not isinstance(self.game_training_v5, bool) or not isinstance(self.flow_block_conditioning, bool):
+            raise ValueError('Training v5 and block conditioning flags must be booleans')
+        if (not isinstance(self.flow_patch_size, int) or isinstance(self.flow_patch_size, bool)
+                or self.flow_patch_size not in (1, 2, 4)):
+            raise ValueError('Flow patch size must be 1, 2 or 4')
+        if self.flow_block_conditioning and not self.spatial_combat:
+            raise ValueError('Block conditioning requires explicit spatial combat conditions')
+        if self.game_training_v5 and (not self.spatial_combat or self.architecture != 'vjepa2_ac'
+                or self.renderer_codec != 'vqgan' or not self.endless):
+            raise ValueError('Training v5 requires a spatial V-JEPA world with VQGAN and endless slots')
+        if (self.flow_patch_size != 4 or self.flow_block_conditioning) and self.renderer_codec != 'vqgan':
+            raise ValueError('Configurable latent patches and block conditions require VQGAN')
         if self.kind not in {"teacher", "student"}:
             raise ValueError("kind must be teacher or student")
         if self.image_size not in {32, 64, 128, 256}:
@@ -231,6 +246,12 @@ class NeuralWorldModel(nn.Module):
                 codec['codec_config'] = self.config.renderer_codec_config
                 if self.config.spatial_combat:
                     codec['spatial_conditioning'] = True
+                if self.config.flow_patch_size != 4:
+                    codec['patch_size'] = self.config.flow_patch_size
+                if self.config.flow_block_conditioning:
+                    codec['block_conditioning'] = True
+                if self.config.game_training_v5:
+                    codec['improved_loss'] = True
             self.flow_renderer = renderer(kind=self.config.kind,
                 image_size=self.config.image_size, mode=self.config.renderer_mode,
                 steps=self.config.flow_steps, width=self.config.flow_width,

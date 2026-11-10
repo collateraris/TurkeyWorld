@@ -92,6 +92,54 @@ def _attack_count_distribution(probabilities):
     return distribution
 
 
+def aggregate_balanced_attack(statistics, positive_weight=4.):
+    """Normalize over actual positive/eligible-negative events across B and H.
+
+    Present class means receive masses4:1 by default; an absent class does
+    not dilute the other. Statistics are diagnostics, not extra loss terms.
+    """
+    if not statistics:
+        raise ValueError('Balanced attack requires at least one set of statistics')
+    sums = {name: torch.stack([value[name] for value in statistics]).sum()
+            for name in ('attack_positive_sum', 'attack_positive_count',
+                         'attack_negative_sum', 'attack_negative_count')}
+    pos_count, neg_count = sums['attack_positive_count'], sums['attack_negative_count']
+    pos_present, neg_present = (pos_count > 0).to(pos_count.dtype), (neg_count > 0).to(neg_count.dtype)
+    numerator = (positive_weight*pos_present*sums['attack_positive_sum']/pos_count.clamp_min(1)
+                 +neg_present*sums['attack_negative_sum']/neg_count.clamp_min(1))
+    denominator = positive_weight*pos_present+neg_present
+    return numerator/denominator.clamp_min(1e-6), sums
+
+
+def balanced_attack_loss(logits, labels, eligible=None, *, positive_weight=4., focal_gamma=0.):
+    """BCE with separately normalized classes; legal occluded negatives remain.
+
+    Recorded positives always remain eligible, independently of predicted
+    positions/life/logits. ``eligible`` selects Source-legal negatives only.
+    Optional focal weighting is disabled by default and changes no threshold.
+    """
+    if (logits.shape != labels.shape or logits.shape[-1] != 8
+            or not math.isfinite(positive_weight) or positive_weight < 0
+            or not math.isfinite(focal_gamma) or focal_gamma < 0):
+        raise ValueError('Balanced attack requires matching[...,8] heads/labels and nonnegative finite weights')
+    labels, values = labels.detach().float(), logits.float()
+    positive = labels > .5
+    allowed = torch.ones_like(positive) if eligible is None else eligible.detach().bool()
+    if allowed.shape != positive.shape:
+        raise ValueError('Attack eligibility must match head shape')
+    negative = allowed & ~positive
+    errors = F.binary_cross_entropy_with_logits(values, labels, reduction='none')
+    if focal_gamma:
+        correct = torch.where(positive, values.sigmoid(), (-values).sigmoid())
+        errors = errors*(1-correct).pow(focal_gamma)
+    statistics = {'attack_positive_sum': (errors*positive).sum(),
+                  'attack_positive_count': positive.to(values.dtype).sum(),
+                  'attack_negative_sum': (errors*negative).sum(),
+                  'attack_negative_count': negative.to(values.dtype).sum()}
+    loss, _ = aggregate_balanced_attack([statistics], positive_weight)
+    return loss, statistics
+
+
 def combat_image_state(result, previous, target_pose, *, action=None, dt=1/30, endless=True):
     """Auxiliary GT-pose render condition with own hard combat in the forward pass.
 
@@ -160,7 +208,8 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
                               action=None, dt=1/30, endless=True,
                               none_class_weight=.2, attack_pos_weight=4.,
                               damage_weight=DEFAULT_DAMAGE_WEIGHT,
-                              death_weight=DEFAULT_DEATH_WEIGHT):
+                              death_weight=DEFAULT_DEATH_WEIGHT,
+                              game_training_v5=False, attack_focal_gamma=0.):
     """Additive aligned loss terms; labels never enter a prediction/state path.
 
     Existing events/target/attack BCE/CE weights are unchanged. New damage terms
@@ -194,6 +243,17 @@ def combat_transition_losses(result, previous, target, hit_ids, attack_flags, ev
     old = previous[:, 8:88].reshape(batch, 8, 10)
     expected = target[:, 8:88].reshape_as(old)
     predicted = result['state'][:, 8:88].reshape_as(old)
+    if game_training_v5:
+        # Only Source legality chooses negative examples. A wrong own death,
+        # range or player pose must not discard a genuine positive/negative.
+        source_range = ((old[:, :, :2]-target[:, None, :2])*16).square().sum(-1) <= 1.+1e-6
+        source_eligible = ((old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
+            & (expected[:, :, 5] >= .5) & (expected[:, :, 4] > 0)
+            & (previous[:, 4:5] > 0) & (old[:, :, 6]-dt/ATTACK_INTERVAL <= 1e-6)
+            & source_range)
+        losses['attack'], statistics = balanced_attack_loss(attacks, attack_flags, source_eligible,
+            positive_weight=attack_pos_weight, focal_gamma=attack_focal_gamma)
+        losses.update(statistics)
     old_alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
     if 'respawn_flags' in result:
         old_alive = old_alive & ~result['respawn_flags'].detach().bool()

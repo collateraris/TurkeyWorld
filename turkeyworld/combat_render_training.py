@@ -150,7 +150,11 @@ def combat_image_objective(model, payload):
     prediction = model.flow_renderer.sample(base, image_state, checkpoint_velocity=True, **flow_options)
     target, mask = selected['target_frames'], selected['object_masks']
     weights = object_region_weights(mask, boost=4.)
-    rgb = weighted_image_l1(prediction, target, weights)
+    if getattr(model.config, 'game_training_v5', False):
+        from .object_losses import balanced_image_l1
+        rgb = balanced_image_l1(prediction, target, mask)
+    else:
+        rgb = weighted_image_l1(prediction, target, weights)
     contrast = foreground_contrastive_loss(prediction, target, selected['backgrounds'], mask, margin_fraction=.25)
     total = .25*rgb+.25*contrast
     with torch.no_grad():

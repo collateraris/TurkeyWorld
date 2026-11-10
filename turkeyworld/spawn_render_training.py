@@ -169,8 +169,9 @@ def spawn_image_objective(model, payload):
     else:
         renderer = getattr(backend, 'renderer', None)
         walkable = _walkable_batch(getattr(renderer, '_spawn_walkable', None), batch, previous.device)
+    spawn_options = {'walkable': walkable[rows]} if getattr(model.config, 'game_training_v5', False) else {}
     logits = backend.spawn_logits(state, values['context_pooled'][rows, steps],
-                                  values['context_spatial'][rows, steps], maps)
+                                  values['context_spatial'][rows, steps], maps, **spawn_options)
     positions, available = spawn_positions_with_grad(logits, state, walkable[rows], dt)
     changed = revived[rows, steps]
     old_selected = state[:, 8:88].reshape(-1, 8, 10)
@@ -192,7 +193,11 @@ def spawn_image_objective(model, payload):
         flow_options['map_condition'] = payload['map_grid'].detach()[rows]
     prediction = model.flow_renderer.sample(base, image_state, checkpoint_velocity=True, **flow_options)
     mask = values['object_masks'][rows, steps]
-    rgb = weighted_image_l1(prediction, values['target_frames'][rows, steps], object_region_weights(mask, boost=4.))
+    if getattr(model.config, 'game_training_v5', False):
+        from .object_losses import balanced_image_l1
+        rgb = balanced_image_l1(prediction, values['target_frames'][rows, steps], mask)
+    else:
+        rgb = weighted_image_l1(prediction, values['target_frames'][rows, steps], object_region_weights(mask, boost=4.))
     coordinate_mask = changed & available
     error = F.smooth_l1_loss(positions*MAP_EXTENT, target_selected[:, :, :2]*MAP_EXTENT, reduction='none')
     coordinates = (error*coordinate_mask[:, :, None]).sum()/(2*coordinate_mask.sum()).clamp_min(1)

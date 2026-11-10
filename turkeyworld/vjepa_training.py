@@ -201,6 +201,9 @@ class VJEPAExperiment(Experiment):
             additional['initialization'] = self.state['initialization']
         if self.state.get('motion_curriculum'):
             additional['motion_curriculum'] = self.state['motion_curriculum']
+        for name in ('training_v5_migration', 'behavior_validation'):
+            if self.state.get(name):
+                additional[name] = self.state[name]
         if self.state.get('enemy_policy'):
             additional['behavior_version'] = self.state['enemy_policy']['version']
         from .optimizer_migration import optimizer_parameter_names
@@ -245,7 +248,8 @@ class VJEPAExperiment(Experiment):
             if self.ema is not None and 'ema_target_encoder' in saved:
                 self.ema.load_state_dict(saved['ema_target_encoder'])
             self.extra = {name: saved[name] for name in ('teacher_plateau', 'teacher_handoff_reason', 'teacher_selection', 'quality_streak', 'phase_complete',
-                          'long_curriculum_state', 'motion_curriculum', 'combat_conditioning_migration') if name in saved}
+                          'long_curriculum_state', 'motion_curriculum', 'combat_conditioning_migration',
+                          'training_v5_migration', 'behavior_validation') if name in saved}
             quality_path = self.root/f'{model.config.kind}_vjepa_quality_report.json'
             if quality_path.exists():
                 previous_quality = json.loads(quality_path.read_text(encoding='utf-8'))
@@ -263,7 +267,8 @@ class VJEPAExperiment(Experiment):
         if (self.root/'stop_training').exists():
             self.save(model, optimizer, phase, step, metrics)
             self.state['status'] = 'stopped'
-            self.update(phase, step, None, 'Обучение сохранено и остановлено')
+            self.update(phase, step, None, 'Обучение сохранено и остановлено',
+                        global_training_step=self.global_step)
             raise SystemExit(0)
 
     def validation_report(self, model, *, preview=True):
@@ -312,6 +317,25 @@ class VJEPAExperiment(Experiment):
             cached = self._prediction_sr_cache = (identity, sr_model, sr_metadata)
         contact['metadata']['sr_checkpoint'] = str(sr_path)
         return {'sr_model': cached[1], 'sr_metadata': cached[2]}
+
+    def behavior_validation_report(self, model):
+        """Fixed own-trajectory/attack/spawn checks; no quality/plateau updates."""
+        from .behavior_validation import evaluate_behavior
+        root = self.root/'behavior_validation'/f'step_{self.global_step:06d}'
+        self.state['behavior_validation_progress'] = {'status': 'running',
+            'step': self.global_step, 'every': 100, 'report_directory': str(root)}
+        atomic_json(self.root/'status.json', self.state)
+        summary = evaluate_behavior(model, self.validation, root, step=self.global_step,
+            protocol=self.state['loss_protocol'], context=self.args.context, seed=self.args.seed)
+        self.state['behavior_validation'] = summary
+        self.extra['behavior_validation'] = summary
+        self.state['behavior_validation_progress']['status'] = 'complete'
+        atomic_json(self.root/'behavior_validation_latest.json', summary)
+        atomic_json(self.root/'status.json', self.state)
+        self.metric({'stage': self.state['stage'], 'step': self.global_step,
+            'global_training_step': self.global_step, 'loss_protocol': self.state['loss_protocol'],
+            'behavior_validation': summary})
+        return summary
 
     def prediction_preview_report(self, model):
         """A small real free rollout; never advances the quality/plateau clocks."""
@@ -415,6 +439,8 @@ class VJEPAExperiment(Experiment):
             self.state['loss_protocol'] += '_spatial_local_v3'
         if getattr(model.config, 'spatial_combat', False):
             self.state['loss_protocol'] += '_combat_spawn_flow_v4'
+        if getattr(model.config, 'game_training_v5', False):
+            self.state['loss_protocol'] += '_ar_walls_balanced_anchor_patch2_v5'
         motion_curriculum = None
         if getattr(self.args, 'motion_curriculum', False):
             if not getattr(model.config, 'spatial_entities', False):
@@ -470,6 +496,17 @@ class VJEPAExperiment(Experiment):
                  or (object_aware and (self.state.get('prediction_preview') or {}).get('loss_protocol') != self.state['loss_protocol']))):
             self.prediction_preview_report(model)
         model.train()
+        if getattr(model.config, 'game_training_v5', False):
+            from .behavior_validation import behavior_validation_due
+            prior_behavior = self.extra.get('behavior_validation', {})
+            if behavior_validation_due(self.global_step, prior_behavior, self.state['loss_protocol']):
+                self.behavior_validation_report(model)
+                model.train()
+            else:
+                self.state['behavior_validation'] = prior_behavior
+                self.state['behavior_validation_progress'] = {'status': 'complete',
+                    'step': prior_behavior['step'], 'every': 100, 'restored_from_checkpoint': True}
+                atomic_json(self.root/'status.json', self.state)
         started, initial_step, metrics = time.perf_counter(), completed, {}
         step = completed
         accumulation = self.accumulation_steps()
@@ -526,7 +563,11 @@ class VJEPAExperiment(Experiment):
                         generated = model.flow_renderer.sample(base, state, checkpoint_velocity=True, **map_options)
                         if endpoint.get('pixel_weights') is not None:
                             from .object_losses import weighted_image_l1
-                            sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'])
+                            if getattr(model.config, 'game_training_v5', False):
+                                from .object_losses import balanced_image_l1
+                                sampled_rgb_loss = .5*balanced_image_l1(generated.float(), target.float(), endpoint['object_mask'])
+                            else:
+                                sampled_rgb_loss = .5*weighted_image_l1(generated.float(), target.float(), endpoint['pixel_weights'])
                         else:
                             sampled_rgb_loss = .5*F.l1_loss(generated.float(), target.float())
                     negative_options = {}
@@ -607,6 +648,10 @@ class VJEPAExperiment(Experiment):
                 effective_batch_size=self.args.batch*accumulation, fragments_seen=self.fragments_seen,
                 loss_aggregation='mean_of_microbatches')
             metrics['loss_protocol'] = self.state['loss_protocol']
+            for index in range(5):
+                count = metrics.get(f'flow_t{index}_count', 0)
+                if count:
+                    metrics[f'flow_t{index}_velocity'] = metrics[f'flow_t{index}_sum']/count
             if motion_curriculum is not None:
                 metrics.update(motion_phase=plan['phase'], motion_horizon=plan['horizon'],
                     motion_curriculum_version=plan['version'], motion_case_weights=plan['case_weights'])
@@ -617,6 +662,10 @@ class VJEPAExperiment(Experiment):
             control = getattr(self.args, 'control_run_dir', None)
             if (self.root/'stop_training').exists() or (control and (control/'stop_training').exists()):
                 self.check_stop(model, optimizer, phase, step, metrics)
+            if getattr(model.config, 'game_training_v5', False) and self.global_step % 100 == 0:
+                optimizer.zero_grad(set_to_none=True)
+                self.behavior_validation_report(model)
+                model.train()
             due = self.global_step % 500 == 0
             report = self.preview_if_due(model)
             if quality and report is not None:

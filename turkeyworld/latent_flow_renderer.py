@@ -31,8 +31,11 @@ def _velocity(network, noisy, time, base_latents, state, self_condition=None, ma
     angles = time.float()[:, None]*network.frequencies[None]*1000
     time_embedding = torch.cat([angles.sin(), angles.cos()], -1).to(dtype)
     condition = network.time_input(time_embedding)+network.state_input(render_state_view(state).to(dtype))
-    for block in network.blocks:
+    for index, block in enumerate(network.blocks):
         tokens = block(tokens, condition)
+        if hasattr(network, 'block_spatial_condition'):
+            tokens = tokens+network.block_spatial_condition[index](tokens, state)
+            tokens = tokens+network.block_wall_condition[index](tokens, state, map_condition)
     if hasattr(network, 'spatial_condition'):
         tokens = tokens+network.spatial_condition(tokens, state)
     if hasattr(network, 'wall_condition'):
@@ -47,14 +50,16 @@ def _velocity(network, noisy, time, base_latents, state, self_condition=None, ma
 
 class LatentVelocityNetwork(nn.Module):
     """Conditional DiT with dynamic latent channels/grid and a zero output head."""
-    def __init__(self, latent_channels, latent_size, width, depth, heads, mlp_ratio=4, mlp_hidden=0):
+    def __init__(self, latent_channels, latent_size, width, depth, heads, mlp_ratio=4, mlp_hidden=0,
+                 patch_size=4):
         super().__init__()
         if min(latent_channels, latent_size, width, depth, heads, mlp_ratio) < 1 or width % heads:
             raise ValueError('Latent flow dimensions must be positive and width divisible by heads')
-        if latent_size % 4:
-            raise ValueError('The latent grid must divide four-pixel transformer patches')
+        if (not isinstance(patch_size, int) or isinstance(patch_size, bool) or patch_size < 1
+                or latent_size % patch_size):
+            raise ValueError('The latent grid must divide the positive integer transformer patch size')
         self.latent_channels, self.latent_size = latent_channels, latent_size
-        self.patch, self.grid, self.width = 4, latent_size//4, width
+        self.patch, self.grid, self.width = patch_size, latent_size//patch_size, width
         self.image_input = nn.Conv2d(latent_channels*3, width, self.patch, stride=self.patch)
         self.position = nn.Parameter(torch.randn(1, self.grid*self.grid, width)*.02)
         self.state_input = nn.Sequential(nn.Linear(90, width), nn.SiLU(), nn.Linear(width, width))
@@ -80,6 +85,14 @@ class LatentVelocityNetwork(nn.Module):
         if not hasattr(self, 'wall_condition'):
             with torch.random.fork_rng(devices=[]):
                 self.wall_condition = WallFlowCondition(self.width)
+
+    def enable_block_conditioning(self, image_size):
+        """Add zero-output reads after every DiT block, retaining final reads."""
+        if not hasattr(self, 'block_spatial_condition'):
+            with torch.random.fork_rng(devices=[]):
+                self.block_spatial_condition = nn.ModuleList(
+                    SpatialFlowCondition(self.width, self.grid, image_size) for _ in self.blocks)
+                self.block_wall_condition = nn.ModuleList(WallFlowCondition(self.width) for _ in self.blocks)
 
 
 class SpatialFlowCondition(nn.Module):
@@ -214,11 +227,21 @@ class LatentFlowRenderer(LatentVelocityNetwork):
     def __init__(self, kind='teacher', image_size=128, mode='flow_matching', steps=0,
                  width=0, depth=0, heads=0, mlp_ratio=4,
                  adapter_width=0, adapter_depth=0, adapter_heads=0, adapter_mlp_ratio=4,
-                 codec_config=None, mlp_hidden=0, spatial_conditioning=False):
+                 codec_config=None, mlp_hidden=0, spatial_conditioning=False, patch_size=4,
+                 block_conditioning=False, improved_loss=False, time_uniform_fraction=0.,
+                 time_stratified=True, decoded_ssim_weight=.05, decoded_edge_weight=.05):
         if kind not in {'teacher', 'student'} or mode not in {'flow_matching', 'rectified_flow'}:
             raise ValueError('Unsupported latent flow kind/mode')
         if steps < 0 or min(width, depth, heads, adapter_width, adapter_depth, adapter_heads) < 0:
             raise ValueError('Steps and optional flow dimensions must be nonnegative')
+        if (any(not isinstance(value, bool) for value in (spatial_conditioning, block_conditioning, improved_loss, time_stratified))
+                or block_conditioning and not spatial_conditioning):
+            raise ValueError('Flow conditioning flags must be boolean; block conditioning requires spatial conditioning')
+        if (not isinstance(time_uniform_fraction, (int, float)) or isinstance(time_uniform_fraction, bool)
+                or not math.isfinite(time_uniform_fraction) or not 0 <= time_uniform_fraction <= 1
+                or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                       or not math.isfinite(value) or value < 0 for value in (decoded_ssim_weight, decoded_edge_weight))):
+            raise ValueError('Flow time mixture must lie in[0,1] and decoded loss weights must be nonnegative')
         values = asdict(codec_config) if isinstance(codec_config, VQGANConfig) else dict(codec_config or {})
         if values.get('image_size', image_size) != image_size:
             raise ValueError('Codec and renderer image sizes must match')
@@ -228,7 +251,7 @@ class LatentFlowRenderer(LatentVelocityNetwork):
             raise ValueError('RGB noise does not contain enough independent polyphase channels for this codec')
         defaults = (256, 6, 8) if kind == 'teacher' else (128, 3, 4)
         super().__init__(config.embedding_dim, config.latent_size, width or defaults[0],
-                         depth or defaults[1], heads or defaults[2], mlp_ratio, mlp_hidden)
+                         depth or defaults[1], heads or defaults[2], mlp_ratio, mlp_hidden, patch_size)
         self.kind, self.mode, self.image_size = kind, mode, image_size
         self.steps = steps or (12 if kind == 'teacher' else 4)
         self.codec = VQGAN(config).eval().requires_grad_(False)
@@ -242,7 +265,7 @@ class LatentFlowRenderer(LatentVelocityNetwork):
             raise ValueError('Adapter width and depth must be enabled together')
         if adapter_width:
             self.residual_adapter = LatentVelocityNetwork(config.embedding_dim, config.latent_size,
-                adapter_width, adapter_depth, adapter_heads or defaults[2], adapter_mlp_ratio)
+                adapter_width, adapter_depth, adapter_heads or defaults[2], adapter_mlp_ratio, patch_size=patch_size)
         if spatial_conditioning:
             self.enable_spatial_conditioning(image_size)
             self.enable_wall_conditioning()
@@ -250,6 +273,13 @@ class LatentFlowRenderer(LatentVelocityNetwork):
             if hasattr(self, 'residual_adapter'):
                 self.residual_adapter.enable_spatial_conditioning(image_size)
                 self.residual_adapter.enable_wall_conditioning()
+        if block_conditioning:
+            self.enable_block_conditioning(image_size)
+            if hasattr(self, 'residual_adapter'):
+                self.residual_adapter.enable_block_conditioning(image_size)
+        self.block_conditioning, self.improved_loss = block_conditioning, improved_loss
+        self.time_uniform_fraction, self.time_stratified = float(time_uniform_fraction), time_stratified
+        self.decoded_ssim_weight, self.decoded_edge_weight = float(decoded_ssim_weight), float(decoded_edge_weight)
 
     @property
     def uses_wall_conditioning(self):
@@ -361,8 +391,36 @@ class LatentFlowRenderer(LatentVelocityNetwork):
             return self.velocity(noisy, time, base_latents, state, self_condition, map_condition)
         return self.velocity(noisy, time, base_latents, state, self_condition)
 
+    def draw_training_time(self, batch, device):
+        """Stratify the chosen time CDF, without automatic loss-based adaptation.
+
+        The initial teacher distribution remains logistic-normal. An explicitly
+        configured uniform fraction uses the inverse mixture CDF; RF retains
+        its uniform distribution. Every random draw uses the saved Torch RNG.
+        """
+        if not isinstance(batch, int) or isinstance(batch, bool) or batch < 1:
+            raise ValueError('Flow time sampling requires a positive integer batch')
+        quantiles = torch.rand(batch, device=device)
+        if self.time_stratified:
+            quantiles = (quantiles+torch.arange(batch, device=device))/batch
+            quantiles = quantiles[torch.randperm(batch, device=device)]
+        fraction = 1. if self.mode == 'rectified_flow' else self.time_uniform_fraction
+        if fraction == 1.:
+            return quantiles
+        safe = quantiles.clamp(1e-6, 1-1e-6)
+        if fraction == 0.:
+            return torch.special.ndtri(safe).sigmoid()
+        lower, upper = torch.zeros_like(safe), torch.ones_like(safe)
+        for _ in range(24):
+            middle = (lower+upper)*.5
+            logit = torch.logit(middle.clamp(1e-7, 1-1e-7))
+            cdf = (1-fraction)*(.5*(1+torch.erf(logit/math.sqrt(2))))+fraction*middle
+            below = cdf < safe
+            lower, upper = torch.where(below, middle, lower), torch.where(below, upper, middle)
+        return (lower+upper)*.5
+
     def loss(self, target_rgb, base_rgb, state, noise=None, time=None, target_endpoint=None, *, pixel_weights=None,
-             detach_base=False, map_condition=None):
+             detach_base=False, map_condition=None, object_mask=None):
         """Continuous-latent velocity regression, including same-noise RGB reflow."""
         self._check_codec()
         maps = self._resolve_map_condition(map_condition, len(state), state.device)
@@ -375,12 +433,16 @@ class LatentFlowRenderer(LatentVelocityNetwork):
         condition_rgb = base_rgb.detach() if detach_base else base_rgb
         base = self.normalize_latents(self.codec.encode(condition_rgb)['quantized'])
         noise = self._noise(torch.randn_like(target) if noise is None else noise, target.shape[0], target.device)
+        explicit_time = time is not None
         if time is None:
-            values = torch.randn(target.shape[0], device=target.device)
-            time = values.sigmoid() if self.mode == 'flow_matching' else torch.rand_like(values)
+            if self.improved_loss:
+                time = self.draw_training_time(target.shape[0], target.device)
+            else:
+                values = torch.randn(target.shape[0], device=target.device)
+                time = values.sigmoid() if self.mode == 'flow_matching' else torch.rand_like(values)
         time = time.to(device=target.device, dtype=torch.float32)
-        if time.shape != (target.shape[0],):
-            raise ValueError('Flow time must have one value per image')
+        if time.shape != (target.shape[0],) or not bool(torch.isfinite(time).all()):
+            raise ValueError('Flow time must have one finite value per image')
         time = time.clamp(.001, .999)
         fraction = time[:, None, None, None]
         noisy = (1-fraction)*noise+fraction*target
@@ -393,6 +455,41 @@ class LatentFlowRenderer(LatentVelocityNetwork):
         prediction = (self.velocity(noisy, time, base, state, previous, maps) if self.uses_wall_conditioning
                       else self.velocity(noisy, time, base, state, previous)).float()
         endpoint = noisy+(1-fraction)*prediction
+        if self.improved_loss:
+            from .object_losses import balanced_region_losses, balanced_edge_l1, decoded_ssim_loss
+            velocity_parts = balanced_region_losses(prediction, target-noise, object_mask, squared=True)
+            endpoint_parts = balanced_region_losses(endpoint, target, object_mask)
+            velocity_loss, endpoint_loss = velocity_parts['per_image'].mean(), endpoint_parts['per_image'].mean()
+            # The frozen quantizer has an explicit straight-through input
+            # derivative. Decode gradients train Flow, never codec weights.
+            terminal = self.codec.quantize(self.denormalize_latents(endpoint))['quantized']
+            decoded = self.codec.decode(terminal)
+            source_rgb = (target_rgb if target_endpoint is None else target_endpoint).detach()
+            ssim = decoded_ssim_loss(decoded, source_rgb, object_mask)
+            edge = balanced_edge_l1(decoded, source_rgb, object_mask)
+            weighted_ssim, weighted_edge = self.decoded_ssim_weight*ssim, self.decoded_edge_weight*edge
+            total = velocity_loss+.1*endpoint_loss+weighted_ssim+weighted_edge
+            metrics = {'flow_velocity': velocity_loss.detach(), 'flow_endpoint': endpoint_loss.detach(),
+                'flow_velocity_unweighted': F.mse_loss(prediction, target-noise).detach(),
+                'flow_endpoint_unweighted': F.l1_loss(endpoint, target).detach(),
+                'flow_decoded_ssim_loss': ssim.detach(), 'flow_decoded_ssim_weighted': weighted_ssim.detach(),
+                'flow_decoded_edge_l1': edge.detach(), 'flow_decoded_edge_weighted': weighted_edge.detach(),
+                'flow_latent_std': target.detach().std(unbiased=False),
+                'flow_npc_mask_supplied': object_mask is not None,
+                'flow_time_mean': time.detach().mean(),
+                'flow_time_uniform_fraction': 1. if self.mode == 'rectified_flow' else self.time_uniform_fraction,
+                'flow_time_stratified': self.time_stratified and not explicit_time,
+                'flow_time_explicit': explicit_time}
+            for region in ('foreground', 'background'):
+                present = velocity_parts[region+'_present']
+                metrics['flow_velocity_'+region] = (velocity_parts[region].detach()*present).sum()/present.sum().clamp_min(1)
+                present_endpoint = endpoint_parts[region+'_present']
+                metrics['flow_endpoint_'+region] = (endpoint_parts[region].detach()*present_endpoint).sum()/present_endpoint.sum().clamp_min(1)
+            for index in range(5):
+                selected = (time >= index/5) & (time < (index+1)/5)
+                metrics[f'flow_t{index}_sum'] = velocity_parts['per_image'].detach()[selected].sum()
+                metrics[f'flow_t{index}_count'] = selected.sum().detach()
+            return total, metrics
         if pixel_weights is not None:
             from .object_losses import weighted_mse, weighted_image_l1
             velocity_loss = weighted_mse(prediction, target-noise, pixel_weights)

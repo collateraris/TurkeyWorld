@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,6 +53,35 @@ class FreshPipelineTests(unittest.TestCase):
             with patch('turkeyworld.fresh_pipeline.subprocess.Popen', side_effect=AssertionError('No launch')):
                 with self.assertRaises(PipelineStopped):
                     pipeline.worker('codec', pipeline.args.codec_run_dir, ['never'])
+
+    def test_default_fifteen_second_target_reaches_worker_commands_and_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.arguments(directory)
+            self.assertEqual(args.target_seconds, 15)
+            pipeline = FreshPipeline(args)
+            self.assertEqual(pipeline.state['evaluation']['target_seconds'], 15)
+            commands = build_commands(args, Path(directory)/'subset.json', Path(directory)/'masks')
+            for name in ('codec', 'world'):
+                command = commands[name]
+                self.assertEqual(command[command.index('--target-seconds')+1], '15')
+
+    def test_explicit_target_overrides_historical_migration_without_rewriting_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.arguments(directory)
+            args.world_run_dir.mkdir()
+            records = {'spatial_entities_migration.json': {'status': 'complete',
+                'spatial_entities': True, 'target_seconds': 30},
+                'combat_conditioning_migration.json': {'status': 'complete',
+                'spatial_combat': True, 'target_seconds': 30},
+                'training_v5_migration.json': {'status': 'complete', 'game_training_v5': True}}
+            for name, value in records.items():
+                (args.world_run_dir/name).write_text(json.dumps(value), encoding='utf-8')
+            commands = build_commands(args, Path(directory)/'subset.json', Path(directory)/'masks')
+            world = commands['world']
+            self.assertEqual(world[world.index('--target-seconds')+1], '15')
+            self.assertIn('--training-improvements-v5', world)
+            for name, value in records.items():
+                self.assertEqual(json.loads((args.world_run_dir/name).read_text(encoding='utf-8')), value)
 
 
 if __name__ == '__main__':

@@ -327,6 +327,10 @@ class VJEPA2ACWorldBackend(nn.Module):
                 self.spatial_spawn_map_key = nn.Linear(map_channels, spawn_rank, bias=False)
                 nn.init.zeros_(self.spatial_spawn_output.weight)
                 nn.init.zeros_(self.spatial_spawn_output.bias)
+                if getattr(config, 'game_training_v5', False):
+                    self.spatial_spawn_anchor_head = nn.Linear(spawn_rank, 9)
+                    nn.init.zeros_(self.spatial_spawn_anchor_head.weight)
+                    nn.init.zeros_(self.spatial_spawn_anchor_head.bias)
 
     def encode_map(self, grid):
         return self.renderer.encode_map(grid)
@@ -409,7 +413,10 @@ class VJEPA2ACWorldBackend(nn.Module):
         targets = torch.cat([targets[:, :8]+residual[:, :, 0], targets[:, 8:]], -1)
         return targets, attacks+residual[:, :, 1]
 
-    def spawn_logits(self, state, pooled, spatial, map_features):
+    def spawn_logits(self, state, pooled, spatial, map_features, *, walkable=None):
+        return self.spawn_outputs(state, pooled, spatial, map_features, walkable=walkable)['spawn_logits']
+
+    def spawn_outputs(self, state, pooled, spatial, map_features, *, walkable=None):
         """Eight persistent slot queries score all256 learned map candidates.
 
         Each query reads its own NPC, the player, predicted visual context,
@@ -422,7 +429,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         batch = state.shape[0]
         legacy = self.spawn_head(pooled.to(self.spawn_head[0].weight.dtype)).float().reshape(batch, 8, 256)
         if not getattr(self.config, 'spatial_combat', False):
-            return legacy
+            return {'spawn_logits': legacy}
         if spatial is None or spatial.shape != (batch, 9, pooled.shape[-1]):
             raise ValueError('Spatial spawning requires all nine explicit player/NPC tokens')
         if map_features.shape != (batch, self.spatial_spawn_map_key.in_features, 16, 16):
@@ -437,11 +444,19 @@ class VJEPA2ACWorldBackend(nn.Module):
         key = self.spatial_spawn_entity_key(spatial.to(self.spatial_spawn_entity_key.weight.dtype))
         value = self.spatial_spawn_entity_value(spatial.to(self.spatial_spawn_entity_value.weight.dtype))
         attended = F.scaled_dot_product_attention(query[:, None], key[:, None], value[:, None], dropout_p=0.)[:, 0]
-        query = self.spatial_spawn_output((query+attended).to(self.spatial_spawn_output.weight.dtype))
+        context = query+attended
+        query = self.spatial_spawn_output(context.to(self.spatial_spawn_output.weight.dtype))
         cells = map_features.flatten(2).transpose(1, 2).to(self.spatial_spawn_map_key.weight.dtype)
         keys = self.spatial_spawn_map_key(cells)
         residual = torch.matmul(query.float(), keys.float().transpose(1, 2))/math.sqrt(query.shape[-1])
-        return legacy+residual
+        logits = legacy+residual
+        if getattr(self.config, 'game_training_v5', False):
+            from .anchor_spawn import hierarchical_spawn_logits
+            anchor_residual = self.spatial_spawn_anchor_head(context.to(self.spatial_spawn_anchor_head.weight.dtype))
+            return hierarchical_spawn_logits(logits, anchor_residual, state,
+                self.renderer._spawn_walkable if walkable is None else walkable,
+                1/self.config.simulation_hz)
+        return {'spawn_logits': logits}
 
     def transition(self, state, action, map_features, memory, projection):
         state = state.float()
@@ -497,10 +512,13 @@ class VJEPA2ACWorldBackend(nn.Module):
         spawn = {}
         if self.config.endless:
             from .spawn import decode_spawn_positions
-            logits = self.spawn_logits(state, pooled, spatial, map_features)
+            heads = (self.spawn_outputs(state, pooled, spatial, map_features)
+                     if getattr(self.config, 'game_training_v5', False) else
+                     {'spawn_logits': self.spawn_logits(state, pooled, spatial, map_features)})
+            logits = heads['spawn_logits']
             positions, valid = decode_spawn_positions(logits, state, self.renderer._spawn_walkable,
                                                       1/self.config.simulation_hz)
-            spawn = {'spawn_logits': logits, 'spawn_positions': positions, 'spawn_valid': valid}
+            spawn = {**heads, 'spawn_positions': positions, 'spawn_valid': valid}
         from .structured_state import structured_transition
         result = structured_transition(state, candidate, action.float(), targets, attacks,
             dt=1/self.config.simulation_hz, training=self.training, endless=self.config.endless,

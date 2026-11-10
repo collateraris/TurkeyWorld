@@ -19,12 +19,18 @@ from .vq_world import (STUDENT_VQ_PARAMETERS, TEACHER_VQ_PARAMETERS,
     migrate_teacher_to_vq, student_vq_config, validate_frozen_codec)
 
 
-def teacher_vq_config(codec_config, teacher_size='500m_vqgan', spatial_entities=False, spatial_combat=False):
+def teacher_vq_config(codec_config, teacher_size='500m_vqgan', spatial_entities=False, spatial_combat=False,
+                      game_training_v5=False):
     if teacher_size == '175m_vqgan':
         from .vq_world import teacher175_vq_config
         config = teacher175_vq_config(codec_config)
         config.spatial_entities = bool(spatial_entities)
         config.spatial_combat = bool(spatial_combat)
+        config.game_training_v5 = bool(game_training_v5)
+        if game_training_v5:
+            config.flow_patch_size = 2
+            config.flow_block_conditioning = True
+        config.__post_init__()
         return config
     if teacher_size != '500m_vqgan':
         raise ValueError('Unknown shared-codec teacher profile')
@@ -37,7 +43,9 @@ def teacher_vq_config(codec_config, teacher_size='500m_vqgan', spatial_entities=
         renderer_codec='vqgan', renderer_codec_config=codec,
         vjepa_patch_size=codec['image_size']//8 if codec['image_size'] <= 128 else 16,
         flow_adapter_width=512, flow_adapter_depth=12, flow_adapter_heads=8,
-        spatial_entities=bool(spatial_entities), spatial_combat=bool(spatial_combat), **VJEPA500_PROFILE)
+        spatial_entities=bool(spatial_entities), spatial_combat=bool(spatial_combat),
+        game_training_v5=bool(game_training_v5), flow_patch_size=2 if game_training_v5 else 4,
+        flow_block_conditioning=bool(game_training_v5), **VJEPA500_PROFILE)
 
 
 class LatentWorldExperiment(MassiveExperiment):
@@ -50,8 +58,11 @@ class LatentWorldExperiment(MassiveExperiment):
         self.training_subset = None
         self.spatial_entities = bool(getattr(args, 'spatial_entities', False))
         self.spatial_combat = bool(getattr(args, 'spatial_combat', False))
+        self.game_training_v5 = bool(getattr(args, 'training_improvements_v5', False))
         if self.spatial_combat and not self.spatial_entities:
             raise ValueError('Spatial combat conditioning requires nine spatial entity states')
+        if self.game_training_v5 and not self.spatial_combat:
+            raise ValueError('Training v5 requires --spatial-combat and --spatial-entities')
         self.codec_options = {'accept_user_requested': True} if getattr(args, 'accept_current_codec', False) else {}
         validation_options = dict(self.codec_options)
         if hasattr(args, 'image_size'):
@@ -145,6 +156,15 @@ class LatentWorldExperiment(MassiveExperiment):
                 wall_conditioning=True, map_resolution=[16, 16],
                 wall_features=['tile_coordinates', 'tile_bounds', 'surface_type', 'camera_relative_geometry'],
                 hit_progress='nominal_HP_derived_per_life_with_ladder_validity')
+        if self.game_training_v5:
+            self.state['training_improvements'] = {'version': 5, 'ar_xy_offsets': [1, 4, 8, 16],
+                'training_wall_penalty': True, 'balanced_attacks': True,
+                'spawn': 'eight_learned_anchors_plus_learned_tile_fallback',
+                'spawn_normalization': 'actual_respawn_events_across_batch_and_horizon',
+                'flow_patch_size': 2, 'flow_image_tokens': (self.codec_info['codec_config']['image_size']//8)**2,
+                'flow_block_conditioning': True, 'balanced_foreground_background': True,
+                'decoded_endpoint_ssim_edges': True, 'flow_time_bins': 5,
+                'behavior_validation_every': 100, 'source_engine_feedback': False}
         # The500M parent estimate must not masquerade as an instantiated EMA.
         self.state['model_parameters'].pop('ema_target_total', None)
         if getattr(args, 'from_scratch', False):
@@ -200,7 +220,8 @@ class LatentWorldExperiment(MassiveExperiment):
             from .vq_world import vq_profile_parameter_count
             return vq_profile_parameter_count(teacher_vq_config(codec, getattr(self, 'teacher_size', '500m_vqgan'),
                 spatial_entities=getattr(self, 'spatial_entities', False),
-                spatial_combat=getattr(self, 'spatial_combat', False)))
+                spatial_combat=getattr(self, 'spatial_combat', False),
+                **({'game_training_v5': True} if getattr(self, 'game_training_v5', False) else {})))
         if self.PROFILE == '175vq':
             from .vq_world import TEACHER175_VQ_PARAMETERS
             return TEACHER175_VQ_PARAMETERS
@@ -209,12 +230,19 @@ class LatentWorldExperiment(MassiveExperiment):
     def teacher_initialization_profile(self):
         config = asdict(teacher_vq_config(self.codec_info['codec_config'], self.teacher_size,
                                         spatial_entities=getattr(self, 'spatial_entities', False),
-                                        spatial_combat=getattr(self, 'spatial_combat', False)))
+                                        spatial_combat=getattr(self, 'spatial_combat', False),
+                                        **({'game_training_v5': True} if getattr(self, 'game_training_v5', False) else {})))
         # Preserve the canonical fingerprint of runs created before this opt-in field.
         if not config.get('spatial_entities'):
             config.pop('spatial_entities', None)
         if not config.get('spatial_combat'):
             config.pop('spatial_combat', None)
+        if not config.get('game_training_v5'):
+            config.pop('game_training_v5', None)
+        if not config.get('flow_block_conditioning'):
+            config.pop('flow_block_conditioning', None)
+        if config.get('flow_patch_size', 4) == 4:
+            config.pop('flow_patch_size', None)
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         result = {'teacher_size': self.teacher_size, 'teacher_parameters': self.teacher_parameter_count(),
                   'teacher_config_fingerprint': fingerprint}
@@ -222,6 +250,8 @@ class LatentWorldExperiment(MassiveExperiment):
             result.update(spatial_entities=True, spatial_entity_count=9)
         if getattr(self, 'spatial_combat', False):
             result['spatial_combat'] = True
+        if getattr(self, 'game_training_v5', False):
+            result.update(game_training_v5=True, flow_patch_size=2, flow_block_conditioning=True)
         return result
 
     def training_data_options(self):
@@ -317,6 +347,8 @@ class LatentWorldExperiment(MassiveExperiment):
                 options['spatial_entities'] = True
             if getattr(self, 'spatial_combat', False):
                 options['spatial_combat'] = True
+            if getattr(self, 'game_training_v5', False):
+                options['game_training_v5'] = True
             config = teacher_vq_config(self.codec_info['codec_config'], **options)
             model = NeuralWorldModel(config).eval()
             model.flow_renderer.load_codec(self.args.codec_checkpoint)
@@ -395,6 +427,8 @@ def main(argv=None):
         help='Nine explicit map-relative participant tokens and local forward/side motion conditioning')
     parser.add_argument('--spatial-combat', action='store_true',
         help='Per-NPC combat/spawn heads, nine Flow conditions and auxiliary image consequences')
+    parser.add_argument('--training-improvements-v5', action='store_true',
+        help='AR XY/wall losses, balanced attacks, anchor spawn, patch2/block-conditioned Flow and validation every100')
     parser.add_argument('--motion-curriculum', action='store_true',
         help='Rebalance existing source windows from short movement cases to longer own-prediction rollouts')
     parser.add_argument('--motion-max-horizon', type=int, choices=(1, 4, 8, 16, 29), default=29,

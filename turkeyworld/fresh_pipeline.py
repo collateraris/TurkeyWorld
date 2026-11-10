@@ -26,8 +26,10 @@ def build_commands(args, subset, masks, *, codec_info=None):
     override_path = args.world_run_dir/'spatial_entities_migration.json'
     spatial = json.loads(override_path.read_text(encoding='utf-8')) if override_path.exists() else {}
     enabled = spatial.get('status') == 'complete' and spatial.get('spatial_entities') is True
-    target_seconds = spatial.get('target_seconds', 30) if enabled else 30
-    if enabled and (not isinstance(target_seconds, (int, float)) or not 0 < target_seconds <= 120
+    historical_target = spatial.get('target_seconds', 30) if enabled else 30
+    requested_target = getattr(args, 'target_seconds', None)
+    target_seconds = historical_target if requested_target is None else requested_target
+    if (not isinstance(target_seconds, (int, float)) or isinstance(target_seconds, bool) or not 0 < target_seconds <= 120
                     or not float(target_seconds).is_integer()):
         raise ValueError('Invalid spatial migration rollout duration')
     target_seconds = int(target_seconds)
@@ -74,9 +76,13 @@ def build_commands(args, subset, masks, *, codec_info=None):
         combat_path = args.world_run_dir/'combat_conditioning_migration.json'
         combat = json.loads(combat_path.read_text(encoding='utf-8')) if combat_path.exists() else {}
         if combat.get('status') == 'complete' and combat.get('spatial_combat') is True:
-            if int(combat.get('target_seconds', target_seconds)) != target_seconds:
+            if requested_target is None and int(combat.get('target_seconds', target_seconds)) != target_seconds:
                 raise ValueError('Combat and spatial migration rollout durations differ')
             world.append('--spatial-combat')
+            v5_path = args.world_run_dir/'training_v5_migration.json'
+            v5 = json.loads(v5_path.read_text(encoding='utf-8')) if v5_path.exists() else {}
+            if v5.get('status') == 'complete' and v5.get('game_training_v5') is True:
+                world.append('--training-improvements-v5')
     return {'codec': codec, 'sr': sr, 'world': world}
 
 
@@ -144,7 +150,7 @@ class FreshPipeline:
             'stage_label': 'Подготовка нового корпуса и этапов обучения с нуля',
             'current': 0, 'total': 128000, 'started_at': now(),
             'image_size': args.image_size, 'output_size': args.image_size*16,
-            'evaluation': {'status': 'pending', 'target_seconds': 30, 'passed': False},
+            'evaluation': {'status': 'pending', 'target_seconds': getattr(args, 'target_seconds', 30), 'passed': False},
             'pipeline': {'codec_from_scratch': True, 'sr_from_scratch': True,
                 'world_from_scratch': True, 'renderer_from_scratch': True, 'discriminator_from_scratch': True,
                 'stage_order': ['codec', 'sr', 'world'], 'old_weights_reused': False,
@@ -277,6 +283,8 @@ def build_parser():
     p.add_argument('--codec-batch', type=int, default=32)
     p.add_argument('--sr-batch', type=int, default=8)
     p.add_argument('--sr-steps', type=int, default=2000)
+    p.add_argument('--target-seconds', type=int, default=15,
+        help='Autonomous gameplay qualification duration; does not reset trained weights')
     return p
 
 
@@ -285,6 +293,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if min(args.batch, args.gradient_accumulation_steps, args.codec_batch, args.sr_batch, args.sr_steps) < 1:
         p.error('Batch sizes, accumulation and training steps must be positive')
+    if not 1 <= args.target_seconds <= 120:
+        p.error('Autonomous target must be between1 and120 seconds')
     existing_pid = args.run_dir/'training.pid'
     if (existing_pid.exists() and int(existing_pid.read_text()) != os.getpid()
             and process_alive(int(existing_pid.read_text()))):

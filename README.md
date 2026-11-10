@@ -8,8 +8,8 @@ teacher world model, neural renderer and GAN from scratch**, using new native
 **32×32** game data. Playback is **neural RGB32 → learned SR128 → bilinear512**.
 
 The new run has started; the dashboard reports its actual stage. **Training
-completion, image similarity and 30 seconds of correct autonomous gameplay
-are separate results.** Thirty seconds remains a target. A saved checkpoint does
+completion, image similarity and 15 seconds of correct autonomous gameplay
+are separate results.** Fifteen seconds remains a target. A saved checkpoint does
 not establish that result; future artifact names below do not mean those
 training stages have already finished.
 
@@ -86,8 +86,9 @@ optimizer updates are not counts of unique examples or full dataset epochs.
 
 ## Train codec, SR and world
 
-The controller runs one GPU training worker at a time. Configuration for the
-next resume, with microbatch 21 and accumulation 5:
+The controller runs one GPU training worker at a time. Active configuration:
+microbatch 16 and accumulation 1, effective batch 16,
+target 15 seconds / 450 steps:
 
 ```powershell
 & $twPython -m turkeyworld.fresh_pipeline `
@@ -96,20 +97,27 @@ next resume, with microbatch 21 and accumulation 5:
   --codec-run-dir training_runs/vqgan32_20261109 `
   --sr-run-dir training_runs/sr32x4_20261109 `
   --world-run-dir training_runs/vjepa175_32px_128k_20261109 `
-  --image-size 32 --device cuda --batch 21 --gradient-accumulation-steps 5
+  --image-size 32 --device cuda --batch 16 --gradient-accumulation-steps 1 --target-seconds 15
 ```
 
 This experiment already exists in the workspace; do not start a second copy.
-The accumulation change **21→5** takes effect on the next resume after a
-completed optimizer update, retaining weights, optimizer state and counters.
+The accumulation change **21→5** was applied when resuming checkpoint 154 after
+a completed optimizer update, retaining weights, optimizer state and counters.
+That is a historical configuration. Training resumed from checkpoint **746**
+with **27×1=27**; completed update **747** and its checkpoint were verified.
+The subsequent change to **16×1=16** is verified: training resumed checkpoint
+**800**, and completed checkpoint **801** records 16 additional fragments,
+one optimizer update and no pending microbatches.
 New experiments require separate controller, codec, SR and world directories.
 After a graceful stop, the identical command resumes saved stages. Changing
 the persisted controller configuration is rejected.
 The production command is also recorded in
 `training_runs/fresh32_pipeline_20261109/launch_command.json`. A completed
 `spatial_entities_migration.json` in the world run selects the spatial profile,
-motion curriculum, 30-second target and upgraded SR checkpoint on subsequent
-resumes. This continues the existing budget and compatible optimizer state.
+motion curriculum and upgraded SR checkpoint on subsequent resumes. Its
+historical 30-second target is retained in the migration record; the explicit
+`--target-seconds 15` controller setting overrides it for the current run.
+This continues the existing budget and compatible optimizer state.
 
 1. **VQGAN from scratch.** Encoder, codebook, decoder and codec PatchGAN learn
    from source32. Every 100 updates, a fixed held-out panel is reconstructed.
@@ -126,8 +134,8 @@ resumes. This continues the existing budget and compatible optimizer state.
    cache supplies training labels only.
 4. **Fresh world, Base, Flow and conditional GAN.** The teacher starts randomly,
    loading only the newly trained, frozen codec. Joint training has a persisted
-   budget of **6,000 optimizer updates**, microbatch **21**, accumulation **5**
-   on the next resume, effective fragment batch **105**. World, Base and Flow train; codec weights
+   budget of **6,000 optimizer updates**. The active run uses microbatch
+   **16**, accumulation **1**, effective fragment batch **16**. World, Base and Flow train; codec weights
    stay frozen. Conditional GAN weight is 0.005 and feature weight 0.01, with 32
    discriminator updates of warmup and a 128-update ramp.
 
@@ -140,16 +148,16 @@ world heads. Base learns direct reconstruction; Flow detaches its Base condition
 Exact NPC pixels receive normalized weight 4. Source-without-NPC images are
 conditional discriminator negatives only when NPCs are present.
 
-With this configuration, a group processes 5 separate microbatches, then takes one
-generator and one discriminator update. EMA/global/save clocks advance at
-optimizer boundaries; 5 full graphs are not retained simultaneously.
+With this configuration, one microbatch produces one generator and one
+discriminator update, without gradient accumulation. EMA/global/save clocks
+advance at completed optimizer boundaries.
 
 After the 6,000-update world budget, status becomes `awaiting_user`. The run
 does **not automatically expand data, start repair rounds or train the student**,
 and does not declare gameplay qualified. A native32 student profile exists for
 future work. Codec qualification is open-ended, and native32 needs its own
 timing measurements; old 128px timings do not establish an ETA for this run.
-Time to correct 30-second gameplay is unknown.
+Time to correct 15-second gameplay is unknown.
 
 ## Additional SR quality run
 
@@ -213,8 +221,8 @@ Short autoregressive training uses the local-motion curriculum
 forward/side motion in local coordinates; the legacy mode keeps world axes.
 `motion_player` and `motion_npc` already include the common ×5 weight and sum to
 the existing `motion` term; they are diagnostics, not extra loss terms.
-The independent final target is **30 seconds = 900 autonomous steps at 30 Hz**.
-Training on 29-step clips does not establish 900-step training or qualification.
+The independent final target is **15 seconds = 450 autonomous steps at 30 Hz**.
+Training on 29-step clips does not establish 450-step training or qualification.
 The real GPU probe completed the 29-step, batch 21 forward/backward/sampler update
 with 15.75 GiB peak allocated memory; it does not qualify autonomous gameplay.
 
@@ -248,8 +256,8 @@ head and walkable/distance/separation constraints remain in use. New residual
 outputs start at zero; [combat migration](turkeyworld/combat_migration.py) retains existing weights and optimizer moments,
 EMA, GAN state, RNG and completed-update counters.
 
-Training keeps the same fixed **128k transitions**, microbatch **21 × 5**
-accumulation = **105 fragments per optimizer update** on the next resume, and the remaining original
+Training keeps the same fixed **128k transitions**. The active run uses
+microbatch **16 × 1** accumulation = **16 fragments per optimizer update** and the remaining original
 6,000-update budget. Sampling mixes **25% uniform, 35% motion and 40% combat**
 windows, using source hit, miss, attack, damage, death, wall and spawn events.
 The main autoregressive rollout finishes before separate GT-pose combat/spawn
@@ -262,8 +270,72 @@ these remain components of the aggregate `combat`. Image terms
 `combat_image_loss`, `spawn_image_loss`, `foreground_base` and
 `foreground_sampled` are displayed separately. Values come only from the current
 phase and `loss_protocol`; a missing field is “—”, never an invented zero.
-This extension does not qualify the **30-second / 900-step** target or change
+This extension does not qualify the **15-second / 450-step** target or change
 the selected SR result: clean mean SSIM **0.852550**, below its 0.90 goal.
+
+## Training improvements V5
+
+V5 is **active: training resumed from checkpoint 725 and completed update 726
+was verified**, including generator/discriminator optimizer and EMA counters.
+It keeps the same fixed 128k transitions,
+frozen codec and selected 20,000-update SR. The batch change to **27×1=27**
+was verified by completed, saved update **747** after resuming checkpoint **746**.
+The current batch **16×1=16** was verified by saved update **801**, continuing
+checkpoint **800** with optimizer state and counters preserved.
+The 15-second / 450-step gameplay target remains unqualified. This duration
+change does not alter the frozen 32-transition source clips or reset weights.
+The measured full
+generator count is **181,167,857**, including the codec. EMA, critics and SR
+are counted separately.
+
+The V5 flag introduces nine related changes:
+
+1. Explicit own-trajectory XY objectives at offsets **1, 4, 8, 16** when the
+   current curriculum horizon permits them, plus circle/wall and X-then-Y path
+   penalties. These are training losses, not runtime position correction.
+2. Attack BCE normalizes positive and eligible-negative cases separately across
+   batch and horizon, with class masses **4:1**. Missing classes do not dilute
+   present ones; focal weighting is optional and disabled by default.
+3. A learned **eight-anchor + fallback** spawn decision retains the old 256-cell
+   head for non-anchor choices. Geometry safety and slot order stay intact.
+   Anchor/fallback CE is normalized over actual revived slots across **B×H**;
+   the effective 256-cell CE is not added again.
+4. Image and continuous-latent losses give each present NPC/background region
+   equal mass using the actual offline mask, instead of background-dominated
+   averaging. Base, sampled Flow and combat/spawn image auxiliaries use it.
+5. The latent Flow patch changes **4→2**: **4→16 image tokens** at native32.
+   RGB resolution, 64 visual encoder tokens and carried memory are unchanged.
+6. Every Flow block in both the main DiT and residual adapter receives explicit
+   nine-participant and wall-map conditions through new residual branches.
+7. The decoded CFM endpoint estimate gains small SSIM and edge terms
+   (**0.05 each**), alongside its reconstruction objective.
+8. Flow times are stratified through the chosen CDF. Teacher keeps its fixed
+   logit-normal distribution; `time_uniform_fraction` is an optional renderer
+   knob, default 0. Five time-bin losses are diagnostics; errors do not
+   automatically change the sampling distribution.
+9. Fixed held-out behavior validation runs every **100 optimizer updates**:
+   one-step event cohorts and 32 own-state trajectories of horizon16. The new
+   protocol's initial baseline was recorded at **725**, with the first regular
+   check at **800**. Results go to `behavior_validation_latest.json` and
+   `behavior_validation/step_XXXXXX/`; this is not 450-step qualification.
+
+Stop both controller and worker after a complete optimizer update before
+migrating. The command creates backups and a recoverable completion marker:
+
+```powershell
+& $twPython -m turkeyworld.training_v5_migration `
+  --run-dir training_runs/vjepa175_32px_128k_20261109 --seed 173
+```
+
+Resume the existing production controller after migration. Its completed
+`training_v5_migration.json` adds `--training-improvements-v5` to the world
+command; direct `train_vq_world` use also requires `--spatial-entities` and
+`--spatial-combat`. Compatible generator tensors, EMA, GAN, RNG and completed
+step/corpus-budget counters are retained from 725. Eight patch-shape tensors
+are transferred deterministically and **only their eight Adam states reset**;
+new parameters start without moments. Patch resizing does not promise identical
+rendered outputs. V4 and V5 have different objectives: their raw loss totals
+cannot be compared directly; use matching-protocol held-out measurements.
 
 ## Architecture and execution
 
@@ -294,7 +366,8 @@ discriminators and perceptual-loss network are training-only.
 
 Base directly produces RGB32. The VQGAN downsamples by 4 to **8×8×16**, with a
 **1,488-entry** learned codebook. Flow evolves normalized continuous latents;
-a patch size of 4 gives four spatial transformer tokens. Terminal latents are
+a legacy patch size of 4 gives four spatial transformer tokens; V5 patch2 gives
+16. Terminal latents are
 quantized and decoded back to 32. The world generator produces no intermediate
 RGB128. Learned SR then maps 32→128; only 128→512 is bilinear. SR is excluded
 from the teacher count.
@@ -371,7 +444,7 @@ Keep its foreground terminal open or use a background launcher. The awake
 guard permits **Win+L** and display sleep; computer sleep, sign-out or shutdown
 still interrupts processes.
 
-## Neural playback and 30-second evaluation
+## Neural playback and 15-second evaluation
 
 Once new world and trained-SR checkpoints exist, with GPU capacity available:
 
@@ -388,19 +461,22 @@ resizing. Controls match the reference game; close/relaunch to restart after
 death. Without `--two-stage-upscale`, the legacy display default remains 1024.
 Actual 30Hz/FPS performance must be measured.
 
-The independent evaluator can test **30 seconds = 900 steps**:
+The independent evaluator can test **15 seconds = 450 steps**:
 
 ```powershell
 & $twPython -m turkeyworld.evaluate_rollout `
   --world training_runs/vjepa175_32px_128k_20261109/checkpoints/teacher175vq_world.pt `
-  --device cuda --seconds 30 --episodes 2 --scenario explore `
-  --render-every 30 --output training_runs/vjepa175_32px_128k_20261109/evaluation_30s.json
+  --device cuda --seconds 15 --episodes 2 --scenario explore `
+  --render-every 30 --output training_runs/vjepa175_32px_128k_20261109/evaluation_15s.json
 ```
 
 Reports include actual duration, integrity, movement/combat coverage, oracle
 rejections and sampled image comparisons. Oracle calls measure only; they do
-not correct the rollout. A 30-second pass does not qualify longer rollouts. Seeds vary
+not correct the rollout. A 15-second pass does not qualify longer rollouts. Seeds vary
 trajectories on one fixed arena; this does not establish new-map generalization.
+Checkpoint 700's historical 30-second reports remain labeled as such under
+`diagnostics/validation_20261110T055628Z_g700/`; changing the current target
+does not relabel those measurements or establish a new pass.
 
 ## Artifacts and history
 
