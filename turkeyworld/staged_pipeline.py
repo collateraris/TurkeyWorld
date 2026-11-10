@@ -16,6 +16,44 @@ from .training_pipeline import atomic_json, now
 from .vqgan_pipeline import process_alive
 
 
+class StagedWorkerError(RuntimeError):
+    """A nonzero child exit with its current status cause preserved."""
+
+    def __init__(self, exit_code, cause):
+        self.exit_code = int(exit_code)
+        self.failure_cause = dict(cause)
+        super().__init__(self.failure_cause['message'])
+
+
+def _worker_exit_error(root, worker_pid, code):
+    # Status belongs to this launch: old failure fields are cleared before
+    # Popen. Append-only logs deliberately are not a source of current errors.
+    status = json.loads((root/'status.json').read_text(encoding='utf-8'))
+    cause = status.get('failure_cause')
+    cause = dict(cause) if isinstance(cause, dict) else {}
+    message = status.get('error')
+    if not isinstance(message, str) or not message.strip():
+        message = cause.get('message')
+    if not isinstance(message, str) or not message.strip():
+        message = 'Staged teacher exited with code '+str(code)
+    cause.update(source='worker', message=message, worker_pid=worker_pid,
+        reported_at=status.get('updated_at'), global_training_step=status.get('global_training_step'))
+    return StagedWorkerError(code, cause)
+
+
+def _publish_failure(path, error):
+    status = json.loads(path.read_text(encoding='utf-8'))
+    if isinstance(error, StagedWorkerError):
+        cause = error.failure_cause
+        status['worker_exit_code'] = error.exit_code
+    else:
+        cause = {'source': 'supervisor', 'message': str(error),
+            'exception_type': type(error).__name__}
+        status.pop('worker_exit_code', None)
+    status.update(status='failed', error=cause['message'], failure_cause=cause, updated_at=now())
+    atomic_json(path, status)
+
+
 def build_plan(data_root):
     root = Path(data_root).resolve()
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
@@ -95,6 +133,12 @@ def run(args):
         atomic_json(root/'launch_command.json', command)
         env = os.environ.copy()
         env.update(OMP_NUM_THREADS='4', MKL_NUM_THREADS='4', PYTHONFAULTHANDLER='1')
+        status_path = root/'status.json'
+        status = json.loads(status_path.read_text(encoding='utf-8'))
+        for key in ('error', 'failure_cause', 'worker_exit_code'):
+            status.pop(key, None)
+        status.update(status='running', updated_at=now())
+        atomic_json(status_path, status)
         with (root/'training.stdout.log').open('ab') as stdout, (root/'training.stderr.log').open('ab') as stderr:
             child = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent, env=env,
                 stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL, close_fds=True,
@@ -105,7 +149,7 @@ def run(args):
         atomic_json(root/'active_run.json', record)
         code = child.wait()
         if code:
-            raise RuntimeError('Staged teacher exited with code'+str(code))
+            raise _worker_exit_error(root, child.pid, code)
 
 
 def main(argv=None):
@@ -123,9 +167,7 @@ def main(argv=None):
     except BaseException as error:
         path = args.run_dir/'status.json'
         if path.exists():
-            status = json.loads(path.read_text(encoding='utf-8'))
-            status.update(status='failed', error=str(error), updated_at=now())
-            atomic_json(path, status)
+            _publish_failure(path, error)
         raise
 
 

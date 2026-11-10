@@ -328,6 +328,7 @@ class CameraTransformerWorldModel(nn.Module):
         result = structured_transition(authoritative_state, candidate, action.float(), targets, attacks,
                                        dt=1. / self.config.simulation_hz, training=self.training,
                                        endless=self.config.endless,
+                                       respawn_enabled=not getattr(self.config, 'navigation_only', False),
                                        spawn_positions=spawn.get("spawn_positions"), spawn_valid=spawn.get("spawn_valid"))
         return {**result, "memory": memory, "features": self.feature_head(memory),
                 "target_logits": targets, "attack_logits": attacks, **spawn}

@@ -167,3 +167,42 @@ class ComponentCurriculum:
         return self.phase.setdefault('sampling', {'weights': dict(NAVIGATION_FOCUS_WEIGHTS),
             'sample_counts': {case: 0 for case in NAVIGATION_CASES}, 'draws': 0,
             'source_fingerprint': self.plan['navigation_source_fingerprint']})
+
+    def apply_transition_request(self, request, step):
+        """Apply an explicit user handoff once, without claiming a quality pass."""
+        fingerprint = experiment_fingerprint(request)
+        records = self.state.get('applied_transition_requests', [])
+        existing = next((item for item in records if item['id'] == request.get('id')), None)
+        if existing:
+            if existing['fingerprint'] != fingerprint:
+                raise ValueError('An applied component transition request changed')
+            return False
+        if (request.get('version') != 1 or not isinstance(request.get('id'), str) or not request['id']
+                or request.get('component_plan_fingerprint') != self.state['fingerprint']
+                or request.get('reason') != 'user_requested'
+                or step != self.state['last_optimizer_step'] or request.get('optimizer_step') != step
+                or request.get('from_phase') != self.name or self.state['phase_index'] >= 2
+                or request.get('to_phase') != self.state['phases'][self.state['phase_index']+1]['id']
+                or not isinstance(request.get('saved_checkpoint'), str) or not request['saved_checkpoint']
+                or not isinstance(request.get('saved_checkpoint_sha256'), str)
+                or len(request['saved_checkpoint_sha256']) != 64
+                or any(c not in '0123456789abcdef' for c in request['saved_checkpoint_sha256'])):
+            raise ValueError('Component transition requires the current saved boundary, next phase and archived checkpoint')
+        phase = self.phase
+        phase.update(status='completed', completion_reason='user_requested', completed_step=step,
+            saved_checkpoint=request['saved_checkpoint'],
+            saved_checkpoint_sha256=request['saved_checkpoint_sha256'],
+            transition_quality_passed=phase['gate'].get('quality_passed') is True)
+        self.state['history'].append(copy.deepcopy(phase))
+        self.state['phase_index'] += 1
+        self.phase.update(status='active', phase_start_step=step)
+        self.state.setdefault('applied_transition_requests', []).append({
+            'id': request['id'], 'fingerprint': fingerprint, 'step': step,
+            'from_phase': request['from_phase'], 'to_phase': request['to_phase'],
+            'reason': 'user_requested', 'saved_checkpoint': request['saved_checkpoint']})
+        if self.name == 'dynamics':
+            self.dynamics_sampling()
+        elif 'stop_optimizer_step' in self.plan:
+            self.phase['budget_updates'] = max(0, self.plan['stop_optimizer_step']-step)
+        self.sync()
+        return True

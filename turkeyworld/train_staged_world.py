@@ -7,6 +7,7 @@ also trains uninterrupted own-state trajectories with truncated gradients.
 from __future__ import annotations
 
 from dataclasses import asdict
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,10 @@ class StagedWorldExperiment(VJEPAExperiment):
     PHASE = 'teacher175vq_world'
 
     def save(self, model, optimizer, phase, step, metrics, extra=None):
+        rollout = getattr(self, 'long_rollout', None)
+        if rollout:
+            rollout.update(committed_long_update_count=rollout['long_update_count'],
+                last_committed_optimizer_step=self.global_step)
         fields = {'staged_curriculum': self.curriculum.sync(self.global_step),
             'behavior_version': BEHAVIOR_VERSION,
             'initialization': self.state.get('initialization'),
@@ -64,7 +69,11 @@ class StagedWorldExperiment(VJEPAExperiment):
         self.state['staged_validation_progress'] = {'status': 'running', 'stage': stage,
             'step': self.global_step, 'every': 100, 'report_directory': str(root)}
         self.publish_curriculum()
-        if component == 'renderer':
+        long_navigation = bool(getattr(self, 'long_rollout', None)
+            and component in ('dynamics','joint') and stage=='navigation')
+        if long_navigation:
+            report = self.evaluate_long_navigation(model, root)
+        elif component == 'renderer':
             from .component_validation import evaluate_renderer_component
             report = evaluate_renderer_component(model, self.validation_pool(stage),
                 context=self.args.context, count=32, batch_size=4, seed=self.args.seed,
@@ -77,7 +86,7 @@ class StagedWorldExperiment(VJEPAExperiment):
         report['component_phase'] = component
         report.update(step=self.global_step, global_training_step=self.global_step)
         report.setdefault('report_path', str(root/'report.json'))
-        if stage == 'navigation' and report['metrics'].get('all_states_finite'):
+        if stage == 'navigation' and report['metrics'].get('all_states_finite') and not long_navigation:
             self.navigation_case_metrics(report, root, self.global_step)
         if component == 'joint':
             self.curriculum.record_validation(report, self.global_step)
@@ -108,6 +117,9 @@ class StagedWorldExperiment(VJEPAExperiment):
             return
         effective = ('renderer' if self.components.name == 'joint' and self.curriculum.stage['renderer_only']
             else self.components.name)
+        if getattr(self, 'long_rollout', None):
+            model.config.navigation_only = self.components.name in ('dynamics','joint') and self.curriculum.stage['id']=='navigation'
+            self.long_rollout['enabled'] = self.components.name == 'dynamics'
         policy = configure_component_phase(model, effective)
         self.components.phase['parameter_policy'] = policy
         self.state.setdefault('model_parameters', {}).update(
@@ -209,10 +221,96 @@ class StagedWorldExperiment(VJEPAExperiment):
             self._stage_validation_pools = {}
         if stage not in self._stage_validation_pools:
             info = self.curriculum.plan['datasets'][stage]
-            self._stage_validation_pools[stage] = StagedSequenceData(Path(info['directory'])/'rgb/val',
+            use_long = bool(getattr(self, 'long_rollout', None) and stage=='navigation')
+            directory = Path(self.long_rollout['dataset_directory']) if use_long else Path(info['directory'])
+            self._stage_validation_pools[stage] = StagedSequenceData(directory/'rgb/val',
                 self.device, mode='stream', cache_bytes=64*1024**2,
-                episode_paths=info.get('val_filenames'))
+                episode_paths=None if use_long else info.get('val_filenames'))
         return self._stage_validation_pools[stage]
+
+    def evaluate_long_navigation(self, model, root):
+        from .behavior_trajectory import evaluate_state_trajectories
+        from .navigation_case_validation import summarize_navigation_cases
+        data = self.validation_pool('navigation')
+        result = evaluate_state_trajectories(model, data, root/'trajectory',
+            context=self.args.context,horizon=450,count=min(32,len(data.episodes)),batch_size=4,seed=self.args.seed)
+        cases = summarize_navigation_cases(root/'trajectory',self.long_rollout['dataset_directory'])
+        last = result['offsets']['450']
+        metrics = {'player_xy_mean':last['player_xy_error_tiles']['mean'],
+            'player_xy_p95':last['player_xy_error_tiles']['p95'],
+            'wall_windows':sum(c['wall_collision_windows'] for c in cases.values()),
+            'trajectory_horizon':450,'trajectory_windows':result['count'],
+            'transitions_evaluated':450*result['count'],'all_states_finite':result['all_states_finite'],
+            'all_memory_finite':result['all_memory_finite_and_shape_valid'],
+            'source_future_feedback':False,'engine_corrections':0,'model_resets':0,
+            'rgb_frames':0,'image_quality_evaluated':False,'full_rollout_evaluated':True}
+        thresholds={'player_xy_mean_max':.1,'player_xy_p95_max':.25,'wall_windows_max':0}
+        image_passed=True
+        if self.components.name=='joint':
+            from .staged_validation import _isolated_validation, _rollout_images_and_audit
+            panel=[(w['episode_index'],w['start']) for w in result['panel']['windows']]
+            with _isolated_validation(model,data,self.args.seed):
+                image_metrics,_=_rollout_images_and_audit(model,data,panel,self.args.context,450,4,225,self.device,False)
+            metrics.update(image_metrics,image_quality_evaluated=True)
+            thresholds.update(rgb_ssim_min=.9,rgb_mae_max=.03)
+            image_passed=(metrics['rgb_finite'] and metrics['rgb_ssim']>=.9 and metrics['rgb_mae']<=.03)
+        return {'stage':'navigation','component_phase':'dynamics','metrics':metrics,'per_case':cases,
+            'passed':metrics['all_states_finite'] and metrics['all_memory_finite']
+                and metrics['player_xy_mean']<=.1 and metrics['player_xy_p95']<=.25 and metrics['wall_windows']==0 and image_passed,
+            'thresholds':thresholds,
+            'report_path':str(root/'long_navigation_validation.json'),
+            'source_held_out':True,'future_source_feedback':False,'model_resets':0,'engine_corrections':0,
+            'scope':'450 own transitions and memory in explicit navigation-no-enemies profile; '
+                +('sparse own-pose RGB qualification' if self.components.name=='joint' else 'no RGB qualification')}
+
+    def long_component_backward(self, model, pools, *, joint=False):
+        from .long_dynamics_training import long_dynamics_backward
+        from .navigation_sampling import NavigationFocusSampler, NAVIGATION_CASES
+        navigation = self.curriculum.stage['id']=='navigation'
+        if navigation:
+            if not hasattr(self, '_long_navigation_pool'):
+                self._long_navigation_pool = StagedSequenceData(
+                    Path(self.long_rollout['dataset_directory'])/'rgb/train',self.device,
+                    mode='stream',cache_bytes=self.args.cache_mb*1024**2)
+                self._long_navigation_sampler = NavigationFocusSampler(self._long_navigation_pool,
+                    context=self.args.context,horizon=450)
+            pool = self._long_navigation_pool
+            sampling = self.long_rollout.setdefault('sampling',{'sample_counts':{k:0 for k in NAVIGATION_CASES},
+                'draws':0,'source_fingerprint':self._long_navigation_sampler.fingerprint})
+            if (sampling['source_fingerprint']!=self._long_navigation_sampler.fingerprint
+                    or sampling['draws']!=self.long_rollout['long_navigation_update_count']*self.args.batch):
+                raise ValueError('Long navigation sampling source/counters changed')
+            indices,counts,draws,selected = self._long_navigation_sampler.sample(self.args.batch,self.rng,
+                counts=sampling['sample_counts'],draws=sampling['draws'])
+            self._pending_long_sampling={'sample_counts':counts,'draws':draws,'last_batch_case_counts':selected}
+            batch=pool.batch(self.args.batch,context=self.args.context,horizon=450,rng=self.rng,indices=indices)
+        else:
+            batch=pools.get('full_game').batch(self.args.batch,context=self.args.context,horizon=450,rng=self.rng)
+        def progress(processed,horizon):
+            self.state['long_training_progress']={'step':self.global_step+1,'horizon':horizon,
+                'transitions_processed':processed,'tbptt_chunk':16,'optimizer_updated':False,
+                'numerical_state_resets':0,'source_future_feedback':False}
+            self.publish_curriculum()
+        metrics=long_dynamics_backward(model,self.ema,batch,context=self.args.context,chunk_size=16,
+            amp=nullcontext,progress_callback=progress)
+        metrics['long_training_precision']='fp32'
+        if joint:
+            offset=(449,224,63,15)[self.long_rollout['joint_long_update_count']%4]
+            query={key:(value[:,offset:offset+1] if key in ('target_states','target_frames','target_object_masks',
+                'target_background_frames') else value) for key,value in batch.items()}
+            with self.amp(cache_enabled=False):
+                image,values,endpoint=render_only_loss(model,self.ema,query,object_region_boost=4.)
+            image.backward()
+            refinement,gan=self.image_refinement(model,endpoint)
+            if not bool(torch.isfinite(image)) or not bool(torch.isfinite(refinement)):
+                raise FloatingPointError('Nonfinite joint450 image objective')
+            refinement.backward()
+            metrics.update(values);metrics.update(gan)
+            metrics['train_loss']+=float(image.detach())+float(refinement.detach())
+            metrics.update(component_phase='joint',renderer_only=False,rgb_supervised_steps=1,
+                joint_render_future_offset=offset+1,image_objectives_active=True)
+        metrics['long_source_navigation']=navigation
+        return metrics
 
     def image_refinement(self, model, endpoint):
         from .object_losses import balanced_image_l1, foreground_contrastive_loss
@@ -280,6 +378,8 @@ class StagedWorldExperiment(VJEPAExperiment):
 
     def run(self):
         torch.set_num_threads(4)
+        if self.device.type=='cuda':
+            torch.cuda.init()
         torch.manual_seed(self.args.seed)
         np.random.seed(self.args.seed)
         phase = self.PHASE
@@ -304,6 +404,7 @@ class StagedWorldExperiment(VJEPAExperiment):
         self.recover_navigation_baseline(focus)
         plan_path = self.root/'component_training_plan.json'
         self.components = None
+        transition_applied = False
         if plan_path.exists():
             self.components = ComponentCurriculum(plan_path, step=self.global_step,
                 base_plan_fingerprint=self.curriculum.fingerprint,
@@ -311,8 +412,16 @@ class StagedWorldExperiment(VJEPAExperiment):
             from .navigation_experiment import supersede_navigation_focus
             supersede_navigation_focus(self.curriculum, self.global_step, self.components.state['fingerprint'])
             self.allow_frozen_optimizer_parameters = True
+            request_path = self.root/'component_transition_request.json'
+            if request_path.exists():
+                transition_request = json.loads(request_path.read_text(encoding='utf-8'))
+                transition_applied = self.components.apply_transition_request(transition_request, self.global_step)
         elif metadata.get('component_training'):
             raise ValueError('Saved component training requires its immutable phase plan')
+        self.long_rollout = None
+        if self.components:
+            from .long_rollout_protocol import bind_long_rollout
+            self.long_rollout = bind_long_rollout(self.components,self.root/'long_dynamics_plan.json',self.global_step)
         pools = StagedTrainingPools(self.curriculum, None, device=self.device,
             seed=self.args.seed, cache_bytes=self.args.cache_mb*1024**2)
         self._setup_adversarial(phase)
@@ -334,12 +443,27 @@ class StagedWorldExperiment(VJEPAExperiment):
             optimizer_budget={'start_optimizer_step': 0, 'stop_optimizer_step': self.args.updates,
                 'limit_updates': self.args.updates, 'status': 'training'})
         self._publish_model_sizes(model)
+        if self.long_rollout:
+            self.state['loss_protocol']='single_enemy_staged_long450_fp32_v5'
+            self.long_rollout.update(training_precision='fp32',gradient_norm_precision='fp64',
+                gradient_check_every_chunk=True,checkpoint_every_long_update=True)
+            self.state['numerical_stability']={'long_forward_backward_precision':'fp32',
+                'gradient_norm_precision':'fp64','gradient_check_every_tbptt_chunk':True,
+                'nonfinite_policy':'abort_before_world_optimizer_update',
+                'checkpoint_every_long_update':True,'resumed_from_step':completed}
+            self.state.setdefault('training_protocol',{}).update(
+                loss_aggregation='sum_of_time_weighted_tbptt_chunks',
+                training_rollout_steps=450,tbptt_chunk=16,optimizer_updates_per_rollout=1)
         self.configure_components(model)
         self.state['model_parameters']['target_teacher_total'] = 175000000
         atomic_json(self.root/'experiment_config.json', {key: str(v) if isinstance(v, Path) else v
             for key, v in vars(self.args).items()})
         self.publish_curriculum()
         metrics = {}
+        if transition_applied:
+            # Persist the consumed request and unchanged optimizer/weights before
+            # potentially expensive baseline validation or the first new update.
+            self.save(model, optimizer, phase, completed, metrics)
         focus_baseline = bool(focus and focus['status'] == 'active' and focus['baseline_step'] is None)
         validation_due = self.components.validation_due(self.global_step) if self.components else self.curriculum.validation_due(self.global_step)
         if validation_due or focus_baseline:
@@ -359,8 +483,13 @@ class StagedWorldExperiment(VJEPAExperiment):
             focus_used = False
             # Full-length own-state training alternates with short joint image,
             # event and motion updates, preserving both sources of supervision.
-            long_update = component == 'joint' and stage['id'] == 'full_game' and step % 4 == 0
-            renderer_enabled = component != 'dynamics' and not long_update
+            protocol = bool(self.long_rollout)
+            long_dynamics = protocol and component == 'dynamics'
+            joint_sequence = (protocol and component == 'joint' and not stage['renderer_only']
+                and self.components.phase['updates']%4!=3)
+            long_update = long_dynamics or joint_sequence or (
+                not protocol and component == 'joint' and stage['id'] == 'full_game' and step % 4 == 0)
+            renderer_enabled = component != 'dynamics' and (not long_update or joint_sequence)
             dynamics_enabled = component != 'renderer' and not stage['renderer_only']
             self.state['renderer_training'].update(active=renderer_enabled,
                 adversarial_active=renderer_enabled, dynamics_active=dynamics_enabled,
@@ -368,7 +497,9 @@ class StagedWorldExperiment(VJEPAExperiment):
                     'renderer_gt_base_flow_gan' if component == 'renderer' else
                     'dynamics_state_only' if component == 'dynamics' else
                     'static_pose_base_flow_gan' if stage['renderer_only'] else 'joint_dynamics_flow_matching_gan')
-            if long_update:
+            if long_dynamics or joint_sequence:
+                metrics = self.long_component_backward(model,pools,joint=joint_sequence)
+            elif long_update:
                 metrics = self.long_backward(model, pools, self.args.batch)
             else:
                 batch = self.component_batch(pools) if self.components else pools.batch(
@@ -408,12 +539,24 @@ class StagedWorldExperiment(VJEPAExperiment):
             flow = [p for p in model.flow_renderer.parameters() if p.requires_grad]
             flow_ids = {id(p) for p in flow}
             world = [p for p in model.parameters() if p.requires_grad and id(p) not in flow_ids]
-            torch.nn.utils.clip_grad_norm_(world, 1., error_if_nonfinite=True)
-            torch.nn.utils.clip_grad_norm_(flow, 1., error_if_nonfinite=True)
+            from .gradient_safety import clip_finite_grad_norm_
+            names={id(p):name for name,p in model.named_parameters()}
+            metrics['world_grad_norm']=float(clip_finite_grad_norm_(
+                [(names[id(p)],p) for p in world],1.,context=f'Optimizer update{step}: dynamics'))
+            metrics['flow_grad_norm']=float(clip_finite_grad_norm_(
+                [(names[id(p)],p) for p in flow],1.,context=f'Optimizer update{step}: Flow'))
             optimizer.step()
             if dynamics_enabled:
                 self.ema.update(model.core.encoder)
             self.global_step += 1
+            if long_dynamics or joint_sequence:
+                key='long_update_count' if long_dynamics else 'joint_long_update_count'
+                self.long_rollout[key]+=1
+                if metrics['long_source_navigation']:
+                    self.long_rollout['sampling'].update(self._pending_long_sampling)
+                    self._pending_long_sampling=None
+                    self.long_rollout['long_navigation_update_count']+=1
+                self.state['long_training_progress'].update(optimizer_updated=True,status='complete')
             if component == 'renderer':
                 self.curriculum.state['stage_excluded_updates'] = self.curriculum.state.get('stage_excluded_updates', 0)+1
             focus_finished = pools.commit_sampling(self.global_step)
@@ -428,7 +571,7 @@ class StagedWorldExperiment(VJEPAExperiment):
                 component_phase=component, image_objectives_active=renderer_enabled,
                 dynamics_updated=dynamics_enabled, ema_updated=dynamics_enabled)
             if self.components:
-                if component == 'dynamics':
+                if component == 'dynamics' and not long_dynamics:
                     self.components.dynamics_sampling().update(self._component_pending_sampling)
                     self._component_pending_sampling = None
                 self.components.record_update(self.global_step, metrics)
@@ -467,7 +610,7 @@ class StagedWorldExperiment(VJEPAExperiment):
                 break
             if step % 10 == 0:
                 self.preview_stage(model)
-            if step == completed+1 or step % self.args.save_every == 0:
+            if step == completed+1 or step % self.args.save_every == 0 or long_dynamics or joint_sequence:
                 self.save(model, optimizer, phase, step, metrics)
             self.publish_curriculum()
         else:
@@ -510,6 +653,11 @@ def main(argv=None):
             experiment.run()
     except Exception as error:
         experiment.state['status'] = 'failed'
+        if isinstance(error,FloatingPointError) or 'non-finite' in str(error).lower():
+            experiment.state['numerical_failure']={
+                'failed_optimizer_step':experiment.global_step+1,
+                'last_successful_optimizer_step':experiment.global_step,
+                'optimizer_update_applied':False,'message':str(error)}
         experiment.update('error', experiment.global_step, args.updates,
             'Staged training failed', error=str(error))
         raise

@@ -524,6 +524,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         from .structured_state import structured_transition
         result = structured_transition(state, candidate, action.float(), targets, attacks,
             dt=1/self.config.simulation_hz, training=self.training, endless=self.config.endless,
+            respawn_enabled=not getattr(self.config, 'navigation_only', False),
             spawn_positions=spawn.get('spawn_positions'), spawn_valid=spawn.get('spawn_valid'))
         next_block = self.core.pack_context(prediction[:, None], action.new_zeros(batch, 1, 4), result['state'][:, None])
         next_context = self._map_context(map_features, result['state'])

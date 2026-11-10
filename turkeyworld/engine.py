@@ -78,8 +78,9 @@ class Game:
     SPAWN_DISTANCE = 4.0
 
     def __init__(self, seed: int = 0, assets_dir: str | Path | None = None,
-                 *, endless: bool = False):
+                 *, endless: bool = False, enemies_enabled: bool = True):
         self.endless = bool(endless)
+        self.enemies_enabled = bool(enemies_enabled)
         self.map = np.array([[int(c) for c in row] for row in _ROWS], dtype=np.uint8)
         self.map_height, self.map_width = self.map.shape
         self.assets_dir = Path(assets_dir) if assets_dir else Path(__file__).resolve().parents[1] / "assets"
@@ -99,6 +100,9 @@ class Game:
         self.enemies = []
         for ident, (x, y) in enumerate(spawns):
             self.enemies.append(self._new_enemy(ident, x, y))
+        if not self.enemies_enabled:
+            for enemy in self.enemies:
+                enemy.update(hp=0., alive=False, death_timer=self.DEATH_DURATION)
         self.kills = 0
         self.time = 0.0
         self.last_events = {name: False for name in EVENT_NAMES}
@@ -116,15 +120,21 @@ class Game:
                 "animation_phase": 0.0}
 
     def get_state(self):
-        return copy.deepcopy({"version": 1, "seed": self.seed, "time": self.time,
+        result = copy.deepcopy({"version": 1, "seed": self.seed, "time": self.time,
                               "behavior_version": BEHAVIOR_VERSION,
                               "endless": self.endless,
                               "player": self.player, "enemies": self.enemies,
                               "kills": self.kills, "rng_state": self.rng.bit_generator.state})
+        if not self.enemies_enabled:
+            result['enemies_enabled'] = False
+        return result
 
     def set_state(self, state):
         """Restore an exact valid state; invalid/inside-wall states raise ValueError."""
         candidate = copy.deepcopy(state)
+        enemies_enabled = bool(candidate.get('enemies_enabled', True))
+        if not enemies_enabled and any(e['alive'] or e['hp'] > 0 for e in candidate['enemies']):
+            raise ValueError('Navigation profile requires inactive enemy slots')
         if len(candidate.get("enemies", [])) != ENTITY_SLOTS:
             raise ValueError(f"Expected exactly {ENTITY_SLOTS} persistent enemy slots")
         if [e.get("id") for e in candidate["enemies"]] != list(range(ENTITY_SLOTS)):
@@ -141,6 +151,7 @@ class Game:
             raise ValueError("State contains non-finite numbers")
         self.seed = int(candidate.get("seed", self.seed))
         self.endless = bool(candidate.get("endless", False))
+        self.enemies_enabled = enemies_enabled
         self.time = float(candidate["time"])
         self.player = candidate["player"]
         self.enemies = candidate["enemies"]
@@ -269,6 +280,8 @@ class Game:
 
     def _respawn_enemies(self):
         """Replace expired corpses by the shared three-second anchor cycle."""
+        if not self.enemies_enabled:
+            return set()
         ready = [e for e in self.enemies
                  if not e["alive"] and e["death_timer"] >= self.RESPAWN_DELAY - 1e-8]
         if not ready:
@@ -536,7 +549,7 @@ class Game:
         shade = np.where(side, 0.76, 1.0) * np.clip(1 - depth * 0.024, 0.50, 1)
         wall_pixels = (wall_pixels * shade[None, :, None]).astype(np.uint8)
         frame[visible] = wall_pixels[visible]
-        ordered = sorted(self.enemies, key=lambda e: (e["x"] - p["x"]) ** 2 + (e["y"] - p["y"]) ** 2, reverse=True)
+        ordered = sorted(self.enemies, key=lambda e: (e["x"] - p["x"]) ** 2 + (e["y"] - p["y"]) ** 2, reverse=True) if self.enemies_enabled else []
         for e in ordered:
             dx, dy = e["x"] - p["x"], e["y"] - p["y"]
             forward, lateral = dx * c + dy * s, -dx * s + dy * c

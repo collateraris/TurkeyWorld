@@ -32,6 +32,12 @@ EVENT_NAMES = ("shot", "hit", "kill", "player_hit")
 def _arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--world", type=Path, required=True, help="World checkpoint produced by turkeyworld.train.")
+    p.add_argument("--renderer-checkpoint", type=Path,
+                   help="Optional RF renderer bundle; preserves teacher dynamics, validates source conditions and approved compact assets.")
+    p.add_argument("--base-checkpoint", type=Path,
+                   help="Optional validated compact Base bundle; renderer bundles may also embed it automatically.")
+    p.add_argument("--allow-unqualified-codec", action='store_true',
+                   help="Explicit experimental preview of an unqualified compact codec; preserves failed validation metadata.")
     p.add_argument("--sr", type=Path, help="Optional trained x4 SR checkpoint; otherwise use classical resize.")
     p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     p.add_argument("--fp16", action="store_true", help="Half precision; supported here only on CUDA.")
@@ -75,6 +81,12 @@ def _arguments(argv=None):
         p.error("CUDA was requested but is unavailable; choose --device cpu")
     if not a.world.is_file():
         p.error(f"world checkpoint not found: {a.world}; train a checkpoint first")
+    if a.renderer_checkpoint is not None and not a.renderer_checkpoint.is_file():
+        p.error(f"renderer bundle not found: {a.renderer_checkpoint}")
+    if a.allow_unqualified_codec and a.renderer_checkpoint is None:
+        p.error('--allow-unqualified-codec requires --renderer-checkpoint')
+    if a.base_checkpoint is not None and not a.base_checkpoint.is_file():
+        p.error(f"Base bundle not found: {a.base_checkpoint}")
     if a.sr is not None and not a.sr.is_file():
         p.error(f"SR checkpoint not found: {a.sr}; omit --sr for classical resize")
     return a
@@ -101,6 +113,14 @@ class NeuralRuntime:
         self.device = torch.device(args.device)
         torch.set_num_threads(args.threads)
         self.model, self.world_metadata = load_world_checkpoint(args.world, self.device)
+        if getattr(args, 'base_checkpoint', None) is not None:
+            from .base_student import load_base_student
+            load_base_student(self.model, args.base_checkpoint)
+        self.renderer_metadata = None
+        if getattr(args, 'renderer_checkpoint', None) is not None:
+            from .renderer_student import load_renderer_student
+            self.renderer_metadata = load_renderer_student(self.model, args.renderer_checkpoint,
+                allow_unqualified_codec=getattr(args, 'allow_unqualified_codec', False))
         if getattr(args, "two_stage_upscale", False):
             native = self.model.config.image_size
             if args.sr is None or native not in (32, 64):
@@ -132,7 +152,8 @@ class NeuralRuntime:
                 self.sr.half()
         # This is the only interaction with the reference game. No engine step,
         # render, hit test or state correction is called during neural rollout.
-        initialization_game = Game(seed=args.seed, endless=self.model.config.endless)
+        initialization_game = Game(seed=args.seed, endless=self.model.config.endless,
+            enemies_enabled=not getattr(self.model.config, 'navigation_only', False))
         initial_map = initialization_game.map.copy()
         initial_state = initialization_game.state_vector().copy()
         self.world_architecture = getattr(self.model.config, "architecture", "legacy_cnn")
@@ -264,6 +285,14 @@ class NeuralRuntime:
             "precision": "fp16" if self.args.fp16 else "fp32",
             "persistent_state_precision": str(self.state.dtype),
             "world_checkpoint": str(self.args.world.resolve()),
+            "renderer_checkpoint": str(self.args.renderer_checkpoint.resolve()) if getattr(self.args, 'renderer_checkpoint', None) else None,
+            "renderer_training_steps": self.renderer_metadata.get('training_steps') if self.renderer_metadata else None,
+            "renderer_solver": 'euler' if getattr(self.model, 'flow_renderer', None) is not None and self.model.flow_renderer.kind == 'student' else 'heun' if getattr(self.model, 'flow_renderer', None) is not None else None,
+            "renderer_solver_steps": getattr(getattr(self.model, 'flow_renderer', None), 'steps', None),
+            "base_student_parameters": getattr(self.model, 'base_student_metadata', {}).get('head_parameters'),
+            "base_student_training_steps": getattr(self.model, 'base_student_metadata', {}).get('training_steps'),
+            "experimental_codec_preview": bool(self.renderer_metadata and self.renderer_metadata.get('experimental_preview') is True),
+            "codec_quality_qualified": self.renderer_metadata.get('codec_quality_qualified') if self.renderer_metadata else None,
             "world_architecture": self.world_architecture,
             "world_training_steps": training_steps,
             "world_quality_status": self.world_metadata.get("quality_status", "Unverified checkpoint"),

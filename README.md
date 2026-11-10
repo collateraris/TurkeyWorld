@@ -441,8 +441,10 @@ There is no promised completion time or automatic Student start.
 ### Three phases for training model components
 
 The approved plan separates component training from the four game-content
-milestones above. It resumed the same run from the saved optimizer step **777**;
-the renderer phase is running, with its first GPU update saved at **778**. Model weights and
+milestones above. It resumed the same run from optimizer step **777**. The
+renderer was fixed at **1444**, after **667 updates**, at the user's request;
+its failed quality gate remains failed. **Dynamics is running**, with its first
+new GPU update saved at **1445**. Model weights and
 optimizer history are retained; VQGAN and SR stay frozen, with batch16 and
 accumulation1 unchanged.
 
@@ -456,6 +458,41 @@ The shared map encoder is frozen in **both isolated phases** so a dynamics-only
 update cannot change a fixed-pose renderer's map condition. It trains only in
 the joint phase. The saved update verifies GPU execution and continuation of
 the phase; it does not establish a quality improvement or a passed gate.
+
+The saved Base/Flow/GAN artifact is
+`training_runs/staged_single_20261110/checkpoints/renderer_base_flow_gan_frozen_g1444.pt`.
+The 1444 → 1445 freeze check confirmed unchanged Base, Flow, shared map, codec,
+appearance head and GAN/discriminator optimizer; the dynamics core and EMA
+updated while existing Adam state was preserved. User-requested freezing does
+not assert that renderer quality passed.
+
+Dynamics switched to **450 own-state transitions / 15 simulated seconds** at
+optimizer boundary **1520**; its first completed long update was saved at
+**1521**. Batch16 × accumulation1 means **16 trajectories / 7,200 transitions**
+per world update. **TBPTT chunks of 16** give 29 backward chunks; numerical state
+and memory continue across chunks, with one Adam/EMA update after all 450
+transitions. Future Source states/RGB are supervision only, without state
+corrections or image feedback. The navigation-only long pool has 64 train and
+16 held-out episodes without active enemies or respawns; this is navigation
+training, not proof of full-game autonomy. The objective boundary is
+`single_enemy_staged_long450_v5`; its totals are not directly comparable to the
+earlier short-window objective.
+
+The long world forward/backward path in Dynamics and joint training now uses
+**FP32**, with the aggregate gradient norm computed in **FP64**. Per-chunk
+finite checks and the final guard abort before the world optimizer on invalid
+losses/gradients. Every completed long update is checkpointed. Seven safe smoke
+updates exercised this path; they do not establish the root cause of the
+original non-finite failure at target 1537 or guarantee future runs cannot fail.
+
+Joint training starts with 450 immediately: three of every four non-static
+updates are long450, and one is a short auxiliary-head update, without a
+64/128-step warmup. Each long joint update has one pose-aligned RGB/GAN query
+at a rotating recorded offset (450/225/64/16); Source supervision does not
+replace the autoregressive state. Validation remains every **100 updates**, now
+using 450-step trajectories as the primary check. Preview stays every **10**
+updates with **H4**, two context frames and the five native/SR/bilinear rows;
+the contact sheet is not a 15-second video.
 
 Checks run every **100 optimizer updates**, previews every **10**. The first
 two phases advance after two passing checks, a five-check plateau or their
@@ -611,28 +648,115 @@ still interrupts processes.
 
 ## Neural playback and 15-second evaluation
 
-Once new world and trained-SR checkpoints exist, with GPU capacity available:
+The three image-path training stages are complete: **compact VQGAN → compact
+Base → RF renderer**. Completion is separate from passing their quality gates.
+The selected codec has **997,539 total E+Q+D parameters**, including the exact
+frozen teacher codebook (1488×16). The new Base head has **996,844 parameters**;
+it uses the teacher's shared map/CameraGeometry and actual 128D features. RF has
+**6,992,192 velocity-network parameters**, one Euler step in the current hybrid,
+patch2 and spatial/
+wall conditioning. These budgets exclude shared world geometry and SR. Original
+Base weights remain resident for provenance/shared geometry, so these counts
+are not a claim that the complete loaded world occupies only nine million
+parameters. Teacher dynamics and memory stay in use; no separate full-world
+Student is started by renderer distillation.
+The active compact heads/codec total **8,986,575 parameters**, excluding shared
+map/geometry and SR; inactive original Base weights remain resident separately.
+
+| Component | Completed updates / selected step | Held-out teacher-target SSIM / RGB MAE | Quality gate |
+|---|---:|---|---|
+| Codec decoder | 6,000 / 5,900 | 0.944053 / 0.011402 | Failed |
+| Codec encoder path | 6,000 / 5,900 | 0.929427 / 0.012620 | Failed |
+| Base | 1,100 / 1,100 | 0.960514 / 0.013893 | Passed |
+| RF, archived four-step | 1,000 / 700 | 0.908584 / 0.017261 | Failed |
+| RF, current one-step | 1,500 / 1,500 | 0.911468 / 0.017808 | Failed |
+
+MAE uses RGB values in [0,1]. RF's teacher-target score measures distillation;
+the archived four-step model's Source comparison was SSIM **0.688909** on its held-out panel.
+These are different comparisons and do not qualify autonomous gameplay.
+
+Reflow uses the method described in
+[Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow](https://arxiv.org/abs/2209.03003)
+and its [official implementation](https://github.com/gnobitab/RectifiedFlow).
+The game uses its own conditional latent implementation; these references do
+not supply pretrained renderer weights.
+
+Codec replacement normally requires a qualified distillation with the exact
+teacher codebook, normalization and 8×8×16 latent interface. The current compact
+codec's selected step 5900 measured decoder SSIM **0.94405** and encoder SSIM
+**0.92943**, below its 0.95 gate; that gate remains **false**. An explicit
+`--allow-unqualified-codec` opt-in permits an **experimental preview** while
+preserving the failed validation, source/codebook checks and parameter limit.
+It does not mean fidelity was accepted or gameplay qualified. The flag is
+required both when building this RF bundle and when playing it; strict default
+loading still rejects the unqualified codec. The RF bundle validates
+the original teacher Base/map/appearance/configuration and embeds its approved
+compact Base and codec. Component quality measures approximation to teacher
+outputs; they do not qualify autonomous gameplay or establish an FPS result.
+
+The exported `checkpoints/renderer_student.pt` exists and embeds the compact
+Base/codec. The standalone experimental hybrid uses the teacher world snapshot
+at step **1598**:
 
 ```powershell
 & $twPython -m turkeyworld.neural_play `
-  --world training_runs/vjepa175_32px_128k_20261109/checkpoints/teacher175vq_world.pt `
+  --world training_runs/renderer_distill_20261110T204351Z/teacher_latest_for_play.pt `
+  --renderer-checkpoint training_runs/renderer_distill_one_step_20261110T212351Z/checkpoints/renderer_student.pt `
+  --allow-unqualified-codec `
   --sr training_runs/sr32x4_quality_20261109/checkpoints/sr_for_game.pt `
-  --device cuda --two-stage-upscale --max-catchup-steps 1
+  --device cuda --fp16 --display-size 1024 --smooth --max-catchup-steps 1
 ```
 
-Native32 defaults to output 512; `--display-size 512` is equivalent. Two-stage
-playback requires trained x4 SR and does not replace that stage with ordinary
-resizing. Controls match the reference game; close/relaunch to restart after
-death. Without `--two-stage-upscale`, the legacy display default remains 1024.
-Actual 30Hz/FPS performance must be measured.
+This command produces **native32 → learned SR128 → bilinear1024**. The separate
+`--two-stage-upscale` mode remains native32 → SR128 → bilinear512 and requires
+display size 512. Controls match the reference game; close/relaunch to restart
+after death. Actual 30Hz/FPS performance must be measured.
+The earlier four-step RTX 4090 benchmark used FP32, three samples per branch and
+concurrent main training. Mean full-pipeline time (world/render/SR/display
+resize/readback) was **4,407.95 ms Teacher → 292.45 ms four-step hybrid**, a measured
+**15.07×** speedup in that run. State and memory matched exactly for its three
+steps. This contended, short measurement is not an isolated game-FPS result
+or a 15-second gameplay pass; see the run's `renderer_benchmark.json`.
+The earlier four-step FP16 command also passed an eight-step finite-output smoke test;
+its contended mean pipeline time was 211.15 ms. This short check does not
+establish long-rollout quality or an isolated frame rate.
 
-The independent evaluator can test **15 seconds = 450 steps**:
+The **one-Euler-step** phase completed 1,500 updates with batch16 in
+`training_runs/renderer_distill_one_step_20261110T212351Z`; its selected export is
+`checkpoints/renderer_student.pt` at step 1,500. It initialized from the old
+four-step selected checkpoint (step 700), with fresh Adam/RNG/counters and the
+same 6,992,192 velocity parameters. Compact Base/codec stayed frozen. The actual
+one-Euler endpoint was trained; the old four-step artifact is unchanged.
+
+Its FP16 autonomous diagnostic completed **450 steps / 14.99995 simulated
+seconds in 63.26 wall seconds**, with 450 velocity calls, finite state/images/
+memory, zero future Source inputs, engine corrections or state/memory resets.
+**Navigation failed**: mean XY error **6.542 tiles**, p95 **9.908**, final error
+**8.420**; the model intersected walls on **284 steps**, first at offset **167**,
+while Source had zero wall steps. Combat was not evaluated. Source physics was
+measured offline after the neural rollout and did not correct its state.
+
+On five paired own-state poses, FP16 with concurrent main training, mean full
+pipeline was **285.94 ms RF4 → 152.00 ms RF1** (**1.88×**); original Teacher was
+4,165.58 ms (**27.41×** versus RF1). State/memory matched exactly at five sparse
+renderer-swap checks. These are contended timings, not isolated displayed FPS.
+The FP32 CPU prefix also remained at (2.5, 2.5) for 16 forward commands: a
+negative local-forward proposal (−0.123) was clamped to zero. The observed motion
+failure therefore also occurs outside FP16 rendering. The diagnostic report is
+`diagnostics/autonomous450_fp16/report.json` in the one-step run. Finite execution
+and faster rendering have not qualified the neural game.
+The renderer bundle auto-loads its validated compact Base/codec. An optional
+`--base-checkpoint` can preload the same approved Base; a different one is
+rejected. The source teacher checkpoint and its learned dynamics are preserved.
+
+The independent evaluator below tests the **teacher checkpoint** for
+**15 seconds = 450 steps**; it does not load the separate renderer bundle:
 
 ```powershell
 & $twPython -m turkeyworld.evaluate_rollout `
-  --world training_runs/vjepa175_32px_128k_20261109/checkpoints/teacher175vq_world.pt `
+  --world training_runs/renderer_distill_20261110T204351Z/teacher_latest_for_play.pt `
   --device cuda --seconds 15 --episodes 2 --scenario explore `
-  --render-every 30 --output training_runs/vjepa175_32px_128k_20261109/evaluation_15s.json
+  --render-every 30 --output training_runs/renderer_distill_20261110T204351Z/evaluation_teacher_15s.json
 ```
 
 Reports include actual duration, integrity, movement/combat coverage, oracle

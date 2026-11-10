@@ -56,7 +56,7 @@ def _straight_through(hard, soft, training):
 
 def structured_transition(previous, candidate, action, target_logits,
                           attack_logits, dt=1 / 30, training=False,
-                          endless=False, spawn_positions=None, spawn_valid=None):
+                          endless=False, spawn_positions=None, spawn_valid=None, respawn_enabled=True):
     """Return a coherent 20D state and accepted events without a simulator.
 
     Args:
@@ -117,7 +117,7 @@ def structured_transition(previous, candidate, action, target_logits,
     proposed = candidate[:, GLOBAL_DIM:-2].reshape_as(old)
     original_alive = (old[:, :, 5] >= 0.5) & (old[:, :, 4] > 0)
     respawn = torch.zeros_like(original_alive)
-    if endless and spawn_positions is not None:
+    if endless and respawn_enabled and spawn_positions is not None:
         if spawn_positions.shape != (batch, ENTITY_SLOTS, 2):
             raise ValueError("spawn_positions must have shape [B,1,2]")
         if spawn_valid is None or spawn_valid.shape != (batch, ENTITY_SLOTS):

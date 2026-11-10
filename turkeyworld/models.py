@@ -51,7 +51,9 @@ class WorldModelConfig:
     transition_mode: str = "event_v1"
     simulation_hz: float = 30.0
     endless: bool = False
+    navigation_only: bool = False
     renderer_mode: str = "direct"
+    flow_kind: str = ""
     flow_steps: int = 0
     flow_width: int = 0
     flow_depth: int = 0
@@ -80,6 +82,8 @@ class WorldModelConfig:
     flow_block_conditioning: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.navigation_only, bool):
+            raise ValueError('navigation_only must be a boolean environment profile')
         if (not isinstance(self.entity_slots, int) or isinstance(self.entity_slots, bool)
                 or self.entity_slots != ENTITY_SLOTS or self.state_schema_version != STATE_SCHEMA_VERSION):
             raise ValueError('Only the single-enemy20D state schema is supported; migrate legacy checkpoints explicitly')
@@ -103,6 +107,8 @@ class WorldModelConfig:
             raise ValueError('Configurable latent patches and block conditions require VQGAN')
         if self.kind not in {"teacher", "student"}:
             raise ValueError("kind must be teacher or student")
+        if self.flow_kind not in {'', 'teacher', 'student'}:
+            raise ValueError('flow_kind must be empty, teacher or student')
         if self.image_size not in {32, 64, 128, 256}:
             raise ValueError("image_size must be 32, 64, 128 or 256")
         if self.architecture not in {"camera_transformer", "legacy_cnn", "vjepa2_ac"}:
@@ -261,7 +267,7 @@ class NeuralWorldModel(nn.Module):
                     codec['block_conditioning'] = True
                 if self.config.game_training_v5:
                     codec['improved_loss'] = True
-            self.flow_renderer = renderer(kind=self.config.kind,
+            self.flow_renderer = renderer(kind=self.config.flow_kind or self.config.kind,
                 image_size=self.config.image_size, mode=self.config.renderer_mode,
                 steps=self.config.flow_steps, width=self.config.flow_width,
                 depth=self.config.flow_depth, heads=self.config.flow_heads,
@@ -399,11 +405,15 @@ class NeuralWorldModel(nn.Module):
         result = structured_transition(authoritative_state, candidate, action.float(), targets, attacks,
                                        dt=1. / self.config.simulation_hz, training=self.training,
                                        endless=self.config.endless,
+                                       respawn_enabled=not self.config.navigation_only,
                                        spawn_positions=spawn.get("spawn_positions"), spawn_valid=spawn.get("spawn_valid"))
         return {**result, "memory": memory, "features": self.feature_head(memory),
                 "target_logits": targets, "attack_logits": attacks, **spawn}
 
     def render_base(self, state, features, map_features):
+        if self.config.architecture == 'vjepa2_ac' and hasattr(self, 'base_student'):
+            geometry = self.vjepa_backend.geometry(state, map_features)
+            return self.base_student(state, features, geometry)
         if self.config.architecture == 'vjepa2_ac':
             return self.vjepa_backend.render_with_aux(state, features, map_features)['rgb']
         if self.config.architecture == 'vjepa2_ac':
@@ -593,6 +603,13 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
         parts["renderer"] = sum(p.numel() for n, p in model.named_parameters() if n.startswith(renderer_names))
     if model.config.renderer_mode != "direct":
         parts["renderer"] += sum(p.numel() for p in model.flow_renderer.parameters())
+    if hasattr(model, 'base_student'):
+        original = backend.renderer_parameter_count()
+        compact = sum(p.numel() for p in model.base_student.parameters())
+        parts['base_student'] = compact
+        parts['inactive_original_base_renderer'] = original
+        parts['renderer'] += compact
+        parts['active_renderer'] = parts['renderer']-original
     parts["world_total"] = sum(p.numel() for p in model.parameters())
     parts["dynamics_including_map"] = parts["world_total"] - parts["renderer"]
     parts["upscaler"] = 0 if upscaler is None else sum(p.numel() for p in upscaler.parameters())
