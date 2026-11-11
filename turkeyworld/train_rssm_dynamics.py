@@ -111,40 +111,87 @@ class RSSMTraining:
         self.publish()
 
     def preview(self, model):
-        devices = [self.device.index if self.device.index is not None else torch.cuda.current_device()] if self.device.type == 'cuda' else []
-        with torch.random.fork_rng(devices=devices):
+        from .rssm_preview_assets import preserve_preview_rng
+        with preserve_preview_rng(self.device, self.rng):
             return self._preview(model)
+
+    def initialize_preview_assets(self, model):
+        """Prepare pinned inference assets without replacing training modules."""
+        from .rssm_preview_assets import (resolve_preview_assets_plan, preview_assets_cache_key,
+            prepare_preview_assets, synchronize_preview_dynamics)
+        path = getattr(self.args, 'preview_assets_plan', None)
+        if path is None:
+            if getattr(self.args, 'preview_assets_revision_plan', None) is not None or self.state.get('preview_assets_revision'):
+                raise ValueError('Preview revision requires its original immutable preview-assets plan')
+            return None
+        saved_revision = self.state.get('preview_assets_revision')
+        initial, plan, revision = resolve_preview_assets_plan(path,
+            getattr(self.args, 'preview_assets_revision_plan', None), saved_revision)
+        existing_plan = getattr(self, '_preview_assets_plan_sha', None)
+        explicit_activation = (revision is not None and saved_revision is None
+            and existing_plan == initial['plan_sha256'])
+        if existing_plan is not None and existing_plan != plan['plan_sha256'] and not explicit_activation:
+            raise ValueError('Immutable preview-assets plan changed during this worker')
+        key = preview_assets_cache_key(plan, model.config)
+        if self.preview_model is None or getattr(self, '_preview_assets_key', None) != key:
+            client, sr, sr_metadata, proof = prepare_preview_assets(model, plan, self.device)
+            proof['initialized_at_world_step'] = self.state['global_training_step']
+            self.preview_model, self.sr, self.sr_metadata = client, sr, sr_metadata
+            self._preview_assets_key = key
+            self._preview_assets_plan_sha = plan['plan_sha256']
+            self._preview_assets_proof = proof
+            self._preview_renderer_checkpoint = plan['renderer']['checkpoint']
+            self._preview_sr_checkpoint = plan['sr']['checkpoint']
+        else:
+            synchronize_preview_dynamics(self.preview_model, model)
+        self.state['preview_assets'] = {**self._preview_assets_proof,
+            'current_world_step': self.state['global_training_step']}
+        history = self.state.setdefault('preview_assets_history', [])
+        for asset_plan in (initial, plan):
+            if not any(item['plan_sha256'] == asset_plan['plan_sha256'] for item in history):
+                history.append({key: asset_plan[key] for key in ('plan_path', 'plan_sha256', 'renderer', 'sr')})
+        if revision is not None:
+            self.state['preview_assets_revision'] = revision
+            self.state['preview_assets']['revision'] = revision
+        return self.state['preview_assets']
 
     def _preview(self, model):
         from .renderer_student import load_renderer_student
         from .vjepa_validation import save_autoregressive_preview
-        renderer_checkpoint = self.args.renderer_checkpoint
+        pinned = self.initialize_preview_assets(model)
+        renderer_checkpoint = self._preview_renderer_checkpoint if pinned else self.args.renderer_checkpoint
         selection_path = self.root.parent/'active_renderer.json'
-        if selection_path.exists():
+        if not pinned and getattr(self.args, 'follow_active_renderer', True) and selection_path.exists():
             selection = json.loads(selection_path.read_text(encoding='utf-8'))
             candidate = Path(selection.get('renderer_checkpoint', ''))
             if selection.get('selected_for_experimental_play') is True and candidate.is_absolute() and candidate.is_file():
                 renderer_checkpoint = candidate
-        if self.preview_model is None or getattr(self, '_preview_renderer_checkpoint', None) != str(renderer_checkpoint):
+        if not pinned and (self.preview_model is None or getattr(self, '_preview_renderer_checkpoint', None) != str(renderer_checkpoint)):
             # Use a separate inference instance so replacing Flow/Base/codec
             # cannot change the optimizer model or its saved asset identities.
             self.preview_model = NeuralWorldModel(WorldModelConfig(**asdict(model.config)))
             self.preview_model.load_state_dict(model.state_dict(), strict=True)
             self.preview_model.rssm_migration = model.rssm_migration
+            if hasattr(model, 'dual_rssm_migration'):
+                self.preview_model.dual_rssm_migration = model.dual_rssm_migration
+            if hasattr(model, 'enemy_rssm_resize'):
+                self.preview_model.enemy_rssm_resize = model.enemy_rssm_resize
             load_renderer_student(self.preview_model, renderer_checkpoint,
                 allow_unqualified_codec=True)
             self.preview_model.to(self.device).eval().requires_grad_(False)
             self.sr, self.sr_metadata = load_sr_checkpoint(self.args.sr, 'cpu')
             self.sr.to(self.device).eval().requires_grad_(False)
             self._preview_renderer_checkpoint = str(renderer_checkpoint)
+            self._preview_sr_checkpoint = str(self.args.sr)
         client = self.preview_model
-        current = model.state_dict()
-        client_state = client.state_dict()
-        with torch.no_grad():
-            for name, value in current.items():
-                if (not name.startswith(('flow_renderer.', 'base_student.'))
-                        and name in client_state and client_state[name].shape == value.shape):
-                    client_state[name].copy_(value)
+        if not pinned:
+            current = model.state_dict()
+            client_state = client.state_dict()
+            with torch.no_grad():
+                for name, value in current.items():
+                    if (not name.startswith(('flow_renderer.', 'base_student.'))
+                            and name in client_state and client_state[name].shape == value.shape):
+                        client_state[name].copy_(value)
         batch = self.short_val.batch(1, context=1, horizon=4, indices=np.asarray([[0, 0]]))
         with torch.inference_mode():
             fmap = client.encode_map(batch['map'])
@@ -165,12 +212,14 @@ class RSSMTraining:
                 'kind': 'rssm_free_autoregressive_future', 'model_kind': 'RSSM',
                 'component_phase': self.state['rssm_training']['phase'],
                 'renderer_checkpoint': str(renderer_checkpoint),
+                'sr_checkpoint': self._preview_sr_checkpoint,
+                'preview_assets': pinned,
                 'generated_at': now(), 'source_held_out': True, 'split': 'val',
                 'future_source_feedback': False, 'generated_finite': bool(torch.isfinite(generated).all()),
-                'caption': 'RSSM: четыре собственных перехода; замороженный нейрорендер ученика, один Euler шаг',
+                'caption': 'RSSM: четыре собственных перехода; замороженный нейрорендер ученика, один Euler шаг'+(' · updated NPR '+str(pinned['renderer_refinement_updates'])+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
                 'row_labels': {'context': 'CONTEXT: one observed frame | RSSM',
                     'source': 'SOURCE: future measurement targets only',
-                    'generated': 'RSSM MODEL: prior-only autonomous future | frozen student renderer'}}}
+                    'generated': 'RSSM MODEL: prior-only autonomous future | frozen student renderer'+(' | updated NPR '+str(pinned['renderer_refinement_updates'])+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
         self.state['prediction_preview'] = save_autoregressive_preview(preview,
             self.root/'preview.png', step=self.state['global_training_step'], every=10,
             sr_model=self.sr, sr_metadata=self.sr_metadata)
@@ -329,7 +378,7 @@ class RSSMTraining:
             'target_dynamics_total': 25_000_000, 'renderer_total': counts['renderer']}
         self.state['rssm_training'].update(parameter_count=counts['dynamics_including_map'],
             deterministic_dim=model.config.rssm_deter_dim, stoch=model.config.rssm_stoch,
-            classes=model.config.rssm_classes, memory_size=model.core.memory_size,
+            classes=model.config.rssm_classes, memory_size=getattr(model.vjepa_backend,'memory_size',model.core.memory_size),
             dynamics_trainable=policy['dynamics_trainable'])
         self.state['keep_awake'] = {'system_required': True, 'display_required': False, 'screen_lock_allowed': True}
         self.short = StagedSequenceData(args.data_root/'short/rgb/train', self.device, mode='stream', cache_bytes=64*1024**2)

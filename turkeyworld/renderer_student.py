@@ -56,7 +56,7 @@ def _backbone_config(config, *, codec_replacement=False):
         values = {key: value for key, value in values.items()
                   if not key.startswith(('vjepa_', 'rssm_'))}
     return {key: value for key, value in values.items()
-            if not key.startswith('flow_') and key not in {'renderer_mode', 'player_motion_mode'}
+            if not key.startswith(('flow_', 'enemy_rssm_')) and key not in {'renderer_mode', 'player_motion_mode'}
             and not (codec_replacement and key == 'renderer_codec_config')}
 
 
@@ -94,6 +94,7 @@ def validate_renderer_source_lineage(teacher, source_config):
     teacher's trained image assets through configuration normalization alone.
     """
     source = _world_config(source_config)
+    validate_dual_renderer_lineage(teacher, source)
     if source['architecture'] == teacher.config.architecture:
         return
     report = getattr(teacher, 'rssm_migration', None)
@@ -110,6 +111,79 @@ def validate_renderer_source_lineage(teacher, source_config):
     if (not isinstance(identity, dict) or any(identity.get(key) != current[key]
             for key in ('base_map_sha256', 'appearance_sha256'))):
         raise ValueError('RSSM migration renderer lineage does not match the copied frozen assets')
+
+
+def _enemy_config(config):
+    return {key: value for key, value in config.items() if key.startswith('enemy_rssm_')}
+
+
+def _validated_enemy_resize_source(teacher):
+    """Validate an explicit enemy-only resize; image identity stays strict."""
+    report = getattr(teacher, 'enemy_rssm_resize', None)
+    if (not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('kind') != 'resize_independent_enemy_rssm'
+            or report.get('player_and_shared_model_tensors_bitexact') is not True
+            or report.get('player_and_shared_adam_states_bitexact') is not True
+            or report.get('frozen_render_assets_bitexact') is not True
+            or not isinstance(report.get('source_config'), dict)
+            or not isinstance(report.get('target_config'), dict)):
+        raise ValueError('Enemy renderer reuse requires explicit verified enemy-RSSM resize lineage')
+    previous, resized = _world_config(report['source_config']), _world_config(report['target_config'])
+    target = _world_config(teacher.config)
+    changes = {key for key in previous if previous[key] != resized[key]}
+    allowed = report.get('allowed_config_changes')
+    for name in ('source', 'target'):
+        expected = hashlib.sha256(json.dumps(report[name+'_config'], sort_keys=True).encode()).hexdigest()
+        if report.get(name+'_config_sha256') != expected:
+            raise ValueError('Enemy-RSSM resize configuration fingerprint differs')
+    if (not previous['enemy_rssm_enabled'] or not resized['enemy_rssm_enabled']
+            or not changes or not changes <= {'enemy_rssm_deter_dim', 'enemy_rssm_hidden_dim'}
+            or not isinstance(allowed, list) or len(allowed) != len(changes) or set(allowed) != changes
+            or _enemy_config(resized) != _enemy_config(target)
+            or any(resized[key] != target[key] for key in resized
+                   if not key.startswith('flow_') and key not in {'renderer_mode', 'renderer_codec_config'})
+            or _backbone_config(previous, codec_replacement=True) != _backbone_config(resized, codec_replacement=True)
+            or _backbone_config(resized, codec_replacement=True) != _backbone_config(target, codec_replacement=True)
+            or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
+        raise ValueError('Enemy-RSSM resize lineage does not match the unchanged player/image assets/configuration')
+    return previous
+
+
+def validate_dual_renderer_lineage(teacher, source_config):
+    """Only verified append/resize chains may reuse a prior image bundle."""
+    source, target = _world_config(source_config), _world_config(teacher.config)
+    old, new = _enemy_config(source), _enemy_config(target)
+    if old == new or not source['enemy_rssm_enabled'] and not target['enemy_rssm_enabled']:
+        return
+    if source['enemy_rssm_enabled'] and target['enemy_rssm_enabled']:
+        previous = _validated_enemy_resize_source(teacher)
+        if (old != _enemy_config(previous)
+                or _backbone_config(source, codec_replacement=True) != _backbone_config(previous, codec_replacement=True)):
+            raise ValueError('Renderer source does not belong to the verified enemy-RSSM resize')
+        return
+    report = getattr(teacher, 'dual_rssm_migration', None)
+    if (source['enemy_rssm_enabled'] or not target['enemy_rssm_enabled']
+            or not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('kind') != 'append_independent_enemy_rssm'
+            or report.get('source_enemy_rssm_enabled') is not False
+            or report.get('enemy_rssm_enabled') is not True
+            or report.get('old_model_tensors_bitexact') is not True
+            or report.get('frozen_render_assets_bitexact') is not True
+            or not isinstance(report.get('source_config'), dict)
+            or not isinstance(report.get('target_config'), dict)):
+        raise ValueError('Legacy renderer reuse requires explicit verified dual-RSSM migration lineage')
+    previous, migrated = _world_config(report['source_config']), _world_config(report['target_config'])
+    if _enemy_config(migrated) != new:
+        resize_previous = _validated_enemy_resize_source(teacher)
+        if (_enemy_config(migrated) != _enemy_config(resize_previous)
+                or _backbone_config(migrated, codec_replacement=True) != _backbone_config(resize_previous, codec_replacement=True)):
+            raise ValueError('Dual-RSSM append and enemy resize do not form the same verified lineage')
+    if (previous['enemy_rssm_enabled'] or not migrated['enemy_rssm_enabled']
+            or any(previous[key] != migrated[key] for key in previous if not key.startswith('enemy_rssm_'))
+            or _backbone_config(previous, codec_replacement=True) != _backbone_config(source, codec_replacement=True)
+            or _backbone_config(migrated, codec_replacement=True) != _backbone_config(target, codec_replacement=True)
+            or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
+        raise ValueError('Dual-RSSM renderer lineage does not match the unchanged image assets/configuration')
 
 
 def _validate_compact_codec(teacher, codec, provenance, *, allow_unqualified_codec=False):
@@ -247,6 +321,7 @@ def _student_config(student, teacher):
     if not isinstance(raw, dict):
         raise ValueError('Build the renderer student with build_renderer_student before export')
     config = WorldModelConfig(**raw)
+    validate_dual_renderer_lineage(teacher, asdict(config))
     replacement = isinstance(getattr(student, '_renderer_codec_distillation', None), dict)
     if (config.kind != 'teacher' or config.flow_kind != 'student'
             or config.renderer_mode != 'rectified_flow' or not _valid_solver_steps(config.flow_steps)
@@ -347,7 +422,7 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     renderer_config = dict(payload['config'])
     live_config = asdict(teacher.config)
     renderer_config.update({key: value for key, value in live_config.items()
-        if key.startswith(('rssm_', 'vjepa_')) or key in {'architecture', 'player_motion_mode'}})
+        if key.startswith(('rssm_', 'vjepa_', 'enemy_rssm_')) or key in {'architecture', 'player_motion_mode'}})
     config = WorldModelConfig(**renderer_config)
     if (not _valid_solver_steps(config.flow_steps)
             or payload['solver_steps'] != config.flow_steps):

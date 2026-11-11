@@ -1,8 +1,9 @@
 """One keyboard and one30Hz clock for side-by-side Source/neural playback.
 
 The Source side waits for every neural update. This GUI never advances either
-side independently, catches up skipped ticks, or corrects neural state. Opening
-is paused, and completing the450-step trial holds the window until restart/quit.
+side independently or corrects neural rollout states automatically. T is an
+explicit navigation/combat scene event. Opening is paused, and completing the
+450-step trial holds the window until restart/quit.
 """
 from __future__ import annotations
 
@@ -26,6 +27,12 @@ def arguments(argv=None):
                         help='Panel size in pixels;0 chooses up to768 and fits the desktop work area.')
     parser.add_argument('--source-size', type=int, choices=(32, 128, 256), default=256,
                         help='Actual classical Source render resolution, separately labeled.')
+    parser.add_argument('--comparison-mode', choices=('autonomous', 'shared_camera'), default='autonomous',
+                        help='shared_camera uses the same Source pose for both displayed images; RSSM stays independent.')
+    parser.add_argument('--shared-camera-entities', choices=('source', 'neural'), default='neural',
+                        help='neural shares only the player camera; NPCs, health and combat remain RSSM predictions.')
+    parser.add_argument('--initial-environment', choices=('navigation', 'combat'), default='navigation',
+                        help='Start without enemies for navigation; T toggles one-enemy combat.')
     parser.add_argument('--session-dir', type=Path,
                         default=Path('training_runs')/('compare_play_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')))
     gui, remaining = parser.parse_known_args(argv)
@@ -42,6 +49,7 @@ def arguments(argv=None):
     # PairedRuntime renders the cached initial pose without consuming a tick.
     # No discarded warmup transitions belong to either trial's reported clock.
     neural.warmup = 0
+    neural.initial_navigation_only = gui.initial_environment == 'navigation'
     return gui, neural
 
 
@@ -77,6 +85,14 @@ def keyboard_action(pygame, keys):
             float(keys[pygame.K_d])-float(keys[pygame.K_a]),
             float(keys[pygame.K_e] or keys[pygame.K_RIGHT])-float(keys[pygame.K_q] or keys[pygame.K_LEFT]),
             float(keys[pygame.K_SPACE] or pygame.mouse.get_pressed(3)[0])]
+
+
+def switch_test_environment(pair):
+    """T switches the scene; an exhausted trial first gets an explicit restart."""
+    target = 'combat' if pair.status()['environment'] == 'navigation' else 'navigation'
+    if pair.finished:
+        pair.reset()
+    return pair.set_environment(target)
 
 
 def _font(pygame, size):
@@ -121,7 +137,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
         atomic_json(gui.session_dir/'status.json', report)
         last_status = value
     status('paused', force=True)
-    print('READY PAUSED | ENTER start | P pause/resume | R reset BOTH and start | ESC quit', flush=True)
+    print('READY PAUSED | ENTER start | T navigation/combat | E turn right | P pause | R reset BOTH | ESC quit', flush=True)
     try:
         while running:
             for event in pygame.event.get():
@@ -143,6 +159,13 @@ def interactive(pair, gui, args, pygame, screen, layout):
                         paused = not paused
                         next_update = time.perf_counter()
                         status('paused' if paused else 'running')
+                    elif event.key == pygame.K_t:
+                        source_rgb, neural_rgb = switch_test_environment(pair)
+                        frames = (_surface(pygame, source_rgb, layout['panel']),
+                                  _surface(pygame, neural_rgb, layout['panel']))
+                        paused, trial_complete = False, False
+                        next_update = time.perf_counter()
+                        status('running', force=True)
                     elif event.key == pygame.K_TAB:
                         mode = pair.status().get('mode', 'autonomous')
                         pair.set_mode('autonomous' if mode == 'shared_camera' else 'shared_camera')
@@ -167,22 +190,27 @@ def interactive(pair, gui, args, pygame, screen, layout):
             drift = metrics.get('xy_drift_tiles')
             drift_text = f'{drift:.3f}' if isinstance(drift, (int, float)) else '—'
             state_label = 'ПРОБА ЗАВЕРШЕНА · R — начать заново' if trial_complete else 'ПАУЗА · ENTER — начать / продолжить' if paused else 'ОДИНАКОВЫЕ КОМАНДЫ · ОБЩИЕ ШАГИ'
-            mode_label = ('ОБЩАЯ КАМЕРА · только сравнение рендера' if metrics.get('mode') == 'shared_camera'
+            mode_label = (('ОБЩАЯ КАМЕРА · NPC и бой предсказывает RSSM' if gui.shared_camera_entities == 'neural'
+                           else 'СОСТОЯНИЯ SOURCE · только проверка рендера') if metrics.get('mode') == 'shared_camera'
                           else 'АВТОНОМНАЯ ДИНАМИКА · одинаковые команды')
+            environment_label = 'БОЙ · 1 ПРОТИВНИК' if metrics.get('environment') == 'combat' else 'НАВИГАЦИЯ · БЕЗ ПРОТИВНИКОВ'
             screen.fill((13, 19, 24))
             screen.blit(font.render('Классическая игра · СЛЕВА', True, color), (12, 8))
             screen.blit(font.render('Нейросетевая игра · СПРАВА', True, color), (layout['right'][0], 8))
             screen.blit(small.render(f'Source {gui.source_size}×{gui.source_size} · обычный движок', True, muted), (12, 42))
+            screen.blit(small.render(environment_label, True, orange), (12, 63))
             screen.blit(small.render('Нейро32 → SR128 → bilinear1024 · эксперимент', True, muted), (layout['right'][0], 40))
             screen.blit(small.render(mode_label, True, orange), (layout['right'][0], 63))
             screen.blit(frames[0], layout['left'])
             screen.blit(frames[1], layout['right'])
             y = layout['header']+layout['panel']+10
             screen.blit(small.render(f'{state_label} | шаг {steps}/{args.steps} | симуляция {steps*pair.neural.simulation_dt:.2f} с | XY-разница {drift_text} клетки', True, orange), (12, y))
-            screen.blit(small.render('W/S, ↑/↓ — вперёд/назад · A/D — стрейф · Q/E, ←/→ — поворот · SPACE/ЛКМ — выстрел', True, color), (12, y+30))
-            screen.blit(small.render('ENTER — старт · P — пауза · R — перезапуск ОБЕИХ · TAB — камера · ESC — выход · без NPC', True, muted), (12, y+58))
-            pygame.display.set_caption(f'TurkeyWorld COMPARE | Source LEFT / Neural RIGHT | {metrics.get("mode", "autonomous")} | updates {steps}/{args.steps} | '+('PAUSED' if paused else 'RUNNING'))
+            screen.blit(small.render('W/S, ↑/↓ — ходьба · A/D — стрейф · Q/E, ←/→ — поворот · SPACE/ЛКМ — выстрел', True, color), (12, y+30))
+            screen.blit(small.render('T — бой / навигация · ENTER — старт · P — пауза · R — заново · TAB — камера · ESC — выход', True, muted), (12, y+58))
+            pygame.display.set_caption(f'TurkeyWorld COMPARE | Source LEFT / Neural RIGHT | {metrics.get("environment", "navigation")} | {metrics.get("mode", "autonomous")} | updates {steps}/{args.steps} | '+('PAUSED' if paused else 'RUNNING'))
             pygame.display.flip()
+            if displayed == 0:
+                pygame.image.save(screen, str(gui.session_dir/'window_ready.png'))
             displayed += 1
             clock.tick(args.fps)
     finally:
@@ -212,7 +240,9 @@ def main(argv=None):
                                                'window_size': [layout['width'], layout['height']]})
     try:
         neural = NeuralRuntime(args)
-        pair = PairedRuntime(neural, source_size=gui.source_size, horizon=args.steps)
+        pair = PairedRuntime(neural, source_size=gui.source_size, horizon=args.steps,
+                             shared_camera_entities=gui.shared_camera_entities)
+        pair.set_mode(gui.comparison_mode)
         report = interactive(pair, gui, args, pygame, screen, layout)
         atomic_json(gui.session_dir/'report.json', report)
     except Exception as error:

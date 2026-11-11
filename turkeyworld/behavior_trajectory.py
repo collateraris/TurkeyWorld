@@ -23,18 +23,24 @@ def _stats(values):
 
 
 def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
-                                count=32, batch_size=4, seed=173):
+                                count=32, batch_size=4, seed=173,
+                                include_respawned_slots=False):
     """Measure paired free AR state drift, independently of the image generator.
 
     One window per distinct uniformly stratified held-out episode; no overlap.
     NPC primary errors include false-missing predictions rather than dropping
     them. A separate common-alive metric makes its narrower mask explicit.
-    Source slots which respawn after the context are excluded from paired NPC
-    geometry/velocity errors, but remain in all life/death/confusion counts.
+    By default, Source slots which respawn after the context are excluded from
+    paired NPC geometry/velocity errors, preserving the original protocol.
+    With include_respawned_slots, each Source continuing-alive transition is
+    measured, including later lives of a persistent slot. Only the exact spawn
+    transition is excluded, so teleport distance is not a velocity label.
     Wall checks are measurement-only CPU circle-vs-tile tests, never feedback.
     """
     if any(not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in (context, horizon, count, batch_size)):
         raise ValueError('Context/horizon/count/batch_size must be positive integers')
+    if not isinstance(include_respawned_slots, bool):
+        raise ValueError('include_respawned_slots must be a boolean')
     if data.split not in ('val', 'test'):
         raise ValueError('Trajectory validation requires an explicit held-out val/test split')
     rng = np.random.default_rng(seed)
@@ -60,6 +66,8 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
     specification = {'version': 'heldout_free_state_v1', 'split': data.split, 'windows': windows,
         'context': context, 'horizon': horizon, 'seed': seed, 'source_content_sha256': content.hexdigest(),
         'episode_identity_sha256': hashlib.sha256(json.dumps(identities, sort_keys=True).encode()).hexdigest()}
+    if include_respawned_slots:
+        specification.update(version='heldout_free_state_v2_respawn', include_respawned_slots=True)
     fingerprint = hashlib.sha256(json.dumps(specification, sort_keys=True).encode()).hexdigest()
     device = next(model.parameters()).device
     modes = [(module, module.training) for module in model.modules()]
@@ -117,7 +125,10 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
         true_before, true_now = source[:, offset-1], source[:, offset]
         respawn = ~true_alive[:, offset-1] & true_alive[:, offset]
         respawn_seen |= respawn
-        stable = true_alive[:, 0] & true_alive[:, offset-1] & true_alive[:, offset] & ~respawn_seen
+        if include_respawned_slots:
+            stable = true_alive[:, offset-1] & true_alive[:, offset]
+        else:
+            stable = true_alive[:, 0] & true_alive[:, offset-1] & true_alive[:, offset] & ~respawn_seen
         common = stable & pred_alive[:, offset]
         npc_distance = np.linalg.norm((pred_npc[:, offset, :, :2]-true_npc[:, offset, :, :2])*16, axis=-1)
         pdelta, tdelta = (now[:, :2]-before[:, :2])*16, (true_now[:, :2]-true_before[:, :2])*16
@@ -157,7 +168,8 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
             'player_alive_mismatches': int(((now[:, 4] > 0) != (true_now[:, 4] > 0)).sum()),
             'player_death_event_mismatches': int((((before[:, 4] > 0) & (now[:, 4] <= 0)) !=
                                                  ((true_before[:, 4] > 0) & (true_now[:, 4] <= 0))).sum()),
-            'source_respawns_this_offset': int(respawn.sum()), 'source_respawned_slots_excluded': int(respawn_seen.sum()),
+            'source_respawns_this_offset': int(respawn.sum()),
+            'source_respawned_slots_excluded': int((respawn if include_respawned_slots else respawn_seen).sum()),
             'predicted_respawns_this_offset': int((~pred_alive[:, offset-1] & pred_alive[:, offset]).sum()),
             'player_wall_collisions': player_collisions, 'living_npc_wall_collisions': npc_collisions}
     report = {'panel': specification, 'fingerprint': fingerprint, 'source_held_out': True,
@@ -165,7 +177,11 @@ def evaluate_state_trajectories(model, data, output_dir, context=2, horizon=16,
         'horizon': horizon, 'context': context, 'render_precision': 'fp32_tf32_disabled',
         'all_states_finite': bool(np.isfinite(predicted).all()), 'all_memory_finite_and_shape_valid': True,
         'memory_shape_per_sample': list(memory_shape), 'elapsed_seconds': time.perf_counter()-started,
-        'npc_geometry_mask': 'source initially alive and still continuing, no source respawn since context; own missing retained',
+        'npc_geometry_protocol_version': 2 if include_respawned_slots else 1,
+        'include_respawned_slots': include_respawned_slots,
+        'npc_geometry_mask': ('source alive before and after each transition; exact spawn excluded; '
+            'later lives and own missing retained' if include_respawned_slots else
+            'source initially alive and still continuing, no source respawn since context; own missing retained'),
         'offsets': offsets, 'key_offsets': {str(k): offsets[str(k)] for k in (1, 4, 8, 16) if k <= horizon},
         'first_wall_collision': [{'episode': window['episode'], 'start': window['start'], 'collision': collision}
                                  for window, collision in zip(windows, first_collision)],

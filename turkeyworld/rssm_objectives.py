@@ -56,7 +56,8 @@ def _valid_result(result, expected_shape, where):
     if (result['state'].ndim != 2 or result['state'].shape[-1] != STATE_DIM
             or not torch.is_tensor(result['memory']) or tuple(result['memory'].shape) != expected_shape):
         raise ValueError(f'Invalid RSSM state/packed memory shape at {where}')
-    for key in ('state', 'memory', 'rssm_prior_logits', 'rssm_posterior_logits', 'rssm_readout', 'features', 'rssm_reconstruction'):
+    for key in ('state', 'memory', 'rssm_prior_logits', 'rssm_posterior_logits', 'rssm_readout', 'features', 'rssm_reconstruction',
+                'enemy_rssm_prior_logits','enemy_rssm_posterior_logits','enemy_rssm_h','enemy_rssm_z'):
         if key in result and not bool(torch.isfinite(result[key]).all()):
             raise FloatingPointError(f'Nonfinite RSSM {key} at {where}')
 
@@ -98,8 +99,17 @@ def _kl_settings(model):
         'unimix': getattr(config, 'rssm_unimix', .01)}
 
 
+def _npc_xy_mask(initial_alive, source_alive, *, combat=False):
+    previous_alive = torch.cat([initial_alive[:, None], source_alive[:, :-1]], 1)
+    if combat:
+        # The single persistent ID continues after every respawn. Only the
+        # exact Source teleport/revival tick is excluded from motion tracking.
+        return previous_alive & source_alive
+    return initial_alive[:, None] & source_alive & (((~previous_alive & source_alive).long().cumsum(1)) == 0)
+
+
 def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size, check_gradients,
-                        contact_protocol=None):
+                        contact_protocol=None, combat_protocol=None, loss_groups=None):
     states, frames, actions, targets, grid = _batch_data(batch, context)
     batch_size, horizon = actions.shape[:2]
     if horizon > 16:
@@ -112,9 +122,20 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
     denominator = (2*moving.sum()).clamp_min(1)
     totals = dict.fromkeys(('posterior_kl', 'posterior_reconstruction', 'posterior_state',
                            'pass_bce', 'raw_delta', 'scaled_motion', 'physical_motion', 'endpoint_margin', 'contact_wall'), 0.)
+    dual_enemy=bool(getattr(getattr(model,'config',None),'enemy_rssm_enabled',False))
+    if dual_enemy:totals['enemy_posterior_kl']=0.
     contact = (prepare_contact_targets(previous, targets, actions, contact_protocol=contact_protocol)
                if contact_protocol is not None else None)
+    combat_supervision = None
+    combat_diagnostics = {}
+    combat_names = ('combat_events', 'combat_target', 'combat_attack', 'combat_damage_npc',
+                    'combat_damage_player', 'combat_death_npc', 'combat_spawn', 'combat_npc_motion')
+    if combat_protocol is not None:
+        from .rssm_combat_objectives import prepare_combat_supervision, combat_supervised_terms
+        combat_supervision = prepare_combat_supervision(batch, context, **combat_protocol)
+        totals.update(dict.fromkeys(combat_names, 0.))
     kl_settings = _kl_settings(model)
+    kl_floor = kl_settings['free_nats']*(kl_settings['dynamics_scale']+kl_settings['representation_scale'])
     kl_metrics, resets, calls = {}, 0, 0
     free, blocked = active & (labels >= .9), active & (labels <= .1)
     false_stops = missed_blocks = 0
@@ -132,6 +153,7 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
         if first: memory = memory.detach()
         with autocast():
             parts = {}
+            task_parts = {}
             for index in range(first, last):
                 post = model.vjepa_backend.observe_step(previous[:, index], actions[:, index], features,
                     memory, frames[:, context+index])
@@ -152,6 +174,14 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
                 accepted_delta = prior['state'][:, :2]-previous[:, index, :2]
                 values = {'posterior_kl': kl/horizon, 'posterior_reconstruction': reconstruction/horizon,
                     'posterior_state': 2*state_loss(prior['state'], targets[:, index])/horizon}
+                if dual_enemy:
+                    if 'enemy_rssm_prior_logits'not in post or 'enemy_rssm_posterior_logits'not in post:
+                        raise ValueError('Dual RSSM posterior must expose both causal enemy prior and observed posterior')
+                    enemy_settings={**kl_settings,'unimix':model.config.enemy_rssm_unimix}
+                    enemy_kl,enemy_details=balanced_kl(post['enemy_rssm_posterior_logits'],post['enemy_rssm_prior_logits'],**enemy_settings)
+                    values['enemy_posterior_kl']=enemy_kl/horizon
+                    for name,value in enemy_details.items():
+                        kl_metrics['enemy_'+name]=kl_metrics.get('enemy_'+name,0.)+float(value.detach())/horizon
                 if contact_protocol is None:
                     basis = entity_motion_basis(previous[:, index], actions[:, index])
                     raw_loss = F.smooth_l1_loss(_local(raw*200, basis), _local(expected_delta*200, basis), reduction='none')
@@ -162,6 +192,30 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
                 else:
                     values.update(differentiable_contact_terms(prior, previous[:, index], targets[:, index],
                         actions[:, index], grid, contact_protocol=contact_protocol, supervision=contact, index=index))
+                if combat_supervision is not None:
+                    combat_terms, diagnostics = combat_supervised_terms(prior, previous[:, index], targets[:, index],
+                        actions[:, index], supervision=combat_supervision, index=index)
+                    values.update(combat_terms)
+                    for name, value in diagnostics.items():
+                        combat_diagnostics[name] = combat_diagnostics.get(name, 0.)+float(value)
+                if loss_groups is not None:
+                    from .rssm_loss_balance import split_state_loss, combat_loss_groups
+                    separated = split_state_loss(prior['state'], targets[:, index])
+                    task_values = {name: 2*value/horizon for name, value in separated.items()}
+                    task_values['player'] = task_values['player']+values['posterior_kl']+values['posterior_reconstruction']
+                    if dual_enemy:
+                        task_values['enemy'] = task_values['enemy']+values['enemy_posterior_kl']
+                    if contact_protocol is None:
+                        task_values['player'] = (task_values['player']+PASS_WEIGHT*values['pass_bce']
+                            +RAW_DELTA_WEIGHT*values['raw_delta']+SCALED_MOTION_WEIGHT*values['scaled_motion'])
+                    else:
+                        task_values['player'] = task_values['player']+sum(contact_protocol[name+'_weight']*values[name]
+                            for name in ('pass_bce', 'physical_motion', 'endpoint_margin', 'contact_wall'))
+                    if combat_supervision is not None:
+                        for name, value in combat_loss_groups(combat_terms).items():
+                            task_values[name] = task_values[name]+value
+                    for name, value in task_values.items():
+                        task_parts[name] = task_parts.get(name, 0)+value
                 for name, value in values.items(): parts[name] = parts.get(name, 0)+value
                 for name, value in details.items(): kl_metrics[name] = kl_metrics.get(name, 0.)+float(value.detach())/horizon
                 with torch.no_grad():
@@ -173,22 +227,36 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
                     physical_false_stops += int(((accepted_delta.abs() < threshold*commands[:, index].abs()) & physical_free[:, index]).sum())
                     physical_missed_blocks += int(((accepted_delta.abs() > threshold*commands[:, index].abs()) & physical_blocked[:, index]).sum())
             loss = parts['posterior_kl']+parts['posterior_reconstruction']+parts['posterior_state']
+            if dual_enemy:loss=loss+parts['enemy_posterior_kl']
             if contact_protocol is None:
                 loss = loss+PASS_WEIGHT*parts['pass_bce']+RAW_DELTA_WEIGHT*parts['raw_delta']+SCALED_MOTION_WEIGHT*parts['scaled_motion']
             else:
                 loss = loss+sum(contact_protocol[name+'_weight']*parts[name]
                     for name in ('pass_bce', 'physical_motion', 'endpoint_margin', 'contact_wall'))
+            if combat_supervision is not None:
+                loss = loss+sum(parts[name] for name in combat_names)
+            if loss_groups is not None:
+                floors = {'player': kl_floor*(last-first)/horizon}
+                if dual_enemy: floors['enemy'] = floors['player']
+                loss = loss_groups.combine(task_parts, floors=floors)
         if not bool(torch.isfinite(loss)): raise FloatingPointError('Nonfinite RSSM posterior/motion objective')
         loss.backward(); calls += 1
         if check_gradients: finite_gradient_norm(model.named_parameters(), context=f'RSSM posterior backward {last}/{horizon}')
         for name, value in parts.items(): totals[name] += float(value.detach())
     total = totals['posterior_kl']+totals['posterior_reconstruction']+totals['posterior_state']
+    if dual_enemy:total+=totals['enemy_posterior_kl']
     if contact_protocol is None:
         total = total+PASS_WEIGHT*totals['pass_bce']+RAW_DELTA_WEIGHT*totals['raw_delta']+SCALED_MOTION_WEIGHT*totals['scaled_motion']
     else:
         total = total+sum(contact_protocol[name+'_weight']*totals[name]
             for name in ('pass_bce', 'physical_motion', 'endpoint_margin', 'contact_wall'))
+    if combat_supervision is not None:
+        total += sum(totals[name] for name in combat_names)
+        combat_diagnostics.update(combat_source_shot_count=float(batch['events'][..., 0].sum()),
+            combat_source_player_hit_count=float(batch['events'][..., 3].sum()),
+            combat_source_player_death_count=float(((previous[..., 4] > 0) & (targets[..., 4] <= 0)).sum()))
     return {'loss': total, **totals, **{'kl_'+name: value for name, value in kl_metrics.items()},
+        **combat_diagnostics, 'combat_objectives_active': combat_supervision is not None,
         'source_windows': batch_size, 'source_observed_frames': observed, 'source_horizon': horizon,
         'posterior_rgb_frames': batch_size*horizon, 'source_queries_before_target_rgb': True,
         'source_backward_calls': calls, 'source_memory_numerical_resets': resets,
@@ -207,13 +275,25 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                            context=2, observed_context=None, auxiliary_context=None,
                            auxiliary_observed_context=None, chunk_size=16, teacher_weight=.1,
                            amp=None, progress_callback=None, expected_horizon=None, check_gradients=True,
-                           contact_protocol=None, contact_branch_protocol=None):
+                           contact_protocol=None, contact_branch_protocol=None, combat_protocol=None,
+                           numeric_state_feedback='attached', combat_branch_protocol=None, loss_groups=None):
     """Backpropagate own prior trajectory, then separate posterior/Source labels.
 
     Distillation uses1..16 own teacher/student transitions plus Source anchors.
     Source learning defaults to450 own transitions. No optimizer step, EMA,
     renderer call, GT state replacement or future RGB input to that trajectory.
     """
+    if numeric_state_feedback not in ('attached', 'detached'):
+        raise ValueError('Unknown numeric-state gradient feedback protocol')
+    if loss_groups is not None and (phase != 'source' or loss_groups.calls != 0):
+        raise ValueError('Grouped losses require a fresh Source microbatch accumulator')
+    own_combat_protocol = None
+    combat_candidates = []
+    if combat_branch_protocol is not None:
+        from .rssm_combat_branches import (normalize_combat_branch_protocol,
+            capture_combat_candidate, combat_branches_backward)
+        own_combat_protocol = normalize_combat_branch_protocol(combat_branch_protocol)
+        if phase != 'source': raise ValueError('Own combat branches require the Source phase')
     if (phase not in {'source', 'distill'} or phase == 'distill' and teacher is None
             or phase == 'source' and teacher is not None or not 0 <= teacher_weight <= .25
             or not isinstance(chunk_size, int) or chunk_size < 1 or amp is not None and not callable(amp)):
@@ -244,7 +324,7 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
     alive = (source_npc[..., 5] >= .5) & (source_npc[..., 4] > 0)
     initial_alive = (initial_npc[..., 5] >= .5) & (initial_npc[..., 4] > 0)
     previous_alive = torch.cat([initial_alive[:, None], alive[:, :-1]], 1)
-    stable = initial_alive[:, None] & alive & (((~previous_alive & alive).long().cumsum(1)) == 0)
+    stable = _npc_xy_mask(initial_alive, alive, combat=combat_protocol is not None)
     player_alive = (initial[:, None, 4] > 0) & (targets[:, :, 4] > 0)
     player_denominator, npc_denominator = (2*player_alive.sum()).clamp_min(1), (2*stable.sum()).clamp_min(1)
     source_previous = torch.cat([initial[:, None], targets[:, :-1]], 1)
@@ -256,20 +336,27 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         last = min(horizon, first+chunk_size)
         if first: current, memory = current.detach(), memory.detach()
         own_previous = current.detach()
-        branch_start = (current.detach(), memory.detach()) if branch_protocol is not None else None
+        branch_start = (current.detach(), memory.detach()) if branch_protocol is not None or own_combat_protocol is not None else None
         predicted, readouts, appearances = [], [], []
         with autocast():
             for index in range(first, last):
-                result = model.transition(current, actions[:, index], features, memory)
+                # Own numerical values remain identical. The optional combat
+                # protocol cuts only the unstable typed-state Jacobian; latent
+                # h/z memory still carries temporal gradients within TBPTT.
+                transition_state = current.detach() if numeric_state_feedback == 'detached' else current
+                result = model.transition(transition_state, actions[:, index], features, memory)
                 _valid_result(result, expected_shape, f'own prior {index+1}')
                 current, memory = result['state'], result['memory']
                 predicted.append(current)
                 if teacher_values is not None:
                     readouts.append(result['rssm_readout'].float()); appearances.append(result['features'].float())
             prediction = torch.stack(predicted, 1)
-            if branch_start is not None:
+            if branch_protocol is not None:
                 branch_candidates.append(capture_contact_candidate(first, branch_start[0], branch_start[1],
                     actions[:, first:min(horizon, first+branch_protocol['horizon'])], grid, prediction))
+            if own_combat_protocol is not None:
+                combat_candidates.append(capture_combat_candidate(first, branch_start[0], branch_start[1],
+                    actions[:, first:min(horizon, first+own_combat_protocol['horizon'])], grid, prediction))
             fraction = (last-first)/horizon
             previous_source = initial if first == 0 else targets[:, first-1]
             wall, _ = trajectory_state_losses(prediction, previous_source, targets[:, first:last], grid,
@@ -296,6 +383,13 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                                                                   F.layer_norm(reference.float(), (reference.shape[-1],), eps=1e-6)),
                     teacher_features=fraction*teacher_weight*.25*F.l1_loss(feature, teacher_values['features'][:, first:last]))
             value = sum(parts.values())
+            if loss_groups is not None:
+                from .rssm_loss_balance import split_state_loss
+                separated = split_state_loss(prediction.flatten(0, 1), targets[:, first:last].flatten(0, 1))
+                tasks = {name: fraction*10*term for name, term in separated.items()}
+                tasks['player'] = tasks['player']+parts['xy_player']+parts['wall_player']
+                tasks['enemy'] = tasks['enemy']+parts['xy_npc']+parts['wall_npc']
+                value = loss_groups.combine(tasks)
         if not bool(torch.isfinite(value)): raise FloatingPointError('Nonfinite autonomous RSSM objective')
         value.backward(); chunks += 1
         if check_gradients: finite_gradient_norm(model.named_parameters(), context=f'RSSM own prior backward {last}/{horizon}')
@@ -303,7 +397,12 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         if progress_callback: progress_callback(last, horizon)
     branch_metrics = (contact_branches_backward(model, branch_candidates,
         contact_branch_protocol=branch_protocol, contact_protocol=contact_protocol,
-        amp=amp, check_gradients=check_gradients) if branch_protocol is not None else {})
+        amp=amp, check_gradients=check_gradients,
+        **({'loss_groups': loss_groups} if loss_groups is not None else {})) if branch_protocol is not None else {})
+    combat_branch_metrics = (combat_branches_backward(model, combat_candidates,
+        combat_branch_protocol=own_combat_protocol, amp=amp, check_gradients=check_gradients,
+        **({'loss_groups': loss_groups} if loss_groups is not None else {}))
+        if own_combat_protocol is not None else {})
     if auxiliary_batch is None:
         aux_context = context
         auxiliary_batch = _auxiliary_view(batch, context, min(horizon, 16))
@@ -311,18 +410,28 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         aux_context = context if auxiliary_context is None else auxiliary_context
     aux_observed = _observed_count(aux_context, auxiliary_observed_context)
     auxiliary = _posterior_backward(model, auxiliary_batch, context=aux_context, observed=aux_observed,
-        autocast=autocast, chunk_size=min(chunk_size, 4), check_gradients=check_gradients, contact_protocol=contact_protocol)
-    total = sum(totals.values())+auxiliary['loss']+branch_metrics.get('loss', 0.)
+        autocast=autocast, chunk_size=min(chunk_size, 4), check_gradients=check_gradients,
+        contact_protocol=contact_protocol, combat_protocol=combat_protocol, loss_groups=loss_groups)
+    total = sum(totals.values())+auxiliary['loss']+branch_metrics.get('loss', 0.)+combat_branch_metrics.get('loss', 0.)
     kl_settings = _kl_settings(model)
     floor = kl_settings['free_nats']*(kl_settings['dynamics_scale']+kl_settings['representation_scale'])
-    return {'train_loss': total, 'train_loss_without_kl_floor': total-floor,
+    if getattr(getattr(model,'config',None),'enemy_rssm_enabled',False):floor*=2
+    balanced = loss_groups.report() if loss_groups is not None else None
+    if balanced is not None and not math.isclose(balanced['kl_floor'], floor, rel_tol=1e-6, abs_tol=1e-6):
+        raise AssertionError('Grouped KL floor accounting omitted or duplicated an observation objective')
+    actual = balanced['total'] if balanced is not None else total
+    return {'train_loss': actual, 'train_loss_without_kl_floor': actual-floor,
+        **({'train_loss_raw': total, 'loss_groups': balanced} if balanced is not None else {}),
         **{'rssm_'+name: value for name, value in totals.items()},
         **{'rssm_aux_'+name: value for name, value in auxiliary.items()},
         **{'rssm_contact_branch_'+name: value for name, value in branch_metrics.items()},
+        **{'rssm_combat_branch_'+name: value for name, value in combat_branch_metrics.items()},
         'rssm_phase': phase, 'rssm_prior_horizon': horizon, 'rssm_prior_tbptt_chunks': chunks,
         'rssm_prior_context_frames': observed, 'rssm_prior_numerical_resets': 0,
         'rssm_prior_future_rgb_inputs': 0, 'rssm_posterior_feedback_to_prior': False,
         'rssm_teacher_used': teacher_values is not None, 'rssm_teacher_weight': teacher_weight if teacher_values is not None else 0.,
         'rssm_ema_used': False, 'rssm_renderer_calls': 0, 'rssm_optimizer_steps': 0,
         'rssm_main_loss': sum(totals.values()), 'rssm_auxiliary_loss': auxiliary['loss'],
+        'rssm_npc_xy_supervised_transitions': int(stable.sum()),
+        'rssm_numeric_state_feedback': numeric_state_feedback,
         'rssm_kl_minimum_floor': floor, 'rssm_contact_protocol_version': 1 if contact_protocol is None else 2}

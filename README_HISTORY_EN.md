@@ -453,7 +453,7 @@ updates. Model/Adam/RNG were checked bit-exact on resume, as were1156 frozen
 tensors3151→3160. This snapshot passed **1035 Python tests and45 UI tests**.
 
 The **3250 check failed**: ctx1 final mean0.705833, p952.140181 and919/7200 wall
-steps; at3151 the figures were0.472222,1.573206 and883/7200. Best remains3151
+steps; at3151 the figures were0.472222, 1.573206 and883/7200. Best remains3151
 with `qualified:false`; no V3 quality improvement was claimed.
 
 Sources: [corner audit](training_runs/rssm25m_contact_b_20261111/navigation_revision/corner_dataset_audit.json),
@@ -525,6 +525,1019 @@ Sources: [first enemy run](training_runs/renderer_enemy_refine_20261111/),
 [selected100 validation](training_runs/renderer_enemy_refine_20261111/validation/step_000100.json),
 [data indexing](training_runs/renderer_enemy_refine_20261111/data_audit.json).
 
+## H26. NPC image diagnosis and correction after the frozen codec
+
+After the first H25 series, a separate test used **16 large NPC examples from TRAIN**.
+This is a diagnosis, not held-out validation. Reconstruction foreground
+MAE was: compact-E→compact-D **0.134384**, original-E→compact-D **0.135389**,
+original-E→original-D **0.061319**. Replacing only the encoder did not help.
+Changing the alive feature changed RF RGB by **0.011637** on average, and moving
+the NPC by **0.003611**: conditioning is connected, but this does not establish
+correct rendering. On these same frames, gradient norms were Base **0.486453**,
+RF **0.207275**; suppression by global clipping was not confirmed here. A private
+Base TRAIN test over **64 steps** reduced ROI MAE **0.152507→0.125380**, but the
+diagnostic NPC presence fraction stayed **0%**. All state in both codecs stayed bit-exact.
+
+An optional neural RGB correction was added for the next experiment after the frozen
+decoder. It uses current Base query features from state/map/appearance, with
+no Source RGB at inference. Zero initialization preserves the previous image;
+old bundles leave this branch disabled by default. The additional Linear
+**144→12** has **1740 parameters**: Base **996844→998584**, RF stays
+**6992192**, and the codec **997539**.
+Formula: `clamp(decoded_rgb + 0.5*tanh(residual), 0, 1)`.
+Neither VQGAN parameters nor its buffers are trained.
+
+The implementation passed **43 focused CPU tests**: old and new bundles, zero
+initialization, export/load and actual NeuralRuntime. Training this branch
+was not launched: the next request changed the priority to fine-tuning the
+compact VQGAN. The codec freeze applies to this residual path; separate
+compact codec fine-tuning is now explicitly authorized by the user.
+
+Sources: [TRAIN diagnosis](training_runs/renderer_enemy_refine_20261111/diagnostics/renderability_probe.json),
+[image comparison](training_runs/renderer_enemy_refine_20261111/diagnostics/renderability_probe.png).
+
+## H27. Fine-tuning the compact VQGAN on the enemy
+
+The next request was to fine-tune the compact VQGAN on enemies.
+It explicitly authorizes compact encoder/decoder updates, overriding the
+previous freeze for this separate experiment. The original teacher VQGAN and
+the current RSSM are unchanged. Its size stays at **997539 parameters**; the codebook,
+all quantizer buffers and latent normalization stay fixed. The new codec
+does not automatically replace the active renderer.
+
+The initial budget is **2000 updates**, batch **8**, validation **100**,
+preview **10**. The first **200** updates are decoder-only with
+`originalE(Source)→Q→compactD→Source`; the next **1800** train encoder+decoder.
+Learning rate: encoder **0.00002**, decoder **0.0001**.
+Foreground/background errors are normalized separately by area; SSIM,
+edges and contrast are included. Replay of actual old RF endpoints and
+encoder alignment on Base RGB are retained. GAN is disabled in this series:
+this fine-tunes an existing VQGAN's E/D against Source and frozen references.
+
+Reconstruction, decoding previous RF endpoints and the full
+`RF(newE(Base))→newD` need separate checks: a fixed codebook and scale alone
+do not guarantee compatibility. The **256**-frame held-out panel is
+retained. The objective and **4 CPU tests** are ready; the runner and codec
+replacement path were also checked with separate CPU tests.
+
+**Executed:** `codec_enemy_refine_20261111` started on **11 November
+18:07:02 Moscow time**, worker **31132**, dashboard **http://127.0.0.1:8770/**.
+The first **200** D-only updates completed; E/D weights are now actually updating.
+At snapshot **300**, Source reconstruction NPC ROI MAE was **0.133639→0.116566**,
+and the diagnostic fraction closer to Source-NPC than background **0.088542→0.489583**.
+This is not an enemy detector or a gameplay success measure.
+For unchanged RF weights with new E/D, foreground MAE was **0.158536→0.156655**;
+this is not yet reliable neural NPC rendering. Empty/RF regression guards passed,
+but the combined Source quality gate is false. All Q parameters/buffers and the
+original world/Base/RF/map/original-codec stayed bit-exact. Training continued
+after this point; the historical **300** snapshot is not the current live step.
+
+**The series completed at2000, selecting2000.** Source E+Q+D foreground MAE
+was **0.093483**, SSIM **0.879107**, and full-frame MAE **0.022894**.
+Foreground MAE decreased by approximately **30%** from its initial value;
+the diagnostic NPC fraction was **0.838542**. Original-E→new-D foreground MAE
+was **0.092033**. Empty/RF guards are true; the full Source gate is false.
+Original RF weights with new E/D give foreground MAE **0.157057** and SSIM
+**0.617499**: this confirms that separate renderer adaptation is still needed.
+Base code agreement between the old and new encoder is **0.616943**; a fixed
+codebook does not imply unchanged encoder outputs.
+The joint phase actually trained **973731** E/D parameters; **23808** Q
+parameters and all its buffers stayed unchanged. The selected codec was
+exported separately; the active game was not switched automatically.
+
+Sources: [objective](turkeyworld/codec_enemy_objectives.py),
+[update and freeze checks](tests/test_codec_enemy_objectives.py),
+[codec run](training_runs/codec_enemy_refine_20261111/),
+[validation300](training_runs/codec_enemy_refine_20261111/validation/step_000300.json),
+[final validation](training_runs/codec_enemy_refine_20261111/validation_selected.json),
+[compact codec](training_runs/codec_enemy_refine_20261111/checkpoints/codec_student.pt).
+
+## H28. Base/RF adaptation with the fine-tuned frozen codec
+
+A separate `renderer_enemy_codec_adapt_20261111` started on
+**11 November18:20:37 Moscow time**, worker **3532**, dashboard
+**http://127.0.0.1:8771/**. The new codec was selected at2000 from H27 and is
+fully frozen; Base **996844** and RF **6992192** continue training with one Euler step.
+Initial RF/Base weights, Q, normalization and fixed noise were checked bit-exact;
+export and strict reload of the new bundle passed. The original source,
+active pointer and parallel RSSM were unchanged.
+
+New Adam, budget **2000**, batch **8**, validation **100**, preview **10**.
+Alongside pixel/SSIM/edge/contrast, opt-in balanced endpoint latent MSE was added
+with weight **0.1** against `frozen compactE+Q(Source)` in the original normalization.
+Source RGB is only a loss label. Both the codec and objective changed, so
+metric changes cannot be attributed to a single factor.
+Default weight **0** preserves the previous loss; H26 residual and GAN are disabled.
+
+The first held-out snapshot **100**: RF foreground MAE **0.157057→0.147811**,
+diagnostic NPC fraction **0.036458→0.119792**, Base **0.150672→0.149256**.
+There is `rf1_empty_navigation_regression`; experimental selection and the full
+Source gate are false. All frozen parameters/buffers, including the new codec,
+stayed bit-exact. This confirms actual training began, not a finished game;
+training continues in the background.
+
+At **700**, RF foreground MAE is **0.138225** and the diagnostic NPC fraction
+**0.270833**. Relative experimental selection is now true:
+this check has no empty-scene regression. The full Source gate and NPC
+appearance target remain false; frozen-component invariance was confirmed.
+
+Sources: [new renderer run](training_runs/renderer_enemy_codec_adapt_20261111/),
+[codec replacement proof](training_runs/renderer_enemy_codec_adapt_20261111/codec_swap_proof.json),
+[check100](training_runs/renderer_enemy_codec_adapt_20261111/validation/step_000100.json),
+[check700](training_runs/renderer_enemy_codec_adapt_20261111/validation/step_000700.json).
+
+## H29. Paired Source and neural-renderer window with a shared camera
+
+The `compare_play` window actually launched on **11 November18:41 Moscow time**,
+PID **14692**, session `paired_compare_20261111T153932Z_enemy_codec`. It uses
+RSSM snapshot **3780**, renderer selected at **1900** from H28, Base **996844**,
+RF **6992192**, the new **997539** codec (`67bfff93…`), one Euler step and SR
+from the20000-step series. The window is **1572×968**, with two768-pixel panels;
+Source renders at256, while the neural chain is **32→trained SR128→bilinear1024**,
+then fitted into its panel. One keyboard action is applied to both sides per
+paired tick; simulation30Hz, trial450 steps, catch-up limited to one step.
+
+The initial **`shared_camera`** mode uses the Source pose only to display the
+neural renderer from the matching camera. It does **not** correct the RSSM's
+own state or memory: `engine_corrections=0`, `rssm_future_source_feedback=false`.
+**Tab** switches the display to autonomous mode. The profile is
+`navigation_only=true`; this launch does not validate full combat or qualify
+the game. Initial readiness was paused at0; the saved `ready_snapshot.json`
+already records user play at **39/450**, unpaused, with finite state/memory.
+The current `status.json` changes. Renderer1900 passed relative-improvement
+and empty-scene checks, but its full Source gate remains false
+(RF SSIM **0.691841**, NPC ROI MAE **0.134537**, diagnostic NPC fraction **0.302083**).
+A shared-camera comparison does not establish autonomous navigation quality.
+
+Sources: [command and selected weights](training_runs/paired_compare_20261111T153932Z_enemy_codec/launch.json),
+[saved readiness at39/450](training_runs/paired_compare_20261111T153932Z_enemy_codec/ready_snapshot.json),
+[current window status](training_runs/paired_compare_20261111T153932Z_enemy_codec/status.json),
+[selected renderer1900 check](training_runs/renderer_enemy_codec_adapt_20261111/validation_selected.json).
+
+## H30. New Source corpus: one enemy, combat and detailed navigation
+
+On **11 November**, a separate immutable corpus was collected in
+`training_runs/combat_source_20261111/data`: **1280 NPZ files**, native32, state20,
+one NPC,30Hz, policy `deterministic_enemy_v4_single_spawn_cycle`.
+Previous datasets and fixed validation panels were not overwritten.
+
+| Subset | TRAIN: files / actual transitions | VAL: files / actual transitions |
+|---|---|---|
+| moving1, short combat | 512 /15362 | 128 /3844 |
+| full_game,451 transitions | 256 /115456 | 64 /28864 |
+| navigation, no NPC | 256 /8192 | 64 /2048 |
+| Total | 1024 /139010 | 256 /34756 |
+
+Combat includes duel, melee_then_shoot, miss_then_hit, blocked, kill_respawn and
+return. The short subset also retains genuine terminal episodes:
+**73 TRAIN and18 VAL**, ending before32 transitions. They are not padded with
+fictional survival and cannot supply a450-step target. All **256/64** long
+TRAIN/VAL episodes support horizon450 with contexts1/2. Navigation includes
+corner, slide, return, wall_stop, turn and strafe; NPCs are explicitly disabled.
+
+NPZ files contain actual Source RGB, states, actions, events/hits/attacks,
+exact visible-NPC masks and Source RGB without the NPC, plus depth/visibility.
+An independent audit verified SHA256 for all **1280** files, no overlap in seeds,
+complete NPZ files or exact initial states between TRAIN/VAL, empty navigation
+NPC masks and genuine corner geometry. One episode from each case was replayed
+in Source: states/events matched bit for bit, and selected RGB frames were also
+checked. This establishes episode/seed separation, rather than claiming every
+VAL camera pose is novel.
+
+Sources: [manifest](training_runs/combat_source_20261111/data/manifest.json),
+[independent audit](training_runs/combat_source_20261111/data_audit_independent.json),
+[exact collection command](training_runs/combat_source_20261111/launch.json).
+
+## H31. Combat RSSM and parallel Base/RF training on new Source frames
+
+The next user request split training into two independent processes.
+The H29 game window is not restarted, and new weights are not automatically
+attached to it.
+
+**RSSM:** `training_runs/rssm25m_combat_20261111`, dashboard
+**http://127.0.0.1:8765/**. The navigation run stopped at **3873**;
+migration preserved all **1271 tensors**, the existing **115 Adam parameter names**,
+**102 existing optimizer states**, RNG and history. The only semantic
+configuration change is `navigation_only:true→false`.
+The first actual update **3874 was saved**: combat heads acquired Adam states
+for the first time, bringing the total to115; this does not reset existing
+moments or add model parameters. Base/Flow/codec/map/appearance were confirmed
+bit-identical after that update.
+
+The cycle contains **3 combat updates and1 explicit no-enemy navigation replay**,
+batch16×accumulation1,450 own transitions and memory, TBPTT16.
+Supervision adds shot targets, hits/misses, attacks, NPC/player damage,
+NPC death, NPC motion and spawn. Auxiliary Source labels do not replace the
+independent prior with future RGB or true state. Validation every250 updates
+combines the previous navigation criteria with separate held-out heads/16×450
+using one NPC; previews run every10. There is no fixed budget: two consecutive
+complete checks must pass. Baseline3873 **failed both navigation and combat**;
+gameplay qualification is not claimed.
+
+Strict Base/RF binding previously included the navigation-only profile. A new
+helper first validates the old bundle against its original lineage, permits
+only this flag change with every world tensor identical, then creates a
+separate combat-profile bundle. Base/RF/Q/normalization/noise and previous
+quality findings remain unchanged; original artifacts are not overwritten.
+
+**Renderer:** `training_runs/renderer_combat_navigation_20261111`, separate dashboard
+**http://127.0.0.1:8772/**. Initial weights are Source RSSM snapshot **3780** and
+renderer **1900** from H28. Base **996844** and RF **6992192** train with one Euler
+step; VQGAN **997539** (`67bfff93…`), RSSM, map, geometry, appearance and SR stay
+frozen. GAN and the optional pixel residual are disabled. The new dataset
+explicitly starts a fresh Adam. Each batch16 contains
+**8 combat +4 appearance +4 detailed-navigation** frames.
+Combat uses actual hit/miss/player_hurt/death/respawn labels; navigation uses
+corner/slide/return/wall_stop/turn/strafe. Source supplies fixed poses, while
+dynamic features use only the previous observation. The Source latent target
+has weight **0.1** and is a loss label only.
+
+After excluding **328** VAL frames matching exact TRAIN scenes, there are **146386 TRAIN** and
+**31277 VAL** target frames; the fixed panel has **256** frames. Sampling quotas,
+RNG and pool/cohort counters are checkpointed. Validation runs every100 updates,
+preview/save every10. At2000, update2000 was selected: Base SSIM **0.706131**,
+MAE **0.040099**, NPC ROI MAE **0.121004**; RF SSIM **0.709609**, MAE **0.041431**,
+NPC ROI MAE **0.117572**. Relative-improvement checks passed; the complete Source
+gate remained **false**. These are fixed Source poses, not autonomous combat.
+
+The same run therefore continued **2000→total6000**, changing only the budget.
+The saved2100 checkpoint confirmed all **317 Adam states** at step2100, the same
+frozen fingerprint and Torch RNG;33600 draws split **16800/8400/8400**.
+New results do not automatically replace the active renderer. Navigation,
+combat, Source image quality and gameplay qualification remain separate results.
+
+Sources: [RSSM command](training_runs/rssm25m_combat_20261111/launch_command.json),
+[migration](training_runs/rssm25m_combat_20261111/combat_migration.json),
+[renderer binding](training_runs/rssm25m_combat_20261111/renderer_profile_rebind.json),
+[baseline3873](training_runs/rssm25m_combat_20261111/validation/step_003873/rssm_combat_validation.json),
+[renderer command](training_runs/renderer_combat_navigation_20261111/launch_command.json),
+[sampling audit](training_runs/renderer_combat_navigation_20261111/data_preflight.json),
+[Source check2000](training_runs/renderer_combat_navigation_20261111/validation_selected_2000.json),
+[Adam/RNG continuation proof](training_runs/renderer_combat_navigation_20261111/continuation_2000_to_6000.json).
+
+## H32. Numeric NPC feedback gradient amplification and revision V2
+
+The first **6 combat updates3874–3879** were finite, but gradient norms reached
+roughly **1e20–1e23**. The run stopped safely at3879, preserving all six updates;
+there was no rollback. Finite values alone did not mean the training scale
+was healthy.
+
+An isolated probe on the same TRAIN episodes, checkpoint3879, batch16 and H450
+compared gradient paths without an optimizer step:
+
+| Variant | Main gradient norm |
+|---|---:|
+| Previous numeric feedback, chunk16 | 2.219e23 |
+| Same feedback, chunk4 | 2.312e5 |
+| No gradient through NPC velocity feedback | 7.124e6 |
+| No gradient through all numeric state feedback, chunk16 | 165.80 |
+
+The separate auxiliary norm was **1209.56**. All450 output states matched bit
+for bit; memory was directly compared at offsets **1/16/450**.
+This measures one fixed batch, rather than guaranteeing future stability or
+establishing gameplay quality.
+
+Immutable `numeric_feedback_revision.json` takes effect at3879 with protocol
+`rssm_one_enemy_combat_numeric_feedback_v2`. Only on combat updates, the numerical
+own state is detached from autograd before the next transition. Its values are
+not reset or replaced with Source; **h/z BPTT16 is preserved**, as are450
+transitions. The architecture, pre-resume weights, LR, dataset and thresholds
+did not change. The command uses `--feedback-revision-plan`; the base plan is unchanged.
+
+Restoration at3879 verified model, Adam and all RNG fields bit for bit — **1618
+compared tensors**. The first saved V2 update **3880** confirmed **1156 frozen
+tensors** unchanged, **115 trainable tensors** changed, the same optimizer
+names/groups and115 optimizer states. Measured norms were:3880 combat **1279.73**,
+3881 navigation **10.12**,3882 combat **1603.61**. Training continued, but these initial
+checks do not establish navigation, combat or Source image quality.
+The game window and independent renderer worker were not restarted by this revision.
+
+Sources: [isolated probe](training_runs/rssm25m_combat_20261111/diagnostics/combat_gradient_probe.json),
+[V2 plan](training_runs/rssm25m_combat_20261111/numeric_feedback_revision.json),
+[restoration without rollback](training_runs/rssm25m_combat_20261111/resume_verification_g3879_detached.json),
+[first V2 update](training_runs/rssm25m_combat_20261111/first_numeric_feedback_update_verification.json),
+[current command](training_runs/rssm25m_combat_20261111/launch_command.json).
+
+## H33. HP0 codec, controlled RF pilots and continued renderer training
+
+The renderer loss audit at6000 showed a real but slow decline: the first1000
+updates averaged **0.35057**, the last1000 **0.28410**; the last two500-update
+windows were **0.28584→0.28237**, with individual-batch deviation around0.0223.
+Held-out RF/NPC metrics were fluctuating. RF often worsened Base, especially
+on player damage and large NPCs. Renderer gradients were neither absent nor exploding.
+
+On the exact256-frame panel, the frozen codec had **10 HP0 frames**: Source
+reconstruction MAE **0.123816**, SSIM **0.569506**, versus MAE **0.024230** for
+the remaining246. A separate genuine HP0 panel has **18** frames;
+10 overlap the main panel, giving264 distinct frames. Source-visible render
+conditions separate it from TRAIN; the main fingerprint `8f736fc8…` is unchanged.
+This measures a death/red-tint reconstruction problem, but does not establish
+a mathematical codec ceiling or absence of such examples from all prior training.
+
+The separate `codec_battle_terminal_20261111` run trained compact E/D only,
+**997539 parameters**; the entire1488×16 quantizer, its buffers and latent
+normalization were preserved. After2000 updates,1900 was selected: HP0 MAE
+**0.015090**, SSIM **0.969407**; alive MAE **0.021686**, NPC ROI MAE **0.079946**.
+Relative alive/NPC/empty/full-RF guards passed; the complete Source gate is still
+**false**. These are learned weights, not a runtime tint effect.
+
+Three sequential200-update pilots then started from the same renderer5800
+Base/RF weights and Source RSSM snapshot3780. Every pilot pinned **the same
+codec1000**, tensor SHA `ea1f1556…`; final1900 was not substituted between arms.
+All200 training batch indices, initial predictions, RNG and256+18 panels matched.
+GAN/residual/runtime blending were disabled.
+
+| Pilot | RF→Base gradient | latent / guard | RF SSIM / MAE | NPC MAE | HP0 RF MAE |
+|---|---|---|---|---|---|
+| A, previous objective | no | 0.1 /0 | 0.740434 /0.035636 | 0.104265 | 0.032907 |
+| B, coupled package | yes | 0.03 /1 | 0.736241 /0.036002 | 0.103531 | 0.033127 |
+| C, guard only | no | 0.1 /1 | 0.741964 /0.035432 | 0.102958 | 0.032084 |
+
+B was rejected: Base MAE was **0.036144**, versus **0.034401** for A; HP0 Base
+was **0.037958**, versus **0.032258**. B's lower raw loss did not demonstrate an
+improvement: its latent weight was smaller. The common RGB and old-latent0.1
+objectives used identical weights; A/C RGB objectives were nearly equal at
+**0.232086/0.232159**, versus B's **0.236793**. C's small Source RF/NPC/HP0
+advantage does not establish improvement across every metric or seed.
+**All three release gates were false**.
+
+The guard is a separate per-image FG/BG penalty when RF worsens detached Base.
+It cannot guarantee new-frame results. Release additionally requires RF no worse
+than current Base and Base no worse than **original parent5800**, across overall,
+alive/hurt/HP0/corpse/empty/navigation/large cohorts: MAE/region tolerance0.002,
+SSIM0.01. Source and reference receive no gradient. Previous detach/loss defaults
+are preserved; architecture and parameter counts did not change.
+
+C200 was selected for further training in `renderer_repair_corrected_20261111`,
+dashboard **http://127.0.0.1:8774/**. This explicitly attaches final **codec1900**,
+tensor SHA `e7c82c5e…`, and freezes it again. C200 Base/RF tensors remain identical;
+new Adam and sampler seed173 are declared as a separate phase with a6000-update
+control budget. The original Base anchor is not reset to C200. Saved local620
+confirmed317 Adam states; frozen check600 preserved all codec/world/map/appearance
+tensors. **Full release has not passed**; game weights and the window were not
+automatically switched.
+
+Sources: [loss/HP0 audit](training_runs/renderer_combat_navigation_20261111/diagnostics/loss_analysis_6000.json),
+[selected codec](training_runs/codec_battle_terminal_20261111/validation_selected.json),
+[A/B/C and identical-selection proof](training_runs/renderer_repair_pilots_20261111/pilot_comparison.json),
+[shared pilot initialization](training_runs/renderer_repair_pilots_20261111/initialization_proof.json),
+[explicit new codec phase](training_runs/renderer_repair_corrected_20261111/initialization_proof.json),
+[continuation plan](training_runs/renderer_repair_corrected_20261111/phase_plan.json),
+[saved working checkpoint check](training_runs/renderer_repair_corrected_20261111/running_verification.json).
+
+## H34. Combat SR x4 continuation and the requested2000-to10000 extension
+
+The user requested SR training alongside dynamics and the neural renderer.
+The existing **1,517,571-parameter EDSR** (64 channels,16 blocks, x4) was loaded
+from its trained20000-step checkpoint. Its architecture and parent weights on
+disk were preserved; this was a separate SR-only optimizer and run.
+
+`sr_combat_data` replayed immutable Source initial states and recorded controls.
+Every selected native32 image matched the stored Source RGB bit for bit;
+**HR128 was rendered at exactly the same physical state**, never interpolated.
+The cache contains **3072 TRAIN and384 VAL target pairs**:25% navigation
+(768/96), with the remainder balanced across hit, miss, melee, NPC death,
+respawn, wall-blocked melee and genuine player HP0. All73 TRAIN and18 VAL HP0
+targets were retained. Each file also stores its preceding observation, so
+6144/768 stored images are not6144/768 independent target examples. The SR
+sampler uses only target frame1. Source TRAIN/VAL seeds do not overlap.
+
+Training used batch8, FP32, AdamW LR`5e-5`, and actual-HR-foreground/background
+balanced L1 +0.2 SSIM +0.1 edge loss. Approximately25% of training inputs were
+reconstructed by the already trained compact HP0 codec; the other inputs were
+clean Source32. The complete codec, including codebook and usage buffers,
+remained frozen. Generated world/RF images were not paired with invented HR.
+World dynamics, Base/RF and the active game SR were not changed by this run.
+
+The first **2000 additional updates completed**, and selected update2000 was
+exported at **22000 cumulative SR updates**. Fixed episode-held-out results:
+
+| Input / cohort | SSIM before → selected2000 | MAE before → selected2000 |
+|---|---:|---:|
+| Clean Source32,384 targets | 0.833538 →0.844838 | 0.018833 →0.017945 |
+| Frozen-codec input, same384 | 0.786924 →0.797697 | 0.027989 →0.026743 |
+| Clean player HP0,18 targets | 0.602691 →0.714730 | 0.035692 →0.026571 |
+| Clean navigation,96 targets | 0.898286 →0.900133 | 0.010588 →0.010529 |
+
+The384-frame panel is episode/seed-held-out, not a novel-image guarantee: it
+contains3 exact LR+HR image matches to TRAIN and11 within-VAL duplicates. A
+supplemental **370 unique images with all TRAIN pixel matches removed**, using
+the same saved predictions without new inference, also improved: clean SSIM
+**0.833022 →0.844368**, MAE **0.018833 →0.017947**; codec-input SSIM
+**0.786926 →0.797814**, MAE **0.027925 →0.026670**.
+
+The overall0.90 SSIM criterion remains **false**. These are SR measurements,
+not autonomous navigation/combat qualification or a performance benchmark.
+All74 SR tensors changed, Adam reached2000, exported weights were finite, and
+the original SR file plus every frozen-codec tensor/buffer stayed unchanged.
+The new artifact was **not automatically deployed**.
+
+The user then requested **10000 local refinement updates**, or30000 cumulative
+including the20000-step parent. `continuation_2000_to_10000.json` explicitly
+extends the budget while the original training plan stays unchanged. Full
+checkpoint, export and reports from2000 were archived first. Model, Adam,
+private NumPy RNG, Torch RNG and CUDA RNG restored bit for bit; actual update
+**2001 / cumulative22001** was saved and verified. This records the start of
+the extension, **not its completion**. The same data, frozen codec, batch/LR,
+validation100 and preview100 continue at [local SR progress](http://127.0.0.1:8775).
+The active game keeps its original20000-step SR until a separate deployment.
+
+Sources: [paired data audit](training_runs/sr_combat_refine_20261111/data_audit.json),
+[selected2000 validation](training_runs/sr_combat_refine_20261111/archives/validation_g002000.json),
+[strict370 check](training_runs/sr_combat_refine_20261111/archives/strict_unique_validation_g002000.json),
+[2000 tensor/Adam proof](training_runs/sr_combat_refine_20261111/archives/final_verification_g002000.json),
+[budget extension](training_runs/sr_combat_refine_20261111/continuation_2000_to_10000.json),
+[exact restoration](training_runs/sr_combat_refine_20261111/resume_verification_g2000.json),
+[first continued update](training_runs/sr_combat_refine_20261111/first_continuation_update.json),
+[archived2000 export](training_runs/sr_combat_refine_20261111/archives/sr_for_game_g002000.pt).
+
+## H35. Short autonomous branches, balanced spawns and negative attacks
+
+The requested **1/4/8/16-transition** combat branches start from the main450-step
+rollout's own states and actual h/z memory. They never reinitialize from images.
+Source supplies training targets only, without correcting gameplay states;
+V2 numerical feedback stays detached and memory keeps BPTT16. The bounds are
+4 branches and64 Source probes per combat update.
+
+An additional256 TRAIN/64 VAL genuine32-step episodes cover a nearby enemy
+behind a corner that cannot attack:1101/302 eligible negative attacks and254/63
+later real attacks. The combined corpus has147202 unique TRAIN and36804 VAL
+transitions. Explicit role aliases reuse existing long tapes for short spawn
+windows; they are not counted as newly collected data. Auxiliary B16 uses
+**4 spawn +4 negative-attack +8 legacy-mixture windows**, balancing spawns
+across the eight actual anchor locations.
+
+Every250 updates, validation checks **all128 revivals from64 long VAL tapes**
+plus all302 negative and63 positive attacks from the new VAL as separate cohorts.
+Old short-panel reports remain available; exhaustive spawn checking replaces
+the nine-event spawn gate. Navigation, own450, collision and life guards stay.
+Baseline4159: spawn **18/128**, negative-attack FPR **1.0**, positive recall
+**1.0**; quality failed.
+
+The previous worker stopped gracefully after **4159**. Its complete checkpoint,
+Adam and RNG were archived; `--combat-recovery-plan` continues without rollback
+or optimizer reset. Verification4159→4160 confirmed1156 bit-exact frozen tensors,
+115 changed trainable tensors and exactly one increment for every Adam clock.
+The real update used4 H16 branches,10 eligible negative attacks and5 spawn targets;
+loss85.1209 and gradient norm45.2327 were finite. This proves execution, not
+quality improvement. All10 new CPU tests passed, as did a separate full450-step
+backward probe on a disposable model copy without an optimizer step.
+
+Sources: [hard-negative audit](training_runs/combat_hard_negatives_20261111/data_audit.json),
+[combined manifest](training_runs/rssm_combat_recovery_v3_20261111/data/manifest.json),
+[full450 probe](training_runs/rssm_combat_recovery_v3_20261111/preflight/full450_backward.json),
+[V3 plan](training_runs/rssm25m_combat_20261111/combat_recovery_revision.json),
+[baseline4159](training_runs/rssm25m_combat_20261111/validation/step_004159/rssm_combat_validation.json),
+[exact restoration](training_runs/rssm25m_combat_20261111/resume_verification_g4159_recovery_v3.json),
+[first update](training_runs/rssm25m_combat_20261111/first_combat_recovery_update_verification.json).
+Dynamics dashboard: http://127.0.0.1:8765/.
+
+## H36. SR continues until strict clean SSIM/MAE quality, without a step cap
+
+The user superseded the10000-update budget: train SR until **mean clean SSIM
+strictly greater than0.91 AND mean clean MAE strictly less than2.5/255**
+(0.00980392156862745 in normalized RGB). The2.5 unit follows the dashboard's
+MAE display, which multiplies normalized MAE by255. Both metrics use the same
+fixed384-frame episode-held-out Source32→HR128 panel from H34, including its
+documented duplicate-image limitation. Codec-degraded input and navigation
+regression checks remain separate reports; they are not silently substituted
+for the requested clean criterion or gameplay qualification.
+
+The SR worker stopped gracefully at **8672 local updates**, and its full Adam
+checkpoint was archived. Immutable `quality_revision_ssim091_mae2p5.json` binds
+that checkpoint, the original training plan, prior10000-budget ledger and
+validation-panel fingerprint. The previous budget/history were preserved.
+Weights, Adam, NumPy/Torch/CUDA RNG, data, frozen codec, batch8 and LR`5e-5`
+restored unchanged. The first real continued update **8673 / cumulative28673**
+was saved. The numerical restoration proof compares model and all Adam/RNG
+fields exactly; codec equality is measured at validation, with its precise
+measurement step recorded rather than assumed for an unmeasured first tick.
+
+`--quality-revision-plan` overrides the historical CLI step budget. There is
+**no fixed update/time cap or finite ETA**; validation and previews remain
+every100 updates. Equality, missing metrics, nonfinite values, wrong input
+domain or incomplete panel coverage cannot pass. One deterministic check
+meeting both strict clean means stops the run and exports those qualifying
+weights; a worse or differently qualified historical checkpoint cannot replace
+them. Nothing is automatically deployed to the game.
+
+| Pinned check | Clean SSIM | Clean MAE×255 | Requested criterion |
+|---|---:|---:|---|
+| Quality-revision baseline8672 | 0.851791 | 4.434637 | false |
+|10600, beyond the former10000 cap | 0.853023 | 4.447718 | false |
+
+The target had **not** been reached at10600. Training remained active; this is
+not a claim that either metric improves monotonically or will reach the target
+within a known time. The active game still used its original20000-step SR.
+The live [SR dashboard](http://127.0.0.1:8775) shows the clean strict goal and
+codec-degraded measurements separately, without a misleading10000 denominator.
+
+Sources: [immutable quality revision](training_runs/sr_combat_refine_20261111/quality_revision_ssim091_mae2p5.json),
+[exact8672 restoration](training_runs/sr_combat_refine_20261111/quality_resume_verification_g8672.json),
+[first8673 update/provenance](training_runs/sr_combat_refine_20261111/first_quality_revision_update.json),
+[baseline8672](training_runs/sr_combat_refine_20261111/validation/step_008672.json),
+[check10600](training_runs/sr_combat_refine_20261111/validation/step_010600.json),
+[quality launch command](training_runs/sr_combat_refine_20261111/quality_launch.json).
+
+## H37. User-requested SR stop and the latest paired game
+
+Following the new request, SR stopped at **18788 local updates**
+(38788 cumulative); its full last checkpoint with Adam was saved. The new game
+test uses the separate **best18100** (38100 cumulative), not the latest weights.
+On the same clean384-frame panel it achieved SSIM **0.856338** and
+MAE **0.017128**, or **4.367513/255**. The H36 conditions—SSIM>0.91 and
+MAE<2.5/255 simultaneously—**were not met**. A user-requested stop does not
+turn the validation result into a pass. Codec-degraded results remain separate.
+
+The H33 neural renderer naturally completed **6000 updates** of its corrected
+phase. On the final256-frame panel, Base achieved SSIM0.753084/MAE0.031992;
+RF1 achieved SSIM0.752190/MAE0.033224, with RF1 NPC MAE0.097196. Base passed the
+strict no-regression guard against its original parent, but the condition
+that RF must be no worse than the current Base across all required cohorts
+**did not pass**. The full Source and release gates therefore remain false.
+Completing6000 updates does not establish a complete quality fix. The trained
+compact VQGAN1900, map, RSSM and SR remained frozen in this worker.
+
+The user requested a game test of the latest results. A separate session was
+created at `training_runs/paired_compare_20261111T181714Z_latest_sr`:
+
+| Component | Weights actually attached |
+|---|---|
+| Dynamics | RSSM snapshot4250; main training continues independently |
+| Base / RF1 | Latest6000; cumulative Base15200/RF15600; one Euler step |
+| Codec | Frozen compact VQGAN, selected1900; its previous quality false retained |
+| SR | Best18100; full last18788 stored separately |
+| Resolution | Native32 → learned SR128; then bilinear for display |
+
+Exporting Base/RF preserved every tensor from the full6000 checkpoint.
+Strict reload checked Base, codec, normalization, noise and the original
+renderer assets. The explicit navigation→combat rebind used two profile views
+of **the same4250 world tensors**, rather than different training checkpoints.
+Every world tensor was bitexact across the profile change. The bundle retains
+`source_quality_passed=false`, `release_passed=false`, `gameplay_qualified=false`;
+`--allow-unqualified-codec` permits only the requested experimental test and
+does not certify image fidelity.
+
+At **21:24:57 Moscow time on11 November**, Pygame process60616 actually opened.
+It uses **FP32**; the prepared command containing untested FP16 was superseded
+by the actual launch command. The1572×968 window has two768×768 panels fitted
+to the available work area. Its screenshot was inspected. A short GPU preflight
+passed navigation step → E/combat → shot → return to navigation and explicit
+reset. This verifies mode operation, not450-step autonomous gameplay or30FPS.
+
+Startup is **navigation without an enemy**, in **shared_camera** mode with
+`shared_camera_entities=neural`. Only the Source player's camera coordinates
+and direction are substituted for display. NPC, HP and memory remain neural;
+the model's own state/h/z are not corrected from the Source camera. **Tab**
+selects the fully autonomous camera. **E** switches navigation/combat while
+preserving player/time/h/z and explicitly initializing the single NPC slot at
+the scene boundary. **W/S/up/down** move, **A/D** strafe, **Q/left/right** turn,
+**Space/left click** fire, **P** pauses, **R** explicitly resets the trial and
+**Esc** exits. Both views receive identical actions and dt. Shared-camera
+results are not presented as autonomous trajectory agreement.
+
+Sources: [SR stop and selection](training_runs/sr_combat_refine_20261111/session_export.json),
+[SR18100, clean and codec separately](training_runs/sr_combat_refine_20261111/validation/step_018100.json),
+[NPR6000 and failed guards](training_runs/renderer_repair_corrected_20261111/validation/step_006000.json),
+[verified6000 export](training_runs/paired_compare_20261111T181714Z_latest_sr/renderer_export_verification.json),
+[explicit profile rebind](training_runs/paired_compare_20261111T181714Z_latest_sr/renderer_profile_rebind.json),
+[actual FP32 launch command](training_runs/paired_compare_20261111T181714Z_latest_sr/launch_command.json),
+[GPU preflight](training_runs/paired_compare_20261111T181714Z_latest_sr/preflight.json),
+[opened-window screenshot](training_runs/paired_compare_20261111T181714Z_latest_sr/window_ready.png).
+
+## H38. T for combat, E for turning and combat neural-game validation
+
+The requested controls are now separate: **T** switches navigation/combat,
+**E/right** turns right and **Q/left** turns left. H37 preserves the historical
+E toggle. This changes the game interface, not trained weights or the training
+protocol.
+
+At **21:32:10 Moscow time on11 November**, the previous window60616 was closed
+cleanly with its report retained, and a new visible window53996 opened:
+`training_runs/paired_compare_20261111T183210Z_tcombat`. It uses the same
+immutable RSSM4250, Base/RF6000, codec1900 and SRbest18100 from H37, FP32,
+shared_camera with neural NPC/HP, and navigation startup. Three CPU control
+tests passed. These facts do not establish combat quality.
+
+Then **three450-transition trials** completed:1350 own NN steps and1350
+independent Source steps. They use the actual FP32 game path:
+RSSM → Base/RF1 → SR128 → bilinear1024. Source `step/render/set_state_vector`
+are forbidden inside `NeuralRuntime.step`; the independent Source advances
+after a successful NN step. One initial NAV frame is observed before explicit
+NPC activation. State and memory continue without correction; all values are
+finite. Both autonomous native RGB and shared-camera images are saved; the
+latter substitutes only the display camera, not the dynamics update.
+
+| Trial | Source and own NN events | State/geometry errors |
+|---|---|---|
+| `front_fire` | Shots65/65 matched; Source6 hits/3 kills/3 respawns, NN2/1/1; same-tick hit/kill/respawn matches0 | NPC life differs on195/450 steps; NPC XY mean1.983697 tiles across177 continuing Source-life transitions |
+| `close_attack` | All13 player-damage events and death at433 matched exactly; HP differences are rounding only | NPC XY mean0.716267 tiles across450 transitions; Source active433, post-death hold17 transitions |
+| `occluded_close` | Initial negative is correct;1 false attack across3 eligible wall-occluded negatives; later Source13 attacks/death436, NN7 attacks/no death, final HP44 | NPC XY mean0.551607 tiles across450 transitions; NPC overlaps walls for297 steps, first9; swept-wall298 versus Source0 |
+
+Paired event counts mean **Source/NN**; matching requires the same tick, while
+NN events at different times are counted separately. In `front_fire`, hit TP0,
+FP2, FN6: all-frame accuracy0.982222 comes from442 negative frames and **does
+not establish learned combat**. In `occluded_close`, player-hit TP0, FP7, FN13;
+FPR1/3 refers only to three Source attack opportunities with blocked visibility,
+not all450 frames. Post-death Source holds are separately counted:17 transitions
+in `close_attack` and14 in `occluded_close`. They do not replace active combat
+negatives. A cohort with no positive events has recall null.
+
+The first two trials are fixed manual scenarios; the third uses a held-out
+initial wall pose followed by a new continuous Source trajectory. These are
+diagnostic counterexamples, not estimates of the full game population. The
+stationary player does not cross walls in these trials, but NPC position,
+hits, life and respawns diverge. The result is **mixed, gameplay_qualified=false**:
+close damage is reproduced, while reliable combat and NPC motion remain unqualified.
+
+A separate visual check used12 saved frames,11 with visible NPCs. Re-rendering
+the actual own conditions was bitexact to the captured images. On Source NPC
+pixels, its MAE was0.169862 with presence proxy6/11. Using the **full GT state
+and the same own features**, RF achieved MAE0.145541 and proxy9/11;
+Base achieved MAE0.137134. This substitution was measurement-only; no GT state
+entered the rollout. It neither isolates one coordinate from the other state
+fields nor establishes a mathematical quality ceiling.
+
+At `close_attack`128, own NPC error0.858 tiles accompanies the enemy's disappearance
+from the image, while the GT-state query draws it. Dynamics alone does not
+explain all the error: in distant `front_fire`98, the Source NPC covers5 native
+pixels; XY error is4.624 tiles, own ROI MAE0.32710, GT-state RF0.21558 versus
+Base0.19530. In HP0 frame `close_attack`450, GT-state RF MAE0.13589 is worse
+than Base0.10979. Thus **both conditioning and rendering** have errors. Native
+and SR SSIM are not presented as a single improvement: their resolutions and
+Source targets differ. This small diagnostic set does not pass the Source gate.
+
+Restart evidence: [actual launch command and T/E/Q](training_runs/paired_compare_20261111T183210Z_tcombat/launch_command.json),
+[new-window screenshot](training_runs/paired_compare_20261111T183210Z_tcombat/window_ready.png).
+Checks: [protocol and weight SHAs](training_runs/paired_combat_validation_20261111/protocol.json),
+[all1350 steps](training_runs/paired_combat_validation_20261111/report.json),
+[front_fire](training_runs/paired_combat_validation_20261111/front_fire/report.json),
+[close_attack](training_runs/paired_combat_validation_20261111/close_attack/report.json),
+[occluded_close](training_runs/paired_combat_validation_20261111/occluded_close/report.json).
+Images: [visual report](training_runs/paired_combat_validation_20261111/visuals_fp32/report.json),
+[combined comparison sheet](training_runs/paired_combat_validation_20261111/visuals_fp32/combat_comparison.png).
+
+## H39. Distance supervision, effective128 and updated preview assets
+
+After H38, the user requested better mid/far targets, batch128 and the updated
+NPR/SR in “What the model shows.” The previous RSSM stopped at4398 with a full
+checkpoint; v4 continued **without rollback or an Adam reset**. The first full
+4399 was saved and verified:1156 frozen tensors were unchanged,115 trainable
+tensors changed and remained finite, and all115 Adam clocks advanced exactly1.
+Previous weights, Adam and RNG were restored.
+
+One optimizer update now contains **32 ×4 =128** main episodes of450 transitions
+with TBPTT16. All four microbatches use the same environment/context/latent mode.
+Gradients are zeroed once, averaged after four complete backwards, then clipped
+before one Adam step. Phase clocks advance once, auxiliary draws by128. Losses
+are averaged, event/work counts are summed, and all four original rows are kept.
+Raw per-microbatch gradients were not saved: executable source order and the
+CPU gradient/Adam test verify the reduction; Adam clocks independently establish
+one update. Batch-dependent statistics still use32, not globally pooled128
+statistics. Train loss4399 was75.563060 and gradient norm13.590139; both were
+finite, but neither establishes gameplay quality.
+
+**Source target selection and normalization** were corrected without rewriting
+the corpus. Each combat microbatch32 contains8 spawn,8 attack-negative,3 near-hit,
+3 mid-hit,3 far-hit,3 fired-miss and4 legacy windows. Target CE uses actual Source
+shots only, gives hit/miss means mass1:1 and equally weights present near<2,
+mid[2,5),far≥5 groups. These are mean weights, not equal actual event counts.
+At4399 there were120 shots:51 hit+69 miss;1928 nonshot positions out of2048 were
+excluded from target CE. All48 specifically selected target windows contained
+genuine future Source events. They are targets/selection labels, not future
+prior inputs. The new loss total is not directly comparable to v3.
+
+An immutable file-SHA plan supplies NPR6000 and SRbest18100 to the preview.
+A separate frozen clone uses the **current RSSM**, not the game's4250 snapshot;
+training Base/Flow/VQGAN/SR and optimizer are not replaced. Initialization4398
+verified unchanged training tensors/parameter IDs. RNG streams are protected
+during construction and every preview. NPR has cumulative15600, Base15200 and
+SR38100 (local best18100); quality/release false remains recorded. Five rows:
+context → Source future for comparison → own RGB32 → SR128 → bilinear512.
+H4 is not a450-step video. Preview cadence remains10 optimizer updates and
+full validation250. The UI separately shows the committed optimizer step,
+completed microbatches and current450-transition progress. The H38 game window
+and its weights were not replaced.
+
+A separate renderer inventory found715 far examples among the previous16000
+draws, with median NPC area3 native pixels. The opt-in sampler assigns25% near,
+25% mid,25% far and25% original replay. Positive examples require a living NPC
+and nonempty exact Source mask. Previous weights, Adam/RNG,96000 parent draws
+and the replay mixture were retained; selection does not provide Source RGB
+to inference. An independent static VAL panel contains192 images,64 per band;
+the original256 and HP0 remain separate guards.
+
+Two matched6000→6200 pilots used the same200 minibatch orders, Adam/RNG and
+frozen codec. They compared distance-only against the same sampler with
+crop-SSIM weight0.2 on the native bbox+2 pixels, without resizing the target:
+
+| RF foreground MAE, fixed192 | Parent6000 | Sampler +crop0.2 | Sampler only |
+|---|---:|---:|---:|
+| Near |0.128461|0.130528|0.127175|
+| Mid |0.140459|0.143813|0.141425|
+| Far |0.111051|0.112984|0.110338|
+
+Crop0.2 was **rejected** because RF worsened at every distance. Sampler-only
+slightly improved near/far but worsened mid; Base near was almost unchanged,
+far improved and mid worsened. The strict gate requires foreground improvement
+for **both heads at all three distances** greater than0.0005, with no full-MAE
+regression beyond0.002. It did not pass, nor did the overall release gate;
+active game assets were unchanged. Sampler-only **actually continued6200→8000**
+with cropOFF and preserved Adam/RNG:6201 executed, and saved6290 verified every
+Adam clock advancing6200→6290, sampler draws99200→100640, and all128 codec
+tensors/buffers bitexact. This compares saved states, not a new measurement of
+historical pre-update GPU memory; exact moment loading is additionally covered
+by a CPU test with a bitexact next Adam step. Monitor8774 follows the new worker;
+the game bundle was not switched.
+
+At6400 RF improved at every distance, but Base near/mid still failed the required
+improvement. At the next fixed check, **6600**, the relative distance gate
+**first passed for both heads at every distance**:
+
+| Foreground MAE, fixed192 | Base6600 | RF6600 |
+|---|---:|---:|
+| Near |0.128832|0.126859|
+| Mid |0.139630|0.137517|
+| Far |0.102559|0.104171|
+
+This is relative improvement over parent6000 on the same panel, not Source
+quality or gameplay qualification: the full Source and release gates remain
+**false**. Training continues toward8000; neither reliably visible NPCs nor a
+complete mid/far fix is claimed, and game assets are not replaced automatically.
+
+The later dual-RSSM launch activated a **preview-only6600 revision**. The original
+6000 plan and its SHA remain immutable in the history; a separate descriptor
+selects6600. Its RF cumulative count is16200, Base15800, and SR remains best18100,
+cumulative38100. Initialization at4430 verified unchanged training tensors,
+parameter IDs and optimizer; the live4440 preview used current dual dynamics,
+five rows and no future Source feedback. Source/release/gameplay remain false.
+The user game and its assets were unchanged. See the
+[revision](training_runs/rssm_dual_20261111/preview_assets_revision_npr6600.json),
+[selected plan](training_runs/rssm_dual_20261111/preview_assets_npr6600_sr18100.json)
+and [clone proof](training_runs/rssm_dual_20261111/updated_preview_assets_verification.json).
+
+Sources: [v4 plan](training_runs/rssm25m_combat_20261111/batch128_revision.json),
+[first4399](training_runs/rssm25m_combat_20261111/first_batch128_update_verification.json),
+[preview-assets plan](training_runs/rssm25m_combat_20261111/preview_assets_batch128_g4398.json),
+[separate-clone verification](training_runs/rssm25m_combat_20261111/updated_preview_assets_verification.json),
+[distance inventory](training_runs/renderer_distance_refine_20261111/source_distance_inventory.json),
+[matched pilots](training_runs/renderer_distance_refine_20261111/pilot_comparison.json),
+[6200→8000 continuation](training_runs/renderer_distance_refine_20261111/training_rebalance_only/budget_extension_006200_008000.json),
+[actual6290](training_runs/renderer_distance_refine_20261111/training_rebalance_only/continuation_actual_verification.json),
+[check6400](training_runs/renderer_distance_refine_20261111/training_rebalance_only/validation/step_006400.json),
+[relative gate6600](training_runs/renderer_distance_refine_20261111/training_rebalance_only/validation/step_006600.json),
+[CPU accumulation](tests/test_rssm_accumulation.py), [CPU preview](tests/test_rssm_preview_assets.py),
+[independent distance/crop audit](tests/test_renderer_distance_audit.py).
+
+## H40. An independent enemy RSSM and verified dual continuation
+
+The user requested a separate compact recurrent model for the enemy while
+retaining the original player RSSM. The previous worker stopped at a complete
+4430 boundary. A new run, `training_runs/rssm_dual_20261111`, appended only
+`vjepa_backend.enemy_rssm.*`; all previous model tensors, Adam groups/moments,
+RNG, curriculum, data bindings and batch128 clocks were preserved. The new enemy
+group started with empty Adam state. This is an architecture extension, not a
+restart of the player or a claim of identical NPC predictions.
+
+| Component | Parameters | Packed FP32 memory |
+|---|---:|---:|
+| Retained dynamics including shared map/observation decoder |25007048|2032 =1008+32×32|
+| New independent enemy RSSM |2438019|640 =384+8×32|
+| Combined dynamics |27445067|2672|
+
+Trainable dynamics total25725353; frozen image renderer/SR are excluded from
+these dynamics counts. The enemy has its own recurrent/categorical state;
+renderer appearance features remain player-derived. Existing game-specific
+typed state and known action/clock rules remain. No actor/critic, EMA or online
+Source correction was introduced. Main training stays32×4=128,450 own
+transitions with TBPTT16; Source posterior supervision is separate from the
+independent prior.
+
+Actual update4431 was recorded in metrics, but no checkpoint4431 was saved.
+The independent CPU audit therefore uses the **first available persisted4440**,
+exactly10 updates after4430. All1156 frozen tensors are bitexact. All50 new
+enemy parameter tensors changed and are finite; all50 new Adam states have
+clock10. Old115 Adam states advanced by10 for98, by8 for13 and by0 for4;
+unused states remained bitexact. Two optimizer groups and the old name/ID
+mapping are preserved. Auxiliary draws advanced1280. Initial old tensors,
+moments and RNG were checked against the source archive and actual resume
+proof; the fresh enemy initialization was independently reconstructed with
+seed173. No raw gradients were saved or claimed as measured.
+
+The local8765 page showed the dual caption,27,445,067 parameters, memory2672,
+batch32×4 and the6600/18100 preview revision. Reusing old image bundles requires
+explicit migration lineage plus strict Base/map/appearance/codec/norm/noise
+identity checks. The original6000 preview pin remains recorded. This verifies
+real training and compatible frozen assets, not combat or15-second qualification.
+The already open game continues using its earlier4250 snapshot.
+
+Sources: [activation](training_runs/rssm_dual_20261111/activation.json),
+[migration](training_runs/rssm_dual_20261111/checkpoints/rssm_world.pt.migration.json),
+[actual restore](training_runs/rssm_dual_20261111/resume_verification_g4430_batch128_v4.json),
+[persisted4440 proof](training_runs/rssm_dual_20261111/first_dual_update_verification.json),
+[saved launch](training_runs/rssm_dual_20261111/launch_command.json),
+[migration CPU tests](tests/test_dual_rssm_migration.py).
+
+## H41. Ordered tiny-enemy codec, SR and renderer training
+
+The user requested sequential improvement of small enemies throughout the image
+pipeline. A new immutable run, `training_runs/small_enemy_pipeline_20261111`,
+uses **codec → SR → Base/RF1**, monitored at **http://127.0.0.1:8776/**. The
+parents are world4250, compact codec1900, renderer8000 and SRbest18100. This
+training does not replace the active game or alter dual dynamics.
+
+The new data contains4608 true Source32/128 pairs, with exact native/HR masks:
+
+| Split | Total | Living tiny NPC,1–16 native pixels | Navigation | Near | Corpse | HP0 |
+|---|---:|---:|---:|---:|---:|---:|
+| TRAIN |4096|3072|317|317|317|73|
+| VAL |512|384|37|36|37|18|
+
+Independent checks verified selected target RGB, parent episode seeds/files and
+health-aware render-condition keys do not overlap between splits. Past observed
+context can coincide; this is not a claim that every context frame is unique.
+All target images within each split are unique; tiny NPCs are genuinely alive
+and visible at native32. HR128 is a reference-engine render at the same physical
+tick, not interpolation. Source replay and exact NPC-removal masks were audited.
+
+Codec E/D **completed2000 and selected2000**. Tiny Source reconstruction
+foreground MAE improved0.08717198→0.05840806. The unchanged-parent full RF1
+reference changed0.10076094→0.10153928, within its explicit compatibility
+tolerance; this is not an RF improvement. The relative stage gate passed,
+including navigation/near/corpse/HP0 guards. Full Source and gameplay quality
+remain separate. Q and latent normalization remain fixed. SR then actually
+started; renderer remains queued at this entry, not trained by the readiness
+test. SR retains its1517571-parameter EDSR-like network; Base996844/RF6992192
+remain the later-stage architecture, with codec/SR frozen during renderer work.
+
+Each initial milestone is2000 updates. Failure extends the same stage by1000
+with its checkpoint/Adam/RNG; it must not skip ahead. Independent CPU tests
+reproduced and then verified a fix for an early passing selected report that
+could bypass a still-running codec milestone. Advancement now also requires
+durable completed status, the full milestone, no live child, and a matching
+selected artifact/report/panel. Controller restarts verify PID and actual
+command before adopting a live child, preventing duplicate workers. Missing or
+nonfinite cohort values reject the gate. This relative gate requires tiny
+foreground improvement greater than0.0005, with MAE tolerance0.003 and SSIM
+tolerance0.02 for forgetting guards; it is not an absolute game-quality pass.
+
+Independent readiness tests used real32→128 forward/backward on fresh/private
+copies: SR and Base/RF gradients were nonzero, all frozen codec tensors/buffers
+were bitexact, and optimizer steps were0. The selected clean/codec SR panel,
+native-pixel cohort definitions, true HR target, RNG/modes, absent/nonfinite
+metrics and image-preview shapes also passed CPU tests. No game promotion or
+new training was performed by these tests.
+
+Sources: [ordered plan](training_runs/small_enemy_pipeline_20261111/ordered_plan.json),
+[data audit](training_runs/small_enemy_pipeline_20261111/data_audit.json),
+[Source replay](training_runs/small_enemy_pipeline_20261111/data_source_replay_audit.json),
+[parent assets](training_runs/small_enemy_pipeline_20261111/parent_assets.json),
+[codec selected2000](training_runs/small_enemy_pipeline_20261111/codec/validation_selected.json),
+[codec handoff](training_runs/small_enemy_pipeline_20261111/codec/ordered_stage_pass.json),
+[CPU readiness](training_runs/small_enemy_pipeline_20261111/future_stage_readiness_cpu.json),
+[controller tests](tests/test_small_enemy_pipeline.py),
+[SR tests](tests/test_small_enemy_sr.py).
+
+## H42. Separate Player, Enemy, Interaction loss normalization
+
+The user explicitly requested separate normalization, balancing and display of
+the three tasks. The dual worker stopped at a complete4454 boundary. The new
+run `training_runs/rssm_dual_balanced_20261111` continued from the full snapshot
+without an architecture change, rollback or reset of Adam/RNG. The immutable
+`--loss-balance-plan` is mandatory for subsequent resumes. The model, prior
+data/sampler clocks,32×4=128 update,450 own transitions, TBPTT16, validation250,
+preview10 and preview assets NPR6600/SR18100 remain. The open game is untouched.
+
+Player contains player motion/contact/XY/wall objectives and its posterior
+KL/reconstruction. Enemy contains NPC motion/XY/walls/spawn and its own KL.
+Interaction contains hit/target/attack/damage/death and the remaining combat
+state fields. These are task partitions, not three new copies of each loss.
+Raw group sums retain the previous internal component coefficients and exclude
+constant KL floors. Each task has priority1. Its scale is the previous committed
+EMA, decay0.95 with minimum0.1, in separate combat/navigation banks. The scale
+is fixed across every TBPTT chunk, short branch and accumulated microbatch in
+one optimizer update. EMA changes once after successful Adam commit; failed
+or incomplete updates do not advance it.
+
+The page shows literal **Player loss / Enemy loss / Interaction loss** as
+weighted contributions, with raw/scale, normalized, effective weight and floor
+below. The formula is **weighted =raw/scale ×priority +KL-floor**. The constant
+floors1.1 for Player and1.1 for Enemy remain unscaled, outside EMA and with no
+gradient; Interaction floor is0. Thus total is the sum of the three displayed
+weighted contributions, including floor2.2. Effective weight is priority/scale.
+
+The first update in each environment bank calibrates independently at scales1;
+this is not a single global calibration. The first saved combat update4455
+calibrated its bank. The next saved4456 actually
+used the preceding4455 raw magnitudes:
+
+| Group | Raw4455 | Weighted4455 | Scale4456 | Raw4456 | Weighted4456 |
+|---|---:|---:|---:|---:|---:|
+| Player |14.20850038|15.30850038|14.20850038|16.64843654|2.27172369|
+| Enemy |54.13452294|55.23452294|54.13452294|56.37695629|2.14142335|
+| Interaction |7.34662673|7.34662673|7.34662673|6.88350053|0.93696070|
+
+Total77.88965005→5.35010775 is principally a **change in loss units**, not a
+measured quality improvement. Effective weights at4456 were respectively
+0.07038040/0.01847250/0.13611689. No new held-out navigation/combat pass is
+claimed. The previous total curve is excluded under the new protocol
+`rssm_dual_group_balance_v5`; missing or stale step/protocol values show a dash.
+
+The4454→4456 CPU audit verified all1156 frozen tensors bitexact, both RSSM cores
+updated,161 active Adam states advanced twice and4 dormant legacy attack-head
+states/weights remained unchanged. All165 states, two groups, finite moments,
+EMA and sampler clocks were checked:2 combat bank updates and0 navigation bank
+updates at that snapshot. Initial restore compared1818 tensors and
+model/Adam/NumPy/Torch/CUDA RNG exactly. The local8765 HTML matched the current
+source bytes, and the actual served script rendered current groups and their
+sum correctly. No dashboard restart was necessary. The three labels, real zero,
+missing/nonfinite values and stale protocols passed the60 Node tests and build.
+These checks establish the implementation and preserved state, not successful
+15-second gameplay or equal gradient norms for all three tasks.
+
+Sources: [revision plan](training_runs/rssm_dual_balanced_20261111/loss_balance_revision.json),
+[initial restore](training_runs/rssm_dual_balanced_20261111/resume_verification_g4454_groupbalance_v5.json),
+[saved4456 audit](training_runs/rssm_dual_balanced_20261111/first_group_balance_verification.json),
+[live UI proof](training_runs/rssm_dual_balanced_20261111/dashboard_group_loss_verification.json),
+[saved launch](training_runs/rssm_dual_balanced_20261111/launch_command.json),
+[loss-balance tests](tests/test_rssm_loss_balance.py),
+[dashboard tests](training_dashboard/worker.test.mjs).
+
+## H43. A20M enemy RSSM and temporary combat-only training
+
+The user temporarily removed no-enemy navigation from training, then requested
+an enemy RSSM of about20M parameters. The previous balanced dual worker stopped
+at a complete4482 boundary. New run `training_runs/rssm_enemy20m_combat_20261112`
+retained the player/shared weights, their Adam, RNG and history; the enemy was
+resized through an explicit migration rather than an unrecorded model reset.
+The old checkpoint remains archived. The first full four-microbatch combat
+update4483 completed and was saved; training continued afterward.
+At4485, a slot that the old schedule would have assigned to navigation, all
+four microbatches actually used combat, context1 and argmax. Historical
+navigation updates152 and auxiliary draws4784 did not advance. Thus4482→4485
+includes a measured check that the old navigation slot was removed, not merely
+a new flag or renamed phase.
+The independent checkpoint audit used saved4486 and checked all four updates
+4483–4486 as combat32×4/450, with navigation counters and its EMA bank unchanged.
+
+| Component | Parameters | Packed FP32 memory |
+|---|---:|---:|
+| Retained player dynamics including map/observation decoder |25007048|2032 =1008+32×32|
+| Enlarged enemy RSSM |20000323|1600 =1344+8×32|
+| Combined dynamics |45007371|3632|
+
+Enemy hidden width is1408, deterministic width1344; stochastic8×32, embed128,
+action128,4 blocks and unimix0.01 remain. Trainable dynamics total43287657;
+frozen image renderer/SR are excluded from these dynamics counts. The resize
+preserved1271 player/shared tensors exactly. Of50 enemy tensors,21 compatible
+tensors were copied exactly;29 resized tensors used documented semantic/channel overlap with
+new channels initialized at seed173. The old and enlarged enemy outputs are
+not claimed to be identical. Optimizer IDs/groups are preserved:136 existing
+states, including exact-shape enemy states, remain;29 resized enemy states
+start fresh on their next update. Thus this does **not** preserve every old
+enemy Adam moment, and does not reset the retained player.
+After four completed updates,132 retained active states advanced by4,4 dormant
+states remained unchanged, and all29 new states had clock4.
+
+The immutable `--combat-only-plan` changes the effective update cycle to
+`[combat]`, active environments to `[combat]` and navigation replay to false.
+Both Player and Enemy still learn within combat episodes; this is not a
+player freeze. Historical navigation replay152 and its auxiliary/EMA history
+are retained, but no new no-enemy training or navigation-bank EMA commits are
+scheduled. Navigation validation remains a forgetting check. Batch32×4=128,
+450 own transitions, TBPTT16, Source branches/targets, validation250 and
+preview10 remain. Prior state/memory receive no future Source corrections.
+The three-task normalization protocol `rssm_dual_group_balance_v5`, its banks
+and the unscaled KL floors remain; this schedule revision does not invent a
+new loss unit. First4483 loss5.53617249 and gradient norm5.14153475 were finite,
+but are not a new held-out navigation/combat pass.
+
+The8765 page actually showed20000323 enemy parameters,45007371 dynamics
+parameters and memory2032+1600=3632 from live metadata. The effective schedule
+explicitly says combat-only, marks old navigation counters as historical and
+keeps navigation validation separate. Missing or contradictory schedule fields
+do not claim an active revision. All63 Node tests and build passed.
+
+Old compact Base/RF bundles still require strict image-asset hashes. Reuse now
+validates the original append migration followed by the explicit resize;
+only enemy deterministic/hidden widths may differ. Player/shared/frozen-asset
+proof flags, complete source/target config fingerprints, exact conditioning
+identity and unchanged codec/norm/noise are required. Loader and both preview
+clone paths retain the resize report. Three new real Base/RF compatibility tests
+and the existing focused regressions passed56 CPU tests. The frozen preview
+still uses NPR6600/SRbest18100; no game assets or window were replaced. Increased
+capacity, a finite first step and preserved assets do not qualify15-second play.
+
+Sources: [combat-only plan](training_runs/rssm_enemy20m_combat_20261112/combat_only_revision.json),
+[resize report](training_runs/rssm_enemy20m_combat_20261112/checkpoints/enemy20m_initial_g4482.resize.json),
+[initialization](training_runs/rssm_enemy20m_combat_20261112/initialization.json),
+[actual restore](training_runs/rssm_enemy20m_combat_20261112/resume_verification_g4482_combatonly_v1.json),
+[migration and completed-update audit](training_runs/rssm_enemy20m_combat_20261112/enemy20m_combat_verification.json),
+[live dashboard proof](training_runs/rssm_enemy20m_combat_20261112/dashboard_enemy20m_combat_verification.json),
+[saved launch](training_runs/rssm_enemy20m_combat_20261112/launch_command.json),
+[focused CPU results](training_runs/diagnostic_tools/enemy_resize_renderer_focused_tests.json),
+[resize renderer tests](tests/test_enemy_resize_renderer.py).
+
 ## Changes to goals, batches and data units
 
 | What changed | Chat sequence / outcome |
@@ -543,12 +1556,12 @@ The requested sequence of **microbatch ×accumulation =effective batch**:
 ```text
 1×24=24 →1×8=8 →1×4=4 →1×16=16 →3×16=48
 →10×16=160 →24×16=384 →48×16=768 →48×21=1008
-→21×21=441 →21×5=105 →32×1=32 →27×1=27 →16×1=16
+→21×21=441 →21×5=105 →32×1=32 →27×1=27 →16×1=16 →32×4=128
 ```
 
 This is a request history, not equally complete telemetry for every early run.
 Later safe-resume evidence confirms746→747 for27×1 and800→801 for16×1.
-Current RSSM uses main-batch16, accumulation1; separate Source auxiliary clips
+Current RSSM uses main-microbatch32, accumulation4, effective128; separate Source auxiliary clips
 and up to4 contact branches are counted separately.6000 Adam updates do not
 equal6000 examples or epochs. Draws can select the same clip repeatedly.
 

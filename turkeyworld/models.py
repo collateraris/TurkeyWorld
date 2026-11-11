@@ -92,8 +92,27 @@ class WorldModelConfig:
     rssm_free_nats: float = 1.
     rssm_dynamics_scale: float = 1.
     rssm_representation_scale: float = .1
+    enemy_rssm_enabled: bool = False
+    enemy_rssm_deter_dim: int = 384
+    enemy_rssm_hidden_dim: int = 384
+    enemy_rssm_stoch: int = 8
+    enemy_rssm_classes: int = 32
+    enemy_rssm_embed_dim: int = 128
+    enemy_rssm_action_dim: int = 128
+    enemy_rssm_blocks: int = 4
+    enemy_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if (not isinstance(self.enemy_rssm_enabled,bool)
+                or any(type(value)is not int or value<1 for value in
+                    (self.enemy_rssm_deter_dim,self.enemy_rssm_hidden_dim,self.enemy_rssm_stoch,
+                     self.enemy_rssm_classes,self.enemy_rssm_embed_dim,self.enemy_rssm_action_dim,self.enemy_rssm_blocks))
+                or self.enemy_rssm_classes<2 or self.enemy_rssm_deter_dim%self.enemy_rssm_blocks
+                or not isinstance(self.enemy_rssm_unimix,(int,float))or isinstance(self.enemy_rssm_unimix,bool)
+                or not math.isfinite(self.enemy_rssm_unimix)or not 0<=self.enemy_rssm_unimix<1):
+            raise ValueError('Invalid separate enemy RSSM configuration')
+        if self.enemy_rssm_enabled and self.architecture!='dreamer_rssm':
+            raise ValueError('Separate enemy memory requires Dreamer RSSM player dynamics')
         if not isinstance(self.navigation_only, bool):
             raise ValueError('navigation_only must be a boolean environment profile')
         if self.player_motion_mode not in {'delta', 'axis_fraction'}:
@@ -268,6 +287,15 @@ def render_state_view(state):
     player_alive = (state[:, 4:5] > 0).to(dtype=state.dtype)
     return torch.cat([state[:, :4], player_alive, torch.zeros_like(state[:, 5:7]),
                       state[:, 7:-2], torch.zeros_like(state[:, -2:])], dim=-1)
+
+
+def apply_pixel_residual(decoded_rgb, residual):
+    """An optional learned correction AFTER codec decode; legacy values unchanged."""
+    if residual is None:
+        return decoded_rgb
+    if residual.shape != decoded_rgb.shape:
+        raise ValueError('Post-codec pixel residual must match decoded RGB dimensions')
+    return (decoded_rgb+residual).clamp(0, 1)
 
 
 class NeuralWorldModel(nn.Module):
@@ -470,24 +498,33 @@ class NeuralWorldModel(nn.Module):
             else (self.rgb128 if n_blocks == 3 else self.rgb256))
         return torch.sigmoid(head(image))
 
+    def render_base_with_residual(self, state, features, map_features):
+        if (self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}
+                and hasattr(self, 'base_student') and getattr(self.base_student.config, 'pixel_residual', False)):
+            geometry = self.vjepa_backend.geometry(state, map_features)
+            return self.base_student.forward_with_residual(state, features, geometry)
+        return self.render_base(state, features, map_features), None
+
     def render(self, state, features, map_features):
         """Render through the configured direct or conditional-flow decoder."""
-        base = self.render_base(state, features, map_features)
+        base, residual = self.render_base_with_residual(state, features, map_features)
         if self.config.renderer_mode == "direct":
             return base
         condition = state if self.config.spatial_combat else render_state_view(state)
-        return self.flow_renderer.sample(base, condition)
+        return apply_pixel_residual(self.flow_renderer.sample(base, condition), residual)
 
     def render_with_aux(self, state, features, map_features):
         """Render RGB and, for the token model, learned depth/visibility features."""
         if self.config.architecture == "camera_transformer":
             result = self.camera_backend.render_with_aux(state, features, map_features)
+            residual = None
         else:
-            result = {"rgb": self.render_base(state, features, map_features)}
+            base, residual = self.render_base_with_residual(state, features, map_features)
+            result = {"rgb": base}
         if self.config.renderer_mode != "direct":
             condition = state if self.config.spatial_combat else render_state_view(state)
             result = {**result, "base_rgb": result["rgb"],
-                      "rgb": self.flow_renderer.sample(result["rgb"], condition)}
+                      "rgb": apply_pixel_residual(self.flow_renderer.sample(result["rgb"], condition), residual)}
         return result
 
     def geometry(self, state, map_features):
@@ -629,6 +666,9 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
                  "shared_camera_geometry": sum(p.numel() for p in renderer.geometry_reader.parameters())}
         if model.config.architecture == 'dreamer_rssm':
             parts['rssm_core'] = sum(p.numel() for p in backend.core.parameters())
+            if getattr(backend,'enemy_rssm',None)is not None:
+                parts['enemy_rssm'] = sum(p.numel()for p in backend.enemy_rssm.parameters())
+                parts['player_rssm_core'] = parts['rssm_core']
         elif model.config.architecture == 'vjepa2_ac':
             parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
@@ -686,6 +726,8 @@ def load_world_checkpoint(path, device="cpu"):
     model = NeuralWorldModel(WorldModelConfig(**config)).to(device)
     model.load_state_dict(checkpoint["model"])
     model.rssm_migration = checkpoint.get('rssm_migration')
+    model.dual_rssm_migration = checkpoint.get('dual_rssm_migration')
+    model.enemy_rssm_resize = checkpoint.get('enemy_rssm_resize')
     return model.eval(), checkpoint
 
 

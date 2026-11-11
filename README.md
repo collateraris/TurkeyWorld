@@ -8,15 +8,17 @@ TurkeyWorld contains a first-person reference game and an experimental neural
 world model. The active configuration has **one persistent enemy**,
 a **20-value state** and **two participant conditions: player + NPC**. All
 conditions and losses use that one enemy. The active dynamics run is now
-**DreamerV3-style RSSM25M**, controlled trial B in
-`training_runs/rssm25m_contact_b_20261111`; the earlier
+**two DreamerV3-style RSSMs**, the retained player model plus an independent compact
+enemy model, in `training_runs/rssm_enemy20m_combat_20261112`, continued at4482
+with an enlarged20M enemy branch and temporarily combat-only training; the earlier
 JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
 trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
 
 The [RSSM run](#current-rssm-dynamics-run) completed its initial **2,000 updates**,
 including 200 distillation updates. Continuation from 2000 is configured to train
-until navigation quality passes, without resetting the model or Adam.
+until navigation quality passes, without resetting the model or Adam; that
+navigation history now continues with explicit combat and navigation replay.
 The [staged curriculum](#staged-game-curriculum)
 records the earlier JEPA experiment. The
 eight-enemy/90-value corpus, checkpoints and measurements below are explicitly
@@ -59,13 +61,47 @@ playback is a separate command below.
 
 ## Current RSSM dynamics run
 
-The active run is `training_runs/rssm25m_contact_b_20261111`, monitored at
-**http://127.0.0.1:8765/**. Its recurrent state has **1,008 deterministic values**
-and **32 categorical variables with 32 classes each**: packed memory is
-**2,032 FP32 values**. Dynamics contain **25,007,048 parameters**, including the
-shared map and training-only observation decoder; **23,287,334 are trainable**.
+The active run is `training_runs/rssm_enemy20m_combat_20261112`, monitored at
+**http://127.0.0.1:8765/**. At4482 it retained player/shared weights and Adam,
+RNG and data clocks, enlarged the enemy RSSM, and disabled no-enemy navigation
+training temporarily. Exact-shape enemy Adam states are retained;29 resized
+states start fresh. At4430 the previous dual run retained the player model, Adam/RNG,
+curriculum and data clocks, and appended a fresh independent enemy RSSM and Adam
+group. Player memory has **1,008 deterministic values +32 categorical variables
+with32 classes =2,032 FP32 values**. Enemy memory has **1,344 +8×32 =1,600**;
+combined memory is **3,632**. Dynamics contain **45,007,371 parameters**, including
+the shared map and training-only observation decoder; **43,287,657 are trainable**.
+The retained player branch contributes25,007,048 and the resized enemy branch20,000,323.
+The earlier first persisted dual checkpoint4440 verified10 updates, all50 new
+enemy parameter tensors changed and all1156 frozen tensors bitexact. This is not
+a saved4431 snapshot or proof of gameplay quality. See
+[H40](README_HISTORY_EN.md#h40-an-independent-enemy-rssm-and-verified-dual-continuation).
 Frozen Base/Flow/VQGAN, map/geometry, appearance projection and SR retain their
-trained weights. The 25M figure excludes the image renderer and SR.
+trained weights. These dynamics counts exclude the image renderer and SR.
+
+The first full combat-only update4483 completed and was saved. The independent
+4482→4486 checkpoint audit verifies four combat updates, including the former
+navigation slot4485. Only combat
+episodes with one enemy train the dynamics now; Player and Enemy both continue
+learning. Navigation counters and its EMA bank retain their history but do not
+advance. Navigation validation remains a forgetting check. The loss protocol
+and three-group EMA are unchanged; no new navigation/combat qualification is
+claimed. The saved command includes the mandatory `--combat-only-plan` and all
+previous revision pins. See
+[H43](README_HISTORY_EN.md#h43-a20m-enemy-rssm-and-temporary-combat-only-training).
+
+The page separately shows **Player loss / Enemy loss / Interaction loss** as
+their weighted contributions to the actual total. Raw group sums retain their
+original internal component coefficients but exclude constant KL floors.
+Normalized loss is raw/scale, and weighted loss is normalized×priority +floor.
+Each priority is1. Scale is the previous committed EMA, decay0.95, minimum0.1,
+with independent combat/navigation banks. Scales remain fixed across all450
+steps, TBPTT16 chunks and four microbatches, and update once after Adam commits.
+The fixed player/enemy KL floors1.1+1.1 remain unscaled and outside the EMA.
+First saved4455 calibrated the combat bank at scale1; the first update in each
+environment bank calibrates independently. This new loss unit is not directly
+comparable with the previous total or evidence of improved gameplay. Details:
+[H42](README_HISTORY_EN.md#h42-separate-player-enemy-interaction-loss-normalization).
 
 This is a PyTorch adaptation of the RSSM in the
 [official DreamerV3 implementation](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/rssm.py),
@@ -79,9 +115,146 @@ state, known action/clock rules and learned axis pass fractions remain part of
 the game-specific transition. Collision outcomes are learned without online
 engine queries or state corrections.
 
+### Current one-enemy combat and parallel renderer
+
+[H30](README_HISTORY_EN.md#h30-new-source-corpus-one-enemy-combat-and-detailed-navigation)
+records the new immutable Source corpus:139010 TRAIN and34756 VAL transitions,
+including genuine early terminal clips,451-step combat and no-enemy corners,
+slides and returns. Only `navigation_only` changes to false for the combat
+continuation; existing model/Adam/RNG are retained. The original cycle had3 combat
+updates and1 no-enemy navigation replay, initially batch16×accumulation1,450 own-state
+transitions, TBPTT16. The renderer stays frozen in this RSSM worker. Validation
+every250 updates requires both navigation and combat to pass twice; preview
+every10 remains a short image comparison. The initial3873 checks failed;
+neither correct combat nor15-second gameplay is claimed.
+
+The first6 combat updates had finite but excessively amplified gradients. A
+checkpointed pause at3879 retained them; training resumed without rollback or
+an optimizer reset under an explicit `--feedback-revision-plan`. Combat numeric
+state feedback is detached from autograd while its own values and h/z BPTT16
+are retained. Saved update3880 confirmed frozen assets and existing Adam/RNG.
+[H32](README_HISTORY_EN.md#h32-numeric-npc-feedback-gradient-amplification-and-revision-v2)
+records the controlled probe and the limits of these initial stability checks.
+
+The dynamics revision starting at4159 adds own-memory combat branches1/4/8/16,
+auxiliary4/4/8 quotas for spawn/negative attacks/legacy mixture and exhaustive
+checking of128 VAL revivals plus302 negative attacks. Existing Adam/RNG and
+own450 guards are retained. `--combat-recovery-plan` is mandatory on resume;
+the saved command below already includes it. Results:
+[H35](README_HISTORY_EN.md#h35-short-autonomous-branches-balanced-spawns-and-negative-attacks).
+
+Since saved update4399, the active RSSM uses **microbatch32 × accumulation4 =
+effective128**, with the existing Adam/RNG and450/TBPTT16 protocol preserved.
+Each combat microbatch32 selects8 spawn,8 attack-negative,3 near-hit,3 mid-hit,
+3 far-hit,3 fired-miss and4 legacy windows. Target CE uses actual Source shots
+only, balances hit/miss means1:1 and gives present hit-distance groups equal
+mass. This is a new loss protocol, not a direct comparison with the old total.
+The existing model-preview panel now uses a separate frozen clone with the
+current RSSM weights, NPR6600 (RF cumulative16200) and SRbest18100
+(cumulative38100); training image assets remain unchanged. An explicit immutable
+preview revision retains the original6000 pin and history. Full Source and
+gameplay qualification remain false, and the open game keeps its own assets.
+See [H39](README_HISTORY_EN.md#h39-distance-supervision-effective128-and-updated-preview-assets).
+
+The original Base/RF phase completed **6000 local updates** in
+`training_runs/renderer_repair_corrected_20261111`, using fine-tuned and refrozen
+compact VQGAN1900, frozen RSSM/map/SR and GAN off. Each batch16 mixes8 combat,
+4 NPC appearance and4 detailed-navigation images. Controlled pilots retained
+Base detach and latent weight0.1, adding an RF regression penalty while keeping
+the original parent Base as the quality anchor.6000 updates are this new phase's
+completed budget; the complete Source and Base-preservation release gates have not passed. The previous6000 run is archived
+at8772. Two subsequent matched200-update distance pilots reached6200: crop0.2
+was rejected; sampler-only improved RF near/far slightly but worsened mid and
+did not pass the all-band release gate. Sampler-only continuation completed8000
+in `training_runs/renderer_distance_refine_20261111/training_rebalance_only`,
+monitored at **http://127.0.0.1:8774/**. At6600, both heads passed the relative
+distance-improvement gate on all three bands; the full Source/gameplay release
+remains false. Adam/RNG are preserved and crop remains off. Details and codec evidence:
+[H33](README_HISTORY_EN.md#h33-hp0-codec-controlled-rf-pilots-and-continued-renderer-training).
+
+A new ordered tiny-enemy run is monitored at **http://127.0.0.1:8776/**:
+`training_runs/small_enemy_pipeline_20261111`. Its order is compact codec → SR →
+Base/RF1, with a held-out relative gate before each handoff. Codec2000 completed
+and SR has started; renderer remains queued. Its4096 TRAIN/512 VAL examples include
+3072/384 living NPCs occupying1–16 native pixels, plus navigation, near enemies,
+corpses and HP0 guards, with true paired32/128 Source images. This pipeline does
+not replace game assets automatically or establish gameplay qualification.
+See [H41](README_HISTORY_EN.md#h41-ordered-tiny-enemy-codec-sr-and-renderer-training).
+
+SR x4 is **stopped by user request at18788 local updates**; its saved dashboard is **http://127.0.0.1:8775/** in
+`training_runs/sr_combat_refine_20261111`, on real Source32/128 pairs with enemies,
+combat and25% navigation. After extending2000→10000, the user replaced the step
+limit with **clean mean SSIM >0.91 and MAE <2.5/255 simultaneously** on the fixed
+384-frame VAL panel. The uncapped continuation from8672 retained
+weights/Adam/RNG and the frozen codec, with validation every100 updates. The full last
+checkpoint retains update18788 and Adam; the new game uses the separately saved
+best18100, with clean SSIM0.856338 and MAE4.367513/255. The strict goal remains false.
+Codec-degraded and navigation results remain separate; clean qualification
+does not qualify neural gameplay. Results at2000 and the earlier budget:
+[H34](README_HISTORY_EN.md#h34-combat-sr-x4-continuation-and-the-requested2000-to10000-extension).
+The new immutable plan is `quality_revision_ssim091_mae2p5.json`; the page displays
+MAE on the0–255 scale. Gameplay weights are not replaced automatically.
+
+The latest user-requested paired game is the experimental session
+`training_runs/paired_compare_20261111T183210Z_tcombat`, using immutable weights from
+`training_runs/paired_compare_20261111T181714Z_latest_sr`: RSSM4250, final
+Base/RF6000 (RF cumulative15600, Euler1), frozen compact codec1900 and SRbest18100.
+The actual FP32 launch is recorded in its
+[launch command](training_runs/paired_compare_20261111T183210Z_tcombat/launch_command.json);
+the earlier prepared command is superseded. It starts in navigation with a shared
+camera: only the Source player's camera is used for display; NPC and HP remain
+neural predictions, and own RSSM state/memory receive no Source correction.
+**T** switches navigation/combat, **Q/left** turn left, **E/right** turn right, **W/S/up/down** move,
+**A/D** strafe, **Space/left click** fire, **Tab** switches to the autonomous camera,
+**P** pauses, **R** resets the trial explicitly and **Esc** closes it. T preserves
+player/time/h/z while explicitly initializing the one-NPC scene slot. This is a
+user-authorized experimental test, not a quality or15-second gameplay pass.
+These controls were verified in the new launch; [H37](README_HISTORY_EN.md#h37-user-requested-sr-stop-and-the-latest-paired-game)
+preserves the original launch and its former E toggle.
+The three450-step combat trials reproduced close damage but exposed missed or
+mistimed hits/respawns and NPC wall penetration; they did not qualify the game.
+[H38](README_HISTORY_EN.md#h38-t-for-combat-e-for-turning-and-combat-neural-game-validation)
+records the event denominators and counterexamples.
+
+The corpus command is idempotent for its immutable configuration:
+
+```powershell
+& $twPython -m turkeyworld.collect_combat_training `
+  --output training_runs/combat_source_20261111/data --workers 4
+```
+
+Dynamics, renderer and SR workers are independent. To resume one after a checkpointed stop,
+use that worker's saved command; do not launch a duplicate:
+
+```powershell
+$rssmRun = 'training_runs/rssm_enemy20m_combat_20261112'
+New-Item -ItemType File -Path (Join-Path $rssmRun 'stop_training') -Force
+# Wait for this worker to exit before removing its marker and resuming.
+Remove-Item -LiteralPath (Join-Path $rssmRun 'stop_training')
+$rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_command.json') | ConvertFrom-Json
+$rssmCommand = @($rssmLaunch.argv)
+& $twPython @($rssmCommand[1..($rssmCommand.Count - 1)])
+# Renderer continuation: only after its separate worker has stopped.
+$renderRun = 'training_runs/renderer_distance_refine_20261111/training_rebalance_only'
+Remove-Item -LiteralPath (Join-Path $renderRun 'stop_training') -ErrorAction SilentlyContinue
+$renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_8000.json') | ConvertFrom-Json
+$renderCommand = @($renderLaunch.argv)
+& $twPython @($renderCommand[1..($renderCommand.Count - 1)])
+```
+
+The combat command runs `turkeyworld.train_rssm_combat --updates 0 --batch 32 --accumulation-steps 4`;
+0 means continue until quality, not zero training. The renderer command runs
+`turkeyworld.train_renderer_enemy --steps 8000 --batch 16`, with the saved
+`--combat-data-root`, `--appearance-data-root` and source-latent weight0.1.
+Its explicit distance sampler remains enabled; crop loss remains off.
+RSSM resume also requires the saved `--batch-revision-plan`, `--preview-assets-plan`
+`--preview-assets-revision-plan`, `--loss-balance-plan` and `--combat-only-plan`;
+do not substitute the old batch16 command. Their stop markers and counters are independent. The sections below preserve
+the earlier navigation-only initialization and revision history.
+
 The initial plan **200 distillation updates → 1,800 Source updates** completed
-at global update **2000**. The Source phase uses
-with **batch16 × accumulation1 = effective16**. Source supervision is primary
+at global update **2000**. That historical Source phase used
+**batch16 × accumulation1 = effective16**. Source supervision is primary
 even during distillation; the archived teacher contributes weight **0.1** on
 short trajectories because its navigation previously failed. Future Source
 RGB enters a **separate posterior auxiliary stream** for reconstruction/KL.
@@ -92,7 +265,7 @@ every **10**, with four displayed future frames. Completing that budget did not
 pass navigation quality: at 2000, held-out16×450 rollouts had mean final XY error
 **0.483 tile** and **986/7200** model wall steps, versus zero Source wall steps.
 
-### Continuation beyond update 2000
+### Navigation history: continuation beyond update 2000
 
 The requested continuation keeps the same weights, Adam, RNG and accumulated
 counters. It has **no fixed update/time limit** and validates every **250 global
@@ -141,23 +314,10 @@ branch then follows the ordinary no-enemy engine continuously. Held-out data
 is separate. The trainer also uses the original navigation450 pool. These
 offline labels do not add engine feedback to neural rollout execution.
 
-The exact `turkeyworld.train_rssm_dynamics` command, all data/renderer/SR paths
-and the current continuation flags are saved in this run's `launch_command.json`.
-The 200/2,000-update counts describe the completed initial plan.
-Do not start a second worker. Request a checkpointed stop, wait for the worker
-to exit, then remove the marker and replay the saved arguments to resume:
-
-```powershell
-$rssmRun = 'training_runs/rssm25m_contact_b_20261111'
-New-Item -ItemType File -Path (Join-Path $rssmRun 'stop_training') -Force
-# After the existing worker has saved and exited:
-Remove-Item -LiteralPath (Join-Path $rssmRun 'stop_training')
-$rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_command.json') | ConvertFrom-Json
-& $twPython @($rssmLaunch.argv[1..($rssmLaunch.argv.Count-1)])
-```
-
-Resume restores `checkpoints/rssm_world.pt` and its new optimizer/RNG/counters;
-it does not reinitialize the model or restart the archived staged runner.
+The historical `turkeyworld.train_rssm_dynamics` command and navigation-only
+paths remain in `rssm25m_contact_b_20261111/launch_command.json`. That worker
+stopped at3873 for the combat continuation above. Use the current combat run's
+stop marker and command, rather than restarting the archived navigation worker.
 
 ### Contact revision from update 339
 
@@ -303,6 +463,42 @@ not automatically alter the dynamics worker.
 The selected export is recorded in `training_runs/active_renderer.json`.
 The five-row model preview loads it into a separate inference model; the
 RSSM training model and its optimizer continue with their saved frozen assets.
+
+### Fine-tuning the compact VQGAN on one enemy
+
+The separate `training_runs/codec_enemy_refine_20261111` run updates the existing
+**997,539-parameter** compact codec's E/D on Source frames containing an NPC.
+The first 200 steps train only the decoder, then encoder and decoder use LR
+0.00002 / 0.0001. The codebook and all its buffers, latent normalization,
+original teacher VQGAN, Base, RF and RSSM stay fixed. GAN is disabled in this series.
+NPCs, background, previous RF endpoints and full RF with the new encoder are
+checked separately. TRAIN/VAL data and the 256-frame panel are retained;
+validation100, preview10. Progress and images: **http://127.0.0.1:8770/**.
+
+Reproduce or resume the same protocol after the process has stopped:
+
+```powershell
+python -m turkeyworld.train_codec_enemy `
+  --world training_runs/paired_compare_20261111T133512Z_g3420/rssm_for_play.pt `
+  --renderer-checkpoint training_runs/renderer_enemy_refine_20261111/checkpoints/renderer_student.pt `
+  --data-root training_runs/staged_single_20261110/data_v2 `
+  --empty-data-root training_runs/staged_single_20261110/data_navigation_recovery_v1 `
+  --run-dir training_runs/codec_enemy_refine_20261111 `
+  --steps 2000 --decoder-warmup-steps 200 --batch 8
+```
+
+Resume restores Adam, phase, sampler and RNG from `checkpoints/codec_enemy_last.pt`.
+Use a new directory to change the protocol. The selected export is
+`checkpoints/codec_student.pt`; `validation_selected.json` describes that export.
+It is not automatically deployed: Base/RF must adapt and be evaluated with the
+new codec. History and measured results:
+[journal H27](README_HISTORY_EN.md#h27-fine-tuning-the-compact-vqgan-on-the-enemy).
+
+Subsequent Base/RF adaptation runs separately in
+`training_runs/renderer_enemy_codec_adapt_20261111`, **http://127.0.0.1:8771/**.
+Its codec is frozen again. Protocol `one_enemy_source_balanced_renderer_latent_v2`
+adds `--source-latent-weight .1`; its exact command is saved in the run's
+`launch_command.json`. The active renderer does not change automatically.
 
 ## Historical eight-enemy data
 
@@ -864,7 +1060,7 @@ If the local monitor is not already running:
 
 ```powershell
 & $twPython -m training_dashboard.local_server `
-  --run-dir training_runs/rssm25m_contact_b_20261111 --port 8765
+  --run-dir training_runs/rssm_enemy20m_combat_20261112 --port 8765
 ```
 
 Open **http://127.0.0.1:8765**. The existing monitor follows its active-run
@@ -877,10 +1073,11 @@ comparison, free autoregressive model RGB32,
 learned SR128 of that same prediction, and bilinear512 of that same SR output.
 Future Source is display-only; SR never consumes it or corrects world state.
 Codec and SR retain their completed results. RSSM continuation behavior validation
-runs every **250 global updates**; the original budget used100. A light preview
-is not a passing quality check.
+runs every **250 global updates** and combines separate navigation/combat gates;
+the original budget used100. Parallel Base/RF image training is monitored at
+**http://127.0.0.1:8772/**. A light preview is not a passing quality check.
 
-Use the `rssm25m_contact_b_20261111/stop_training` marker and saved-argument resume command
+Use the `rssm_enemy20m_combat_20261112/stop_training` marker and saved-argument resume command
 in the [current RSSM section](#current-rssm-dynamics-run). The old staged/fresh
 controllers are archived. Do not start concurrent trainers for one run.
 The worker's awake guard permits **Win+L** and display sleep; computer sleep,
@@ -1023,7 +1220,14 @@ does not relabel those measurements or establish a new pass.
 
 | Directory under `training_runs` | Purpose |
 |---|---|
-| `rssm25m_contact_b_20261111` | Active controlled RSSM25M trial B, resumed 339 with preserved Adam/RNG |
+| `rssm_enemy20m_combat_20261112` | Active20M enemy+retained player from4482; combat-only training, navigation validation retained |
+| `rssm_dual_balanced_20261111` | Previous dual RSSMs4454→4482; separate task-loss EMA retained in the new run |
+| `rssm_dual_20261111` | Dual architecture4430→4454; retained player Adam/RNG and new enemy group |
+| `rssm25m_combat_20261111` | Previous single-RSSM combat continuation3873→4430, archived without rollback |
+| `small_enemy_pipeline_20261111` | Ordered codec→SR→Base/RF; codec2000 complete, SR started, renderer queued |
+| `renderer_combat_navigation_20261111` | Parallel Base/RF1 on combat/appearance/navigation; same-Adam2000→6000, frozen codec |
+| `combat_source_20261111` | Immutable one-enemy combat and detailed-navigation Source corpus;1280 verified NPZ |
+| `rssm25m_contact_b_20261111` | Navigation trial B, resumed339 and archived at3873 for combat continuation |
 | `rssm25m_20261111` | Original RSSM initialization, frozen contact data and stopped pilot A archive 368 |
 | `renderer_refine_rssm25m_20261111` | Completed Source Base/RF1 refinement, selected 100; Source quality gate false |
 | `staged_single_20261110/data_navigation_recovery_v1` | Frozen recovery Source clips with separate train/validation |

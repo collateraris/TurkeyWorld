@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from PIL import Image,ImageDraw
 
-from .object_losses import balanced_region_losses
+from .object_losses import (balanced_region_losses,balanced_image_l1,balanced_mse,
+    balanced_edge_l1,decoded_ssim_loss,foreground_contrastive_loss)
 from .renderer_enemy_objectives import enemy_conditions
 from .renderer_refinement import refinement_forward
 from .staged_validation import _isolated_validation
@@ -57,19 +58,24 @@ def candidate_assessment(report,baseline,*,empty_mae_tolerance=.005,empty_ssim_t
                     'empty_mae_tolerance':empty_mae_tolerance,'empty_ssim_tolerance':empty_ssim_tolerance}}
 
 
-def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None):
-    parts={key:[] for key in ('base','rgb','source','mask','background','codec_reference','dynamic')}
+def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None,
+                           require_base_preservation=False,preservation_cohorts=None,base_anchor=None):
+    parts={key:[] for key in ('base','rgb','source','mask','background','codec_reference','dynamic',
+                              'states','endpoint','source_endpoint')}
     with _isolated_validation(model,data,173):
         for first in range(0,len(panel),batch_size):
             ids=panel[first:first+batch_size]
             batch=data.batch(len(ids),indices=ids)
             conditions=enemy_conditions(model,batch)
-            base,rgb,_=refinement_forward(model,conditions,detach_base=True)
+            base,rgb,endpoint=refinement_forward(model,conditions,detach_base=True)
             # Diagnostic reference only: Source RGB never enters RF conditions.
             codec=model.flow_renderer.codec
-            reference=codec.decode(codec.encode(conditions['target'])['quantized'])
+            source_codes=codec.encode(conditions['target'])['quantized']
+            reference=codec.decode(source_codes)
             values={'base':base,'rgb':rgb,'source':conditions['target'],'mask':conditions['object_mask'],
-                'background':conditions['background'],'codec_reference':reference,'dynamic':conditions['dynamic']}
+                'background':conditions['background'],'codec_reference':reference,'dynamic':conditions['dynamic'],
+                'states':conditions['state'],'endpoint':endpoint,
+                'source_endpoint':model.flow_renderer.normalize_latents(source_codes)}
             if any(not bool(torch.isfinite(value).all()) for value in values.values()):
                 raise FloatingPointError('Nonfinite Source enemy rendering validation')
             for key,value in values.items():parts[key].append(value.detach().cpu())
@@ -88,6 +94,44 @@ def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None
     for name,key in (('base','base'),('rf1','rgb'),('codec_reference','codec_reference')):
         report[name]=renderer_metrics(arrays[key],arrays['source'],arrays['mask'],arrays['background'],
             categories,arrays['dynamic'])
+    pixel_terms={}
+    for name,key in (('base','base'),('rf1','rgb')):
+        prediction=arrays[key]
+        pixel_terms[name+'_l1']=float(balanced_image_l1(prediction,arrays['source'],arrays['mask']))
+        pixel_terms[name+'_ssim_loss']=float(decoded_ssim_loss(prediction,arrays['source'],arrays['mask']))
+        pixel_terms[name+'_edge']=float(balanced_edge_l1(prediction,arrays['source'],arrays['mask']))
+        pixel_terms[name+'_contrast']=float(foreground_contrastive_loss(prediction,arrays['source'],arrays['background'],arrays['mask']))
+    common_rgb=sum(pixel_terms[name+'_l1']+.2*pixel_terms[name+'_ssim_loss']
+        +.1*pixel_terms[name+'_edge']+.1*pixel_terms[name+'_contrast'] for name in ('base','rf1'))
+    latent=float(balanced_mse(arrays['endpoint'],arrays['source_endpoint'],arrays['mask']))
+    report['common_objective']={**pixel_terms,'source_latent_mse':latent,
+        'rgb_objective':common_rgb,'original_latent01_objective':common_rgb+.1*latent,
+        'weights':{'l1':1.,'ssim':.2,'edge':.1,'contrast':.1,'latent':.1},
+        'preservation_penalty_included':False,'extra_rf_forward_calls':0}
+    states,visible=arrays['states'],arrays['mask'].flatten(1).any(-1)
+    alive=(states[:,13]>=.5)&(states[:,12]>0)
+    conditions={'overall':np.ones(len(panel),bool),'alive':visible&alive,
+        'npc_hurt':visible&alive&(states[:,15]>0),'hp0':states[:,4]<=0,'corpse':visible&~alive,
+        'empty':~visible,'navigation':np.asarray(categories)=='empty_navigation',
+        'large':np.asarray(categories)=='large'}
+    player_hurt=np.zeros(len(panel),bool)
+    groups=data.cohort_rows(panel) if hasattr(data,'cohort_rows') else {}
+    if groups and not all(isinstance(value,dict) for value in groups.values()):groups={'source':groups}
+    if groups:
+        player_hurt[groups.get('combat',{}).get('player_hurt',[])]=True
+    conditions['player_hurt']=player_hurt
+    report['preservation_cohorts']={name:{'base':_summary(arrays['base'],arrays['source'],arrays['mask'],selected),
+        'rf1':_summary(arrays['rgb'],arrays['source'],arrays['mask'],selected)} for name,selected in conditions.items()}
+    if groups:
+        report['source_cohorts']={}
+        for pool,cohorts in groups.items():
+            report['source_cohorts'][pool]={}
+            for case,indices in cohorts.items():
+                selected=np.zeros(len(panel),bool);selected[indices]=True
+                report['source_cohorts'][pool][case]={'frames':len(indices),
+                    **{name:_summary(arrays[key],arrays['source'],arrays['mask'],selected)
+                       for name,key in (('base','base'),('rf1','rgb'))}}
+        report['source_cohort_scope']='Recorded Source event/navigation labels select held-out GT-pose images; not combat-policy accuracy'
     report['summary']=report['rf1']['overall']
     report['passed']=all(report[name]['overall']['ssim_mean']>=.9 and report[name]['overall']['mae_mean']<=.03
         and report[name]['visible_enemy']['foreground_mae']<=.05 for name in ('base','rf1'))
@@ -95,6 +139,17 @@ def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None
                           'applies_to':'both Base and RF1; experimental relative improvement reported separately'}
     if baseline is not None:
         report['experimental_selection']=candidate_assessment(report,baseline)
+    from .renderer_preservation_validation import base_preservation_assessment
+    report['base_preservation']=base_preservation_assessment(report,base_anchor if base_anchor is not None else baseline,
+        **({'cohorts':preservation_cohorts} if preservation_cohorts is not None else {}))
+    report['base_parent_anchor']='external_original_parent' if base_anchor is not None else 'initial_current_run_parent'
+    report['base_preservation_enforced']=require_base_preservation
+    if require_base_preservation:
+        report['passed']=report['passed'] and report['base_preservation']['passed']
+        if baseline is not None:
+            selection=report['experimental_selection']
+            selection['validated_improvement']=selection['validated_improvement'] and report['base_preservation']['passed']
+            if not report['base_preservation']['passed']:selection['failure_reasons'].append('base_preservation_release_gate')
     report['selection_score']=(report['rf1']['visible_enemy']['foreground_mae']
         +.5*report['base']['visible_enemy']['foreground_mae']
         +.25*(report['rf1']['overall']['mae_mean']+report['base']['overall']['mae_mean']))

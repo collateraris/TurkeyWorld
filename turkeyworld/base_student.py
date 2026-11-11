@@ -6,7 +6,7 @@ source image, future observation or numerical state correction is used here.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import torch
@@ -27,9 +27,10 @@ class BaseStudentConfig:
     heads: int = 6
     geometry_width: int = 192
     image_size: int = 32
+    pixel_residual: bool = False
 
     def __post_init__(self):
-        if (self.image_size != 32 or self.geometry_width != 192
+        if (self.image_size != 32 or self.geometry_width != 192 or not isinstance(self.pixel_residual, bool)
                 or min(self.width, self.depth, self.heads) < 1 or self.width % self.heads):
             raise ValueError('Compact Base requires native32, shared192D geometry and valid attention dimensions')
 
@@ -53,10 +54,14 @@ class CompactBaseHead(nn.Module):
         angles = xy[..., None]*(torch.pi*(2**torch.arange(4)))
         self.register_buffer('screen_coordinates', torch.cat([xy, angles.sin().flatten(-2),
                                                              angles.cos().flatten(-2)], -1), persistent=False)
+        if self.config.pixel_residual:
+            self.pixel_residual = nn.Linear(width, 12)
+            nn.init.zeros_(self.pixel_residual.weight)
+            nn.init.zeros_(self.pixel_residual.bias)
         if sum(value.numel() for value in self.parameters()) > 1_000_000:
             raise ValueError('Compact Base head exceeds one million real parameters')
 
-    def forward(self, state, features, geometry):
+    def _queries(self, state, features, geometry):
         if state.ndim != 2 or state.shape[-1] != STATE_DIM or features.shape != (len(state), 128):
             raise ValueError('Base head expects state[B,20] and actual auxiliary features[B,128]')
         dtype = self.scene_projection.weight.dtype
@@ -72,8 +77,48 @@ class CompactBaseHead(nn.Module):
         queries = self.screen_position(self.screen_coordinates.to(dtype))+condition[:, None]
         for block in self.blocks:
             queries = block(queries, context, key_weights=weights)
-        pixels = self.rgb(self.norm(queries)).reshape(-1, 16, 16, 3, 2, 2)
-        return pixels.permute(0, 3, 1, 4, 2, 5).reshape(-1, 3, 32, 32).sigmoid()
+        return self.norm(queries)
+
+    @staticmethod
+    def _pixels(value):
+        pixels = value.reshape(-1, 16, 16, 3, 2, 2)
+        return pixels.permute(0, 3, 1, 4, 2, 5).reshape(-1, 3, 32, 32)
+
+    def forward(self, state, features, geometry):
+        # Base stays the original RGB condition; the residual never conditions Flow.
+        return self._pixels(self.rgb(self._queries(state, features, geometry))).sigmoid()
+
+    def forward_with_residual(self, state, features, geometry):
+        queries = self._queries(state, features, geometry)
+        base = self._pixels(self.rgb(queries)).sigmoid()
+        residual = (.5*self._pixels(self.pixel_residual(queries)).tanh()
+                    if self.config.pixel_residual else None)
+        return base, residual
+
+
+def pixel_residual_metadata(head):
+    return {'enabled': True, 'position': 'after_frozen_codec_decode',
+        'amplitude': .5, 'base_rgb_unchanged': True,
+        'parameters': sum(value.numel() for value in head.pixel_residual.parameters())}
+
+
+def enable_base_pixel_residual(head):
+    """Return an independent, function-preserving head; keep source weights/RNG."""
+    if not isinstance(head, CompactBaseHead):
+        raise ValueError('Pixel residual migration requires a compact Base head')
+    parameter = next(head.parameters())
+    with torch.random.fork_rng(devices=[]):
+        upgraded = CompactBaseHead(replace(head.config, pixel_residual=True))
+    upgraded.to(device=parameter.device, dtype=parameter.dtype)
+    before = head.state_dict()
+    missing, unexpected = upgraded.load_state_dict(before, strict=False)
+    expected = set() if head.config.pixel_residual else {'pixel_residual.weight', 'pixel_residual.bias'}
+    if set(missing) != expected or unexpected:
+        raise ValueError('Only the new pixel-residual tensors may be missing')
+    for name, value in head.named_parameters():
+        dict(upgraded.named_parameters())[name].requires_grad_(value.requires_grad)
+    upgraded.train(head.training)
+    return upgraded
 
 
 def build_base_student(teacher=None, *, seed=173, config=None):
@@ -96,7 +141,7 @@ def _source_config(config):
         values['architecture'] = 'spatial_explicit_world'
         values = {key: value for key, value in values.items()
                   if not key.startswith(('vjepa_', 'rssm_'))}
-    return {key: value for key, value in values.items() if not key.startswith('flow_')
+    return {key: value for key, value in values.items() if not key.startswith(('flow_', 'enemy_rssm_'))
             and key not in {'renderer_mode', 'renderer_codec', 'renderer_codec_config', 'player_motion_mode'}}
 
 
@@ -124,6 +169,8 @@ def export_base_student(teacher, head, path, *, training_steps, metrics=None, pr
         'provenance': provenance or {}, 'head_parameters': sum(value.numel() for value in head.parameters()),
         'shared_components': 'Original teacher map encoder and CameraGeometry; not part of compact head',
         'quality_status': 'Distilled Base head; gameplay accuracy is not qualified'}
+    if head.config.pixel_residual:
+        payload['pixel_residual'] = pixel_residual_metadata(head)
     if payload['head_parameters'] > 1_000_000:
         raise ValueError('Base head exceeds the requested parameter budget')
     output = Path(path)
@@ -157,6 +204,8 @@ def prepare_base_student(teacher, path_or_payload):
         raise ValueError('Base bundle weights are invalid or their fingerprint differs')
     head = build_base_student(teacher, config=payload['config'])
     head.load_state_dict(state, strict=True)
+    if head.config.pixel_residual and payload.get('pixel_residual') != pixel_residual_metadata(head):
+        raise ValueError('Base pixel-residual provenance/configuration differs')
     count = sum(value.numel() for value in head.parameters())
     if payload.get('head_parameters') != count or count > 1_000_000:
         raise ValueError('Base bundle parameter count differs from its compact configuration')

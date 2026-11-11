@@ -228,7 +228,7 @@ def select_contact_branches(candidates, *, contact_branch_protocol, dt=1/30):
 
 
 def contact_branches_backward(model,candidates,*,contact_branch_protocol,contact_protocol=None,
-                              amp=None,check_gradients=True):
+                              amp=None,check_gradients=True,loss_groups=None):
     """Fresh short prior graphs, same detached h/z, and no optimizer/renderer."""
     protocol = normalize_contact_branch_protocol(contact_branch_protocol)
     if protocol is None: raise ValueError('Contact branch backward requires explicit opt-in')
@@ -280,13 +280,16 @@ def contact_branches_backward(model,candidates,*,contact_branch_protocol,contact
             protocol['anchor_margin_weight']*anchor['endpoint_margin'])
         weighted = protocol['weight']*objective
     if not bool(torch.isfinite(weighted)): raise FloatingPointError('Nonfinite own-contact branch loss')
-    weighted.backward()
+    actual=weighted if loss_groups is None else loss_groups.combine({'player':weighted})
+    if not bool(torch.isfinite(actual)):raise FloatingPointError('Nonfinite balanced own-contact branch loss')
+    actual.backward()
     if check_gradients: finite_gradient_norm(model.named_parameters(),context='Own-contact branch backward')
     metrics.update(loss=float(weighted.detach()),unweighted_loss=float(objective.detach()),
         xy_loss=float(xy.detach()),wall_loss=float(wall.detach()),
         anchor_bce=float(anchor['pass_bce'].detach()),anchor_margin=float(anchor['endpoint_margin'].detach()),
         horizon=horizon,forward_transitions=len(chosen)*horizon,backward_calls=1,
         canonical_max_abs_difference=max(row['canonical_max_abs_difference'] for row in chosen))
+    if loss_groups is not None:metrics['balanced_loss']=float(actual.detach())
     for offset in protocol['offsets']:
         if offset<=horizon:
             error=((prediction[:,offset-1,:2].detach().float()-target[:,offset,:2])*16).norm(dim=-1)

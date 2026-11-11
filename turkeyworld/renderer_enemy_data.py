@@ -22,7 +22,8 @@ def scene_key(state):
 
 
 class EnemyFrames:
-    def __init__(self,data_root,empty_data_root,split,*,seed=173,exclude_scene_keys=None,weights=None):
+    def __init__(self,data_root,empty_data_root,split,*,seed=173,exclude_scene_keys=None,weights=None,
+                 source_directories=None):
         if split not in {'train','val'}:raise ValueError('Enemy renderer requires explicit train/val split')
         self.split,self.rng=split,np.random.default_rng(seed)
         self.weights=dict(ENEMY_WEIGHTS if weights is None else weights)
@@ -38,6 +39,9 @@ class EnemyFrames:
         roots=[(Path(data_root)/'static_enemy/snapshots'/split,'static',False),
                (Path(data_root)/'moving1/rgb'/split,'moving',True),
                (Path(empty_data_root)/'short/rgb'/split,'empty_navigation',True)]
+        if source_directories is not None:
+            roots=[(Path(row['directory']),row['kind'],row['dynamic']) for row in source_directories]
+            if not roots:raise ValueError('Explicit Source directories must be nonempty')
         for directory,kind,dynamic in roots:
             directory=directory.resolve()
             if not directory.is_dir():raise ValueError('Missing genuine Source split: '+str(directory))
@@ -60,6 +64,10 @@ class EnemyFrames:
                             raise ValueError('Dynamic Source episodes require actual adjacent controls')
                     elif 'actions' in source or bool(source['world_transition_compatible']):
                         raise ValueError('Independent snapshots must not masquerade as dynamics')
+                    events=(source['events'].copy() if source_directories is not None and dynamic and 'events' in source
+                            else np.zeros((max(0,len(states)-1),4),np.float32))
+                    if events.shape!=(max(0,len(states)-1),4) or not np.isfinite(events).all():
+                        raise ValueError('Source event labels require one finite four-event row per action')
                     if kind=='empty_navigation' and (np.any(states[:,12:14]) or masks.any()):
                         raise ValueError('Empty navigation replay must contain no visible/active NPC')
                     seed_value=int(source['seed'])
@@ -86,6 +94,17 @@ class EnemyFrames:
                     self.rows.append({'file':file_index,'frame':frame,'category':category,
                         'mask_fraction':fraction,'hurt':bool(state[15]>0 and state[13]>=.5),
                         'feature_policy':'frozen_past_prior' if dynamic else 'snapshot_zero128'})
+                    if source_directories is not None:
+                        previous=states[frame-1] if dynamic else state
+                        event=events[frame-1] if dynamic else np.zeros(4)
+                        cases=[]
+                        if event[1]>.5 or state[12]<previous[12]-1e-6:cases.append('hit')
+                        if event[0]>.5 and event[1]<=.5:cases.append('miss')
+                        if event[3]>.5 or state[4]<previous[4]-1e-6:cases.append('player_hurt')
+                        if previous[13]>=.5 and state[13]<.5:cases.append('death')
+                        if previous[13]<.5 and state[13]>=.5:cases.append('respawn')
+                        self.rows[-1].update(source_kind=kind,combat_cases=cases,
+                                             source_events=event.tolist())
                     self.buckets[category].append(index);counts[category]+=1
         if not self.rows or any(not values for values in self.buckets.values()):
             raise ValueError('Enemy panel needs all visible/death/empty categories: '+str(dict(counts)))

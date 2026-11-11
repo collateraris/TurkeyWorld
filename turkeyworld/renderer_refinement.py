@@ -60,14 +60,20 @@ def causal_conditions(model, batch, *, context=1):
             'target': target, 'prior_memory': prior['memory'].detach()}
 
 
-def refinement_forward(model, conditions, *, detach_base=True):
-    base = model.base_student(conditions['state'], conditions['features'], conditions['geometry'])
+def refinement_forward(model, conditions, *, detach_base=True, return_residual=False):
+    from .models import apply_pixel_residual
+    if getattr(model.base_student.config, 'pixel_residual', False):
+        base, residual = model.base_student.forward_with_residual(
+            conditions['state'], conditions['features'], conditions['geometry'])
+    else:
+        base = model.base_student(conditions['state'], conditions['features'], conditions['geometry'])
+        residual = None
     flow = model.flow_renderer
     endpoint = flow.latent_sample(base.detach() if detach_base else base,
         conditions['state'], noise=flow.fixed_noise, map_condition=conditions['map'])
     quantized = flow.codec.quantize(flow.denormalize_latents(endpoint))['quantized']
-    rgb = flow.codec.decode(quantized)
-    return base, rgb, endpoint
+    rgb = apply_pixel_residual(flow.codec.decode(quantized), residual)
+    return (base, rgb, endpoint, residual) if return_residual else (base, rgb, endpoint)
 
 
 def refinement_loss(model, batch, *, context=1, ssim_weight=.2, edge_weight=.1,

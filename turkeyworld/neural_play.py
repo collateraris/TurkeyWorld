@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -124,6 +125,19 @@ class NeuralRuntime:
         # RSSM chooses categorical argmax in evaluation. Warmup and interactive
         # inference must use the same deterministic mode as checkpoint loading.
         self.model.eval()
+        # Paired navigation/combat diagnostics choose their initial environment
+        # only AFTER all checkpoint/renderer identity checks. The first observed
+        # image must match that environment, rather than hiding an enemy after
+        # it has already entered the initial RSSM memory.
+        initial_profile = getattr(args, 'initial_navigation_only', None)
+        self.checkpoint_navigation_only = bool(self.model.config.navigation_only)
+        if initial_profile is not None:
+            if not isinstance(initial_profile, bool):
+                raise TypeError('Initial navigation profile must be a boolean')
+            self.model.config = replace(self.model.config, navigation_only=initial_profile)
+            if self.model.vjepa_backend is not None:
+                self.model.vjepa_backend.config = replace(self.model.vjepa_backend.config,
+                    navigation_only=initial_profile)
         if getattr(args, "two_stage_upscale", False):
             native = self.model.config.image_size
             if args.sr is None or native not in (32, 64):
@@ -310,6 +324,9 @@ class NeuralRuntime:
             "codec_quality_qualified": self.renderer_metadata.get('codec_quality_qualified') if self.renderer_metadata else None,
             "world_architecture": self.world_architecture,
             "world_training_steps": training_steps,
+            "checkpoint_navigation_only": self.checkpoint_navigation_only,
+            "runtime_navigation_only": bool(self.model.config.navigation_only),
+            "initial_environment_override": getattr(self.args, 'initial_navigation_only', None),
             "world_quality_status": self.world_metadata.get("quality_status", "Unverified checkpoint"),
             "untrained_world_checkpoint": training_steps == 0,
             "sr_checkpoint": str(self.args.sr.resolve()) if self.args.sr else None,
@@ -354,6 +371,11 @@ class NeuralRuntime:
                               'latent_selection': 'deterministic_argmax_in_eval',
                               'initial_rgb_observations': self.engine_renders_for_initialization,
                               'model_training': self.model.training}
+            if getattr(self.model.config,'enemy_rssm_enabled',False):
+                enemy=self.model.vjepa_backend.enemy_rssm
+                report['rssm']['separate_enemy_memory']={'player_packed_size':self.model.core.memory_size,
+                    'enemy_packed_size':enemy.memory_size,'own_enemy_h_z':True,
+                    'shared_combat_bookkeeping':True,'renderer_features_from_player_memory':True}
         return report
 
 
