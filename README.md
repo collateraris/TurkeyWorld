@@ -12,9 +12,10 @@ JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
 trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
 
-The [RSSM run](#current-rssm-dynamics-run) completed its 200-update distillation
-and is learning from Source. Its contact revision resumes update **339** without
-resetting the model or Adam. The [staged curriculum](#staged-game-curriculum)
+The [RSSM run](#current-rssm-dynamics-run) completed its initial **2,000 updates**,
+including 200 distillation updates. Continuation from 2000 is configured to train
+until navigation quality passes, without resetting the model or Adam.
+The [staged curriculum](#staged-game-curriculum)
 records the earlier JEPA experiment. The
 eight-enemy/90-value corpus, checkpoints and measurements below are explicitly
 historical and do not describe the new one-enemy configuration. **Training
@@ -76,19 +77,34 @@ state, known action/clock rules and learned axis pass fractions remain part of
 the game-specific transition. Collision outcomes are learned without online
 engine queries or state corrections.
 
-The automatic plan is **200 distillation updates → 1,800 Source updates**;
-the first 200 are completed and the Source phase is in progress,
+The initial plan **200 distillation updates → 1,800 Source updates** completed
+at global update **2000**. The Source phase uses
 with **batch16 × accumulation1 = effective16**. Source supervision is primary
 even during distillation; the archived teacher contributes weight **0.1** on
 short trajectories because its navigation previously failed. Future Source
 RGB enters a **separate posterior auxiliary stream** for reconstruction/KL.
 It never replaces the independent prior's own state or memory. Distillation
 uses H16; the Source phase uses **450-transition** rollouts with TBPTT16.
-Validation is every **100**
-optimizer updates and previews every **10**, with four displayed future frames.
-Neither the update plan nor a preview establishes correct 15-second gameplay.
-The contact revision resumed the saved RSSM at **339**. Neither Source-phase
-completion nor a navigation-quality pass is claimed.
+The initial budget used validation every **100** optimizer updates and previews
+every **10**, with four displayed future frames. Completing that budget did not
+pass navigation quality: at 2000, held-out16×450 rollouts had mean final XY error
+**0.483 tile** and **986/7200** model wall steps, versus zero Source wall steps.
+
+### Continuation beyond update 2000
+
+The requested continuation keeps the same weights, Adam, RNG and accumulated
+counters. It has **no fixed update/time limit** and validates every **250 global
+optimizer updates**; preview cadence remains10. Training stops after **two
+consecutive complete navigation checks pass**, rather than at the old2000 budget
+or a loss plateau. The monitor shows an open-ended counter and no completion ETA.
+The held-out criteria include mean velocity error≤0.35 tile/s, false-stop and
+missed-block rates≤0.05, final XY error mean≤0.1/p95≤0.25 tile, and **zero model
+wall steps** over the450-step navigation panel. The additional contact panel and
+default-spawn regression are checked separately; a TRAIN default regression
+does not establish held-out quality. A navigation-quality pass is not yet claimed.
+The worker publishes the current streak and thresholds in
+`rssm_training.continuation`; `training_until_quality=true` distinguishes this
+mode from the completed initial budget.
 
 The source archive is
 `training_runs/staged_single_20261110/checkpoints/dynamics_before_navigation_recovery_g1633.pt`.
@@ -124,7 +140,8 @@ is separate. The trainer also uses the original navigation450 pool. These
 offline labels do not add engine feedback to neural rollout execution.
 
 The exact `turkeyworld.train_rssm_dynamics` command, all data/renderer/SR paths
-and the 200/2,000-update budgets are saved in this run's `launch_command.json`.
+and the current continuation flags are saved in this run's `launch_command.json`.
+The 200/2,000-update counts describe the completed initial plan.
 Do not start a second worker. Request a checkpointed stop, wait for the worker
 to exit, then remove the marker and replay the saved arguments to resume:
 
@@ -145,15 +162,16 @@ it does not reinitialize the model or restart the archived staged runner.
 Contact pilot A regressed on held-out false stops and long navigation after
 20 revision updates. It was stopped and archived at 368 as
 `training_runs/rssm25m_20261111/checkpoints/rssm_contact_trial_a_g368.pt`.
-**Controlled trial B is running** in `training_runs/rssm25m_contact_b_20261111`.
-It starts again from 339, rather than 368, with the same overall budget.
+**Controlled trial B** in `training_runs/rssm25m_contact_b_20261111`
+resumed339, rather than368, and completed its initial budget at2000.
 Weights, Adam state and RNG were verified bit-exact against
 `checkpoints/rssm_before_contact_g339.pt`; the original baseline
 [resume verification](training_runs/rssm25m_20261111/diagnostics/contact_revision/resume_verification.json)
 is retained.
 The fresh Adam described above belongs to the earlier JEPA→RSSM architecture
 change, not this continuation. Batch16, accumulation1, the own-state450 prior,
-TBPTT16, validation100 and preview10 remain unchanged.
+TBPTT16 and preview10 are retained. Validation100 describes the initial budget;
+the continuation beyond2000 uses validation250.
 
 New immutable offline Source data is in
 `training_runs/rssm25m_20261111/data_contact_v1`:
@@ -187,7 +205,7 @@ unchanged. The additional 256-clip validation panel is reported separately.
   --short-train 2048 --short-val 256 --long-train 0 --long-val 0 --workers 4
 ```
 
-Each auxiliary batch contains **12 new clips**, balanced over Source-labeled
+Before navigation revision V3, each auxiliary batch contained **12 new clips**, balanced over Source-labeled
 free/blocked/slide/turn-idle cohorts in their first 16 transitions, plus **4 old
 clips** for replay. Manifest filenames and hashes are pinned; unlisted NPZs
 are rejected. Auxiliary physical-motion terms use contact-balanced reductions;
@@ -220,6 +238,42 @@ plan, rather than probe defaults, determines the active training weights:
   --output training_runs/rssm25m_contact_b_20261111/diagnostics/contact_revision/gradient_probe_recheck.json `
   --device cuda --parameter-scope all --latent-mode argmax
 ```
+
+### Navigation revision V3: contexts, corners and own-memory branches
+
+V3 adds an explicit plan without resetting saved weights, Adam, RNG or global
+counters. The opt-in `--navigation-revision-root` points to
+`training_runs/rssm25m_contact_b_20261111/navigation_revision/data_corners_v1`;
+the complete resumed command remains in `launch_command.json`. The original
+training/contact/continuation plans stay unchanged, and the revision is bound
+separately in `navigation_revision_plan.json`. GPU resume verification is a
+separate result; the new objective does not itself establish a quality pass.
+
+- Every 16-update cycle gives **each original/coverage × context1/2 combination
+  three argmax updates and one sampled-latent update**. Numeric and observed RGB
+  contexts match, both start at window0, and the main rollout stays450 steps.
+- The Source auxiliary batch is **8 corner +4 single-wall +4 legacy clips**.
+  The new immutable pool contains 2048 corner clips plus 4864 unchanged TRAIN
+  replay clips; held-out panels are preserved. Both-free, each one-axis-blocked
+  combination and both-blocked outcomes are labeled by ordinary offline Source.
+- Up to **4 separate H16 contact branches** start from actual detached prior
+  state **and its own h/z memory**. Only legal canonical Source poses are used
+  for offline labels. A branch adds XY/wall and contact-anchor supervision;
+  it supplies no posterior RGB or corrections to the independent main450 path.
+  Weighted branch loss is already included in total train loss; previous
+  objective totals are not directly comparable.
+- Best inference weights are selected by **both context1/context2 held-out450
+  checks**: point+swept wall counts first, then worst-context final-XY p95 and
+  mean error. Train loss never ranks candidates. The immutable candidate is
+  saved and verified before `navigation_best.json` moves; a single full gate
+  pass remains distinct from the required two-pass qualification. The latest
+  full Adam checkpoint remains separate. Best weights never replace the game
+  automatically.
+
+The 8765 card shows actual revision/update and 8/4/4 draw counts, the current
+pool/context/latent mode, own-memory branch losses and physical/qualified best
+selections. Validation stays **250**, preview **10**. The navigation gate remains
+unpassed until fresh complete evidence says otherwise.
 
 A separate **Source finetune of the compact Base and one-step RF student**
 completed its 2,000-update budget in
@@ -820,8 +874,9 @@ show initial context (one observed frame for the RSSM preview), future Source
 comparison, free autoregressive model RGB32,
 learned SR128 of that same prediction, and bilinear512 of that same SR output.
 Future Source is display-only; SR never consumes it or corrects world state.
-Codec and SR retain their completed results. RSSM behavior validation runs every
-**100 updates**; a light preview is not a passing quality check.
+Codec and SR retain their completed results. RSSM continuation behavior validation
+runs every **250 global updates**; the original budget used100. A light preview
+is not a passing quality check.
 
 Use the `rssm25m_contact_b_20261111/stop_training` marker and saved-argument resume command
 in the [current RSSM section](#current-rssm-dynamics-run). The old staged/fresh
@@ -830,6 +885,18 @@ The worker's awake guard permits **Win+L** and display sleep; computer sleep,
 sign-out or shutdown still interrupts processes.
 
 ## Neural playback and 15-second evaluation
+
+The recorded [neural-game video](training_runs/neural_video_20261111T072305Z/capture/neural_game.mp4)
+uses RSSM2000, the selected Source-refined Base/RF1, and learned SR:
+**RGB32 → SR128 → bilinear1024**. It contains450 autonomous updates, including
+forward/backward, strafing and turning controls. **15 simulated seconds take
+about32 seconds of actual playback**: frames repeat at measured inference speed;
+the tape is not accelerated to30 simulated updates per wall-clock second.
+This is experimental navigation without enemies, with one initial Source image
+and no future engine feedback. [Recording metadata](training_runs/neural_video_20261111T072305Z/capture/report.json)
+includes control timestamps, solver calls and the unchanged-codec check;
+the [poster](training_runs/neural_video_20261111T072305Z/capture/poster.png) is an actual recorded frame.
+The video does not establish navigation qualification.
 
 The three image-path training stages are complete: **compact VQGAN → compact
 Base → RF renderer**. Completion is separate from passing their quality gates.

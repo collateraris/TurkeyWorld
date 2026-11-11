@@ -204,6 +204,42 @@ class RSSMTraining:
                 contact_protocol_version=2, passed=bool(report['passed'] and contact['passed']))
             revision.update(last_validation_step=step,
                 last_validation_report=str(directory/'motion_recovery_validation.json'))
+        continuation = self.state['rssm_training'].get('continuation')
+        if continuation:
+            from .rssm_continuation import (evaluate_heldout_idle, evaluate_one_frame450,
+                complete_quality_gate, record_continuation_validation)
+            idle = evaluate_heldout_idle(model, self.contact_val, seed=self.args.seed)
+            atomic_json(directory/'heldout_idle.json', idle)
+            one = evaluate_one_frame450(model, self.args.data_root/'long/rgb/val',
+                directory/'one_frame450', seed=self.args.seed)
+            report.update(heldout_idle=idle, one_frame450=one,
+                contact_coverage_with_idle_supplement=bool(idle['samples'] >= 32),
+                validation_every=250, continuation_id=continuation['fingerprint'])
+            gate = complete_quality_gate(report, continuation['quality_thresholds'])
+            report.update(passed=gate['passed'], complete_quality_gate=gate,
+                scope='Held-out navigation: short128/contact256 +32idle +16x450 with one/two observations; renderer/combat not evaluated')
+            record_continuation_validation(continuation, report, step=step)
+        navigation = self.state['rssm_training'].get('navigation_revision')
+        if navigation:
+            from .rssm_navigation_revision import consider_navigation_candidate
+            assets = {'renderer_checkpoint': str(self.args.renderer_checkpoint),
+                      'sr_checkpoint': str(self.args.sr), 'vqgan_frozen': True}
+            active_renderer = self.root.parent/'active_renderer.json'
+            if active_renderer.exists():
+                assets['active_renderer'] = json.loads(active_renderer.read_text(encoding='utf-8'))
+            candidate = {'stage': 'world', 'state_schema': dict(STATE_SCHEMA),
+                'config': asdict(model.config), 'model': model.state_dict(),
+                'training_steps': step, 'global_training_step': step,
+                'rssm_migration': model.rssm_migration,
+                'rssm_training': self.state['rssm_training'],
+                'quality_status': self.state['quality_status']}
+            selected = consider_navigation_candidate(self.root, candidate, report,
+                expected_fingerprints=navigation['validation_fingerprints'], assets_metadata=assets)
+            self.state['navigation_best'] = selected
+            navigation.update(baseline_pending=False, last_validation_step=step,
+                last_validation_passed=report['passed'])
+            report.update(navigation_revision_id=navigation['fingerprint'],
+                          navigation_best=selected)
         atomic_json(directory/'motion_recovery_validation.json', report)
         atomic_json(self.root/'rssm_validation_latest.json', report)
         self.state['rssm_validation'] = report
@@ -221,8 +257,9 @@ class RSSMTraining:
         torch.manual_seed(args.seed)
         manifest_sha = verify_data(args.data_root)
         original_sha = verify_data(args.original_data)
+        continuation_arguments = {'continue_until_quality', 'continuation_contact_root', 'navigation_revision_root'}
         plan = {'version': 1, **{key: str(value.resolve()) if isinstance(value, Path) else value
-            for key, value in vars(args).items()}, 'dataset_manifest_sha256': manifest_sha,
+            for key, value in vars(args).items() if key not in continuation_arguments}, 'dataset_manifest_sha256': manifest_sha,
             'original_manifest_sha256': original_sha, 'distillation_teacher_weight': .1,
             'own_state_horizon': 450, 'tbptt_chunk': 16, 'source_future_feedback': False,
             'source_teacher_validation': str(args.teacher.parent.parent/'rssm_migration_validation/teacher_g1633/motion_recovery_validation.json')}
@@ -248,6 +285,10 @@ class RSSMTraining:
             torch.set_rng_state(metadata['torch_rng_state'])
             if self.device.type == 'cuda':
                 torch.cuda.set_rng_state_all(metadata['cuda_rng_state'])
+            if getattr(args, 'navigation_revision_root', None) is not None:
+                from .rssm_navigation_protocol import verify_restored_boundary
+                audit = verify_restored_boundary(model, optimizer, self.rng, metadata)
+                atomic_json(self.root/'navigation_revision'/f"resume_verification_g{metadata['training_steps']}.json", audit)
         else:
             self.state['rssm_training']['teacher_step'] = metadata['rssm_migration']['source_global_training_step']
         migration = metadata['rssm_migration']
@@ -255,6 +296,28 @@ class RSSMTraining:
         from .rssm_contact_revision import bind_contact_revision
         self.contact_revision = bind_contact_revision(self.state, self.root/'contact_revision_plan.json',
             base_plan_sha=self.plan_sha, step=self.state['global_training_step'])
+        from .rssm_continuation import (bind_continuation, commit_continuation,
+            training_should_continue, validation_due)
+        bound = bind_continuation(self.state, self.root/'continuation_plan.json',
+            enabled=getattr(args, 'continue_until_quality', False),
+            dataset_root=getattr(args, 'continuation_contact_root', None),
+            base_plan_sha=self.plan_sha, contact_plan_path=self.root/'contact_revision_plan.json',
+            checkpoint_path=self.checkpoint, step=self.state['global_training_step'])
+        self.continuation = bound[0] if bound else None
+        continuation_paths = bound[1] if bound else None
+        from .rssm_navigation_protocol import bind_navigation_revision
+        self.branch_protocol = None
+        if getattr(args, 'navigation_revision_root', None) is not None:
+            from .rssm_contact_branches import normalize_contact_branch_protocol
+            self.branch_protocol = normalize_contact_branch_protocol({})
+        navigation_bound = bind_navigation_revision(self.state, self.root/'navigation_revision_plan.json',
+            dataset_root=getattr(args, 'navigation_revision_root', None), base_plan_sha=self.plan_sha,
+            contact_plan_path=self.root/'contact_revision_plan.json',
+            continuation_plan_path=self.root/'continuation_plan.json',
+            checkpoint_path=self.checkpoint, step=self.state['global_training_step'],
+            branch_protocol=self.branch_protocol)
+        self.navigation_revision = navigation_bound[0] if navigation_bound else None
+        navigation_paths = navigation_bound[1] if navigation_bound else None
         # Do not retain a second copy of all world tensors/Adam moments in CPU
         # metadata during the background run.
         metadata = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint') if key in metadata}
@@ -275,24 +338,41 @@ class RSSMTraining:
         original_long = StagedSequenceData(args.original_data/'rgb/train', self.device, mode='stream', cache_bytes=64*1024**2)
         if self.contact_revision:
             from .rssm_contact_revision import ContactAuxiliarySampler
-            self.contact_short = StagedSequenceData(Path(self.contact_revision['dataset_directory'])/'short/rgb/train',
-                self.device, mode='stream', cache_bytes=64*1024**2,
-                episode_paths=episode_names(self.contact_revision['dataset_directory'], split='train', stage='short'))
-            self.contact_sampler = ContactAuxiliarySampler(self.contact_short, self.short)
+            if self.navigation_revision:
+                from .rssm_navigation_protocol import NavigationContactSampler
+                self.contact_short = StagedSequenceData(Path(self.navigation_revision['dataset_directory'])/'short/rgb/train',
+                    self.device, mode='stream', cache_bytes=64*1024**2, episode_paths=navigation_paths)
+                self.contact_sampler = NavigationContactSampler(self.contact_short, self.short,
+                    self.navigation_revision['dataset_directory'])
+            elif self.continuation:
+                self.contact_short = StagedSequenceData(Path(self.continuation['dataset_directory'])/'short/rgb/train',
+                    self.device, mode='stream', cache_bytes=64*1024**2, episode_paths=continuation_paths)
+                self.contact_sampler = ContactAuxiliarySampler(self.contact_short, self.short)
+            else:
+                self.contact_short = StagedSequenceData(Path(self.contact_revision['dataset_directory'])/'short/rgb/train',
+                    self.device, mode='stream', cache_bytes=64*1024**2,
+                    episode_paths=episode_names(self.contact_revision['dataset_directory'], split='train', stage='short'))
+                self.contact_sampler = ContactAuxiliarySampler(self.contact_short, self.short)
             probe_path = self.root/'diagnostics/contact_revision/gradient_probe.json'
             if probe_path.exists():
                 self.state['rssm_gradient_probe'] = json.loads(probe_path.read_text(encoding='utf-8'))
             self.state['training_protocol'].update(contact_protocol_version=2,
                 auxiliary_new_fragments=12, auxiliary_old_replay_fragments=4,
                 autonomous_source_feedback=False, contact_data_train_only_own_visits=True)
+        if self.navigation_revision:
+            self.state['training_protocol'].update(contact_data_train_only_own_visits=False,
+                contact_data_profile='TRAIN Source corners, wall replay, legacy replay',
+                own_contact_memory_source='current autonomous RSSM prefix')
         self.state['status'] = 'running'
         self.publish()
         self.save(model, optimizer, metadata)
-        revision_baseline = bool(self.contact_revision and self.contact_revision.get('baseline_pending'))
+        revision_baseline = bool((self.contact_revision and self.contact_revision.get('baseline_pending'))
+            or (self.continuation and self.continuation.get('baseline_pending'))
+            or (self.navigation_revision and self.navigation_revision.get('baseline_pending')))
         if 'rssm_validation' not in self.state or revision_baseline:
             self.validate(model)
             self.preview(model)
-            if revision_baseline:
+            if self.contact_revision and self.contact_revision.get('baseline_pending'):
                 self.contact_revision.update(baseline_pending=False,
                     baseline_step=self.state['global_training_step'],
                     baseline_report=str(self.root/'validation'/f"step_{self.state['global_training_step']:06d}"/'motion_recovery_validation.json'))
@@ -300,7 +380,8 @@ class RSSMTraining:
         teacher = None
         started = time.perf_counter()
         completed_at_start = self.state['global_training_step']
-        for step in range(completed_at_start+1, args.updates+1):
+        while training_should_continue(self.state, args.updates):
+            step = self.state['global_training_step']+1
             if (self.root/'stop_training').exists():
                 self.state['status'] = 'stopped'
                 self.save(model, optimizer, metadata)
@@ -326,6 +407,12 @@ class RSSMTraining:
                 cycle = self.contact_revision['latent_training_cycle']
                 latent_mode = cycle[self.contact_revision['updates'] % len(cycle)]
                 model.core.train(latent_mode == 'sample')
+            navigation_setting = None
+            if self.navigation_revision:
+                from .rssm_navigation_revision import navigation_revision_setting
+                navigation_setting = navigation_revision_setting(self.navigation_revision['revision_updates'])
+                latent_mode = navigation_setting['latent_mode']
+                model.core.train(latent_mode == 'sample')
             protocol.update(phase=phase, phase_label='Дистилляция динамики в RSSM' if phase == 'distill'
                 else 'RSSM: обучение по Source, 450 собственных переходов',
                 rollout_horizon=16 if phase == 'distill' else 450)
@@ -333,8 +420,18 @@ class RSSMTraining:
             context = 1 if phase == 'distill' else 2
             observed = 1 if phase == 'distill' else (1, 1, 2, 2)[source_index % 4]
             source_name = 'short' if phase == 'distill' else 'coverage' if source_index % 2 == 0 else 'original'
+            if navigation_setting:
+                context = navigation_setting['context']
+                observed = navigation_setting['observed_context']
+                source_name = navigation_setting['long_pool']
             pool = self.short if phase == 'distill' else coverage_long if source_name == 'coverage' else original_long
-            batch = pool.batch(args.batch, context=context, horizon=16 if phase == 'distill' else 450, rng=self.rng)
+            batch_options = {}
+            if navigation_setting:
+                batch_options['indices'] = np.column_stack([
+                    self.rng.integers(len(pool.episodes), size=args.batch),
+                    np.zeros(args.batch, dtype=np.int64)])
+            batch = pool.batch(args.batch, context=context, horizon=16 if phase == 'distill' else 450,
+                rng=self.rng, **batch_options)
             # Each auxiliary fragment begins at the legal shared initial pose.
             # In particular, the Source/default start action is actually seen.
             contact_selected = None
@@ -354,7 +451,8 @@ class RSSMTraining:
                 auxiliary_context=1, auxiliary_observed_context=1, chunk_size=16,
                 teacher_weight=.1, amp=nullcontext, progress_callback=progress,
                 expected_horizon=16 if phase == 'distill' else 450,
-                **({'contact_protocol':self.contact_revision['loss_settings']} if self.contact_revision else {}))
+                **({'contact_protocol':self.contact_revision['loss_settings']} if self.contact_revision else {}),
+                **({'contact_branch_protocol': self.branch_protocol} if self.navigation_revision else {}))
             metrics['world_grad_norm'] = float(clip_finite_grad_norm_(
                 [(name, p) for name, p in model.named_parameters() if p.requires_grad],
                 1., context=f'RSSM optimizer step {step}'))
@@ -371,6 +469,23 @@ class RSSMTraining:
                     contact_revision_update=self.contact_revision['updates'],
                     contact_new_draws=self.contact_revision['new_auxiliary_draws'],
                     contact_old_replay_draws=self.contact_revision['old_auxiliary_draws'])
+            if self.continuation:
+                commit_continuation(self.continuation, step=step)
+                metrics.update(continuation_id=self.continuation['fingerprint'],
+                    continuation_update=self.continuation['updates'],
+                    continuation_new_draws=self.continuation['new_auxiliary_draws'],
+                    continuation_old_replay_draws=self.continuation['old_auxiliary_draws'])
+            if self.navigation_revision:
+                from .rssm_navigation_revision import commit_revision_update
+                commit_revision_update(self.navigation_revision, step=step,
+                    source_completed=protocol['source_completed'], long_batch_size=args.batch)
+                metrics.update(navigation_revision_id=self.navigation_revision['fingerprint'],
+                    navigation_revision_update=self.navigation_revision['revision_updates'],
+                    main_numeric_context=context, main_observed_context=observed,
+                    main_window_start=0, main_long_pool=source_name,
+                    auxiliary_corner_fragments=8, auxiliary_singlewall_fragments=4,
+                    auxiliary_legacy_fragments=4,
+                    navigation_schedule_cycle=navigation_setting['cycle_index'])
             self.state['long_training_progress'].update(optimizer_updated=True, status='complete')
             metrics.update(step=step, global_training_step=step, stage='rssm_dynamics', timestamp=now(),
                 component_phase=phase, microbatch_size=args.batch, gradient_accumulation_steps=1,
@@ -382,12 +497,12 @@ class RSSMTraining:
                 stream.write(json.dumps(metrics, ensure_ascii=False, allow_nan=False)+'\n')
             self.state.update(loss=metrics['train_loss'], latest_metrics=metrics,
                 message=protocol['phase_label'],
-                eta_seconds=int((time.perf_counter()-started)/(step-completed_at_start)*(args.updates-step)),
-                eta_scope='Remaining optimizer budget; quality completion time unknown')
+                eta_seconds=None if self.continuation else int((time.perf_counter()-started)/(step-completed_at_start)*(args.updates-step)),
+                eta_scope='Training until two complete quality passes; completion time unknown' if self.continuation else 'Remaining optimizer budget; quality completion time unknown')
             self.publish()
             handoff = phase == 'distill' and protocol['distillation_completed'] == args.distill_updates
             contact_probe_due = bool(self.contact_revision and self.contact_revision['updates'] in (4, 20))
-            if step % 100 == 0 or step == 4 or handoff or contact_probe_due:
+            if validation_due(self.state, step) or (not self.continuation and (step == 4 or handoff or contact_probe_due)):
                 optimizer.zero_grad(set_to_none=True)
                 self.validate(model)
                 self.save(model, optimizer, metadata)
@@ -396,6 +511,12 @@ class RSSMTraining:
             if step % 10 == 0 or step == 1 or phase == 'source' and protocol['source_completed'] == 1 or self.contact_revision and self.contact_revision['updates'] == 1:
                 self.save(model, optimizer, metadata)
             del batch, auxiliary
+        if self.continuation:
+            self.state.update(status='qualified', quality_status='Held-out navigation state/memory passed; renderer/combat not qualified',
+                message='Two consecutive complete navigation quality checks passed')
+            self.state['rssm_training']['gameplay_qualified'] = False
+            self.save(model, optimizer, metadata)
+            return
         self.state['status'] = 'awaiting_user'
         self.state['message'] = 'Бюджет RSSM завершён; качество определяется последней валидацией'
         self.save(model, optimizer, metadata)
@@ -411,9 +532,18 @@ def main(argv=None):
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=173)
     parser.add_argument('--device', choices=('cuda', 'cpu'), default='cuda')
+    parser.add_argument('--continue-until-quality', action='store_true')
+    parser.add_argument('--continuation-contact-root', type=Path)
+    parser.add_argument('--navigation-revision-root', type=Path)
     args = parser.parse_args(argv)
     if not 1 <= args.distill_updates < args.updates or args.batch != 16 or args.lr <= 0:
         parser.error('Use batch16 and a positive distillation budget below the total update budget')
+    if args.continue_until_quality != (args.continuation_contact_root is not None):
+        parser.error('Use --continue-until-quality and --continuation-contact-root together')
+    if args.continue_until_quality and args.lr != 1e-4:
+        parser.error('Continuation preserves the existing learning rate1e-4')
+    if args.navigation_revision_root is not None and not args.continue_until_quality:
+        parser.error('--navigation-revision-root requires the restored --continue-until-quality run')
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.resolve())

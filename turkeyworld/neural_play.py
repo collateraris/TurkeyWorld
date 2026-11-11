@@ -162,6 +162,8 @@ class NeuralRuntime:
         self.world_architecture = getattr(self.model.config, "architecture", "legacy_cnn")
         initial_rgb = (initialization_game.render(size=self.model.config.image_size, overlays=False)
                        if self.world_architecture in {"vjepa2_ac", "dreamer_rssm"} else None)
+        self.initial_map = initial_map.copy()
+        self.initial_rgb = None if initial_rgb is None else initial_rgb.copy()
         self.engine_renders_for_initialization = int(initial_rgb is not None)
         del initialization_game
         if initial_state.shape != (STATE_DIM,):

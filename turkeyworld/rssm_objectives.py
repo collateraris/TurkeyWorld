@@ -207,7 +207,7 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                            context=2, observed_context=None, auxiliary_context=None,
                            auxiliary_observed_context=None, chunk_size=16, teacher_weight=.1,
                            amp=None, progress_callback=None, expected_horizon=None, check_gradients=True,
-                           contact_protocol=None):
+                           contact_protocol=None, contact_branch_protocol=None):
     """Backpropagate own prior trajectory, then separate posterior/Source labels.
 
     Distillation uses1..16 own teacher/student transitions plus Source anchors.
@@ -220,6 +220,13 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         raise ValueError('Invalid RSSM phase/teacher/chunk/weight/AMP contract')
     states, frames, actions, targets, grid = _batch_data(batch, context)
     contact_protocol = normalize_contact_protocol(contact_protocol)
+    branch_protocol, branch_candidates = None, []
+    if contact_branch_protocol is not None:
+        from .rssm_contact_branches import (normalize_contact_branch_protocol,
+            capture_contact_candidate, contact_branches_backward)
+        branch_protocol = normalize_contact_branch_protocol(contact_branch_protocol)
+        if phase != 'source':
+            raise ValueError('Own-memory contact branches belong only to Source training')
     observed = _observed_count(context, observed_context)
     horizon = actions.shape[1]
     expected = (450 if phase == 'source' else horizon) if expected_horizon is None else expected_horizon
@@ -249,6 +256,7 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         last = min(horizon, first+chunk_size)
         if first: current, memory = current.detach(), memory.detach()
         own_previous = current.detach()
+        branch_start = (current.detach(), memory.detach()) if branch_protocol is not None else None
         predicted, readouts, appearances = [], [], []
         with autocast():
             for index in range(first, last):
@@ -259,6 +267,9 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                 if teacher_values is not None:
                     readouts.append(result['rssm_readout'].float()); appearances.append(result['features'].float())
             prediction = torch.stack(predicted, 1)
+            if branch_start is not None:
+                branch_candidates.append(capture_contact_candidate(first, branch_start[0], branch_start[1],
+                    actions[:, first:min(horizon, first+branch_protocol['horizon'])], grid, prediction))
             fraction = (last-first)/horizon
             previous_source = initial if first == 0 else targets[:, first-1]
             wall, _ = trajectory_state_losses(prediction, previous_source, targets[:, first:last], grid,
@@ -290,6 +301,9 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         if check_gradients: finite_gradient_norm(model.named_parameters(), context=f'RSSM own prior backward {last}/{horizon}')
         for name, part in parts.items(): totals[name] += float(part.detach())
         if progress_callback: progress_callback(last, horizon)
+    branch_metrics = (contact_branches_backward(model, branch_candidates,
+        contact_branch_protocol=branch_protocol, contact_protocol=contact_protocol,
+        amp=amp, check_gradients=check_gradients) if branch_protocol is not None else {})
     if auxiliary_batch is None:
         aux_context = context
         auxiliary_batch = _auxiliary_view(batch, context, min(horizon, 16))
@@ -298,12 +312,13 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
     aux_observed = _observed_count(aux_context, auxiliary_observed_context)
     auxiliary = _posterior_backward(model, auxiliary_batch, context=aux_context, observed=aux_observed,
         autocast=autocast, chunk_size=min(chunk_size, 4), check_gradients=check_gradients, contact_protocol=contact_protocol)
-    total = sum(totals.values())+auxiliary['loss']
+    total = sum(totals.values())+auxiliary['loss']+branch_metrics.get('loss', 0.)
     kl_settings = _kl_settings(model)
     floor = kl_settings['free_nats']*(kl_settings['dynamics_scale']+kl_settings['representation_scale'])
     return {'train_loss': total, 'train_loss_without_kl_floor': total-floor,
         **{'rssm_'+name: value for name, value in totals.items()},
         **{'rssm_aux_'+name: value for name, value in auxiliary.items()},
+        **{'rssm_contact_branch_'+name: value for name, value in branch_metrics.items()},
         'rssm_phase': phase, 'rssm_prior_horizon': horizon, 'rssm_prior_tbptt_chunks': chunks,
         'rssm_prior_context_frames': observed, 'rssm_prior_numerical_resets': 0,
         'rssm_prior_future_rgb_inputs': 0, 'rssm_posterior_feedback_to_prior': False,
