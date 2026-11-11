@@ -333,6 +333,12 @@ class VJEPA2ACWorldBackend(nn.Module):
                     self.spatial_spawn_anchor_head = nn.Linear(spawn_rank, 9)
                     nn.init.zeros_(self.spatial_spawn_anchor_head.weight)
                     nn.init.zeros_(self.spatial_spawn_anchor_head.bias)
+        # Append only: every legacy parameter name/order and RNG draw above
+        # stays unchanged. Zero final logits are an untrained half-pass prior.
+        if getattr(config, 'player_motion_mode', 'delta') == 'axis_fraction':
+            self.player_pass_head = nn.Sequential(nn.Linear(2*width+6, 128), nn.GELU(), nn.Linear(128, 2))
+            nn.init.zeros_(self.player_pass_head[-1].weight)
+            nn.init.zeros_(self.player_pass_head[-1].bias)
 
     def encode_map(self, grid):
         return self.renderer.encode_map(grid)
@@ -499,10 +505,21 @@ class VJEPA2ACWorldBackend(nn.Module):
                 'local_motion_prediction': prior+residual.float(),
                 'motion_basis_forward': basis['forward'], 'motion_basis_right': basis['right']}
         motion = delta.float()
+        player_delta = .1*motion[:, :2]
+        if getattr(self.config, 'player_motion_mode', 'delta') == 'axis_fraction':
+            from .structured_state import player_command_delta
+            command = player_command_delta(state, action, dt=1/self.config.simulation_hz)
+            controls = torch.cat([action[:, :3].float().clamp(-1, 1), action[:, 3:4].float().clamp(0, 1)], -1)
+            inputs = torch.cat([pooled.float(), spatial[:, 0].float(), controls, command], -1)
+            logits = self.player_pass_head(inputs.to(self.player_pass_head[0].weight.dtype)).float()
+            fraction = logits.sigmoid()
+            player_delta = command*fraction
+            spatial_result.update(player_pass_logits=logits, player_pass_fraction=fraction,
+                player_command_delta=command, raw_player_delta=player_delta)
         old_entities = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
         candidate_entities = torch.cat([old_entities[:, :, :2]+.1*motion[:, 2:].reshape(batch, ENTITY_SLOTS, 2),
                                         old_entities[:, :, 2:]], -1)
-        candidate = torch.cat([state[:, :2]+.1*motion[:, :2], state[:, 2:8],
+        candidate = torch.cat([state[:, :2]+player_delta, state[:, 2:8],
                                candidate_entities.flatten(1), state[:, -2:]], -1)
         candidate = projection(candidate, previous=state)
         proposed_npc_displacement = candidate[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)[:, :, :2]-old_entities[:, :, :2]

@@ -52,6 +52,7 @@ class WorldModelConfig:
     simulation_hz: float = 30.0
     endless: bool = False
     navigation_only: bool = False
+    player_motion_mode: str = 'delta'
     renderer_mode: str = "direct"
     flow_kind: str = ""
     flow_steps: int = 0
@@ -80,10 +81,26 @@ class WorldModelConfig:
     game_training_v5: bool = False
     flow_patch_size: int = 4
     flow_block_conditioning: bool = False
+    rssm_deter_dim: int = 1008
+    rssm_hidden_dim: int = 1024
+    rssm_stoch: int = 32
+    rssm_classes: int = 32
+    rssm_embed_dim: int = 512
+    rssm_action_dim: int = 516
+    rssm_blocks: int = 8
+    rssm_unimix: float = .01
+    rssm_free_nats: float = 1.
+    rssm_dynamics_scale: float = 1.
+    rssm_representation_scale: float = .1
 
     def __post_init__(self):
         if not isinstance(self.navigation_only, bool):
             raise ValueError('navigation_only must be a boolean environment profile')
+        if self.player_motion_mode not in {'delta', 'axis_fraction'}:
+            raise ValueError('player_motion_mode must be delta or axis_fraction')
+        if self.player_motion_mode == 'axis_fraction' and (self.architecture not in {'vjepa2_ac', 'dreamer_rssm'}
+                or not self.spatial_entities or not self.endless or self.transition_mode != 'event_v1'):
+            raise ValueError('Axis-fraction motion requires spatial endless V-JEPA event_v1 dynamics')
         if (not isinstance(self.entity_slots, int) or isinstance(self.entity_slots, bool)
                 or self.entity_slots != ENTITY_SLOTS or self.state_schema_version != STATE_SCHEMA_VERSION):
             raise ValueError('Only the single-enemy20D state schema is supported; migrate legacy checkpoints explicitly')
@@ -100,7 +117,7 @@ class WorldModelConfig:
             raise ValueError('Flow patch size must be 1, 2 or 4')
         if self.flow_block_conditioning and not self.spatial_combat:
             raise ValueError('Block conditioning requires explicit spatial combat conditions')
-        if self.game_training_v5 and (not self.spatial_combat or self.architecture != 'vjepa2_ac'
+        if self.game_training_v5 and (not self.spatial_combat or self.architecture not in {'vjepa2_ac', 'dreamer_rssm'}
                 or self.renderer_codec != 'vqgan' or not self.endless):
             raise ValueError('Training v5 requires a spatial V-JEPA world with VQGAN and endless slots')
         if (self.flow_patch_size != 4 or self.flow_block_conditioning) and self.renderer_codec != 'vqgan':
@@ -111,8 +128,20 @@ class WorldModelConfig:
             raise ValueError('flow_kind must be empty, teacher or student')
         if self.image_size not in {32, 64, 128, 256}:
             raise ValueError("image_size must be 32, 64, 128 or 256")
-        if self.architecture not in {"camera_transformer", "legacy_cnn", "vjepa2_ac"}:
-            raise ValueError("architecture must be camera_transformer, legacy_cnn or vjepa2_ac")
+        if self.architecture not in {"camera_transformer", "legacy_cnn", "vjepa2_ac", 'dreamer_rssm'}:
+            raise ValueError("Unsupported world architecture")
+        if (any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in
+                (self.rssm_deter_dim, self.rssm_hidden_dim, self.rssm_stoch, self.rssm_classes,
+                 self.rssm_embed_dim, self.rssm_action_dim, self.rssm_blocks))
+                or self.rssm_classes < 2 or self.rssm_deter_dim % self.rssm_blocks
+                or not isinstance(self.rssm_unimix, (int, float)) or isinstance(self.rssm_unimix, bool)
+                or not math.isfinite(self.rssm_unimix) or not 0 <= self.rssm_unimix < 1
+                or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                       or not math.isfinite(value) or value < 0 for value in
+                       (self.rssm_free_nats, self.rssm_dynamics_scale, self.rssm_representation_scale))):
+            raise ValueError('Invalid RSSM dimensions or KL configuration')
+        if self.architecture == 'dreamer_rssm' and self.transition_mode != 'event_v1':
+            raise ValueError('The RSSM game backend requires event_v1 readouts')
         if self.transition_mode not in {"event_v1", "residual_v0"}:
             raise ValueError("transition_mode must be event_v1 or residual_v0")
         if self.endless and self.transition_mode != "event_v1":
@@ -153,7 +182,7 @@ class WorldModelConfig:
 
     @property
     def map_channels(self):
-        if self.architecture in {"camera_transformer", "vjepa2_ac"}:
+        if self.architecture in {"camera_transformer", "vjepa2_ac", 'dreamer_rssm'}:
             return 192 if self.kind == "teacher" else 128
         return 64 if self.kind == "teacher" else 32
 
@@ -277,6 +306,10 @@ class NeuralWorldModel(nn.Module):
                 adapter_heads=self.config.flow_adapter_heads,
                 adapter_mlp_ratio=self.config.flow_adapter_mlp_ratio,
                 mlp_hidden=self.config.flow_mlp_hidden, **codec)
+        if self.config.architecture == 'dreamer_rssm':
+            from .rssm_world_backend import RSSMWorldBackend
+            self.vjepa_backend = RSSMWorldBackend(self.config)
+            return
         if self.config.architecture == 'vjepa2_ac':
             from .vjepa2_ac import VJEPA2ACWorldBackend
             self.vjepa_backend = VJEPA2ACWorldBackend(self.config)
@@ -338,7 +371,7 @@ class NeuralWorldModel(nn.Module):
         flow = getattr(self, 'flow_renderer', None)
         if bool(getattr(flow, 'uses_wall_conditioning', False)):
             flow.set_map_condition(grid)
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.encode_map(grid)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.encode_map(grid)
@@ -349,7 +382,7 @@ class NeuralWorldModel(nn.Module):
 
     def initial_memory(self, batch: int, device=None, dtype=None):
         """Neural memory follows weights in event_v1; world state stays FP32."""
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.initial_memory(batch, device, dtype)
         p = next(self.parameters())
         if self.config.transition_mode == "event_v1":
@@ -357,7 +390,7 @@ class NeuralWorldModel(nn.Module):
         return torch.zeros(batch, self.config.hidden, device=device or p.device, dtype=dtype or p.dtype)
 
     def transition(self, state, action, map_features, memory=None):
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.transition(state, action, map_features, memory, project_state)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.transition(state, action, map_features, memory, project_state)
@@ -411,12 +444,12 @@ class NeuralWorldModel(nn.Module):
                 "target_logits": targets, "attack_logits": attacks, **spawn}
 
     def render_base(self, state, features, map_features):
-        if self.config.architecture == 'vjepa2_ac' and hasattr(self, 'base_student'):
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'} and hasattr(self, 'base_student'):
             geometry = self.vjepa_backend.geometry(state, map_features)
             return self.base_student(state, features, geometry)
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.render_with_aux(state, features, map_features)['rgb']
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             result = self.vjepa_backend.render_with_aux(state, features, map_features)
         elif self.config.architecture == "camera_transformer":
             return self.camera_backend.render_with_aux(state, features, map_features)["rgb"]
@@ -459,7 +492,7 @@ class NeuralWorldModel(nn.Module):
 
     def geometry(self, state, map_features):
         """Camera-conditioned learned auxiliaries; legacy renderer has none."""
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.geometry(state, map_features)
         if self.config.architecture == "camera_transformer":
             return self.camera_backend.geometry(state, map_features)
@@ -467,22 +500,22 @@ class NeuralWorldModel(nn.Module):
 
     @property
     def core(self):
-        if self.config.architecture != 'vjepa2_ac':
+        if self.config.architecture not in {'vjepa2_ac', 'dreamer_rssm'}:
             raise AttributeError('This architecture has no V-JEPA core')
         return self.vjepa_backend.core
 
     def initialize_from_image(self, rgb, state, map_features=None):
-        if self.config.architecture == 'vjepa2_ac':
+        if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.initialize_from_image(rgb, state, map_features)
         return self.initial_memory(state.shape[0], state.device)
 
     def latent_features(self, memory):
-        if self.config.architecture != 'vjepa2_ac':
+        if self.config.architecture not in {'vjepa2_ac', 'dreamer_rssm'}:
             raise ValueError('Latent visual features require the V-JEPA architecture')
         return self.vjepa_backend.latent_features(memory)
 
     def initialize_from_latents(self, latents, state, map_features=None):
-        if self.config.architecture != 'vjepa2_ac':
+        if self.config.architecture not in {'vjepa2_ac', 'dreamer_rssm'}:
             raise ValueError('Visual latent initialization requires the V-JEPA architecture')
         return self.vjepa_backend.initialize_from_latents(latents, state, map_features)
 
@@ -588,13 +621,15 @@ def build_upscaler(config=None, **overrides):
 
 
 def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | None = None):
-    if model.config.architecture in {"camera_transformer", 'vjepa2_ac'}:
-        backend = model.vjepa_backend if model.config.architecture == 'vjepa2_ac' else model.camera_backend
-        renderer = backend.renderer if model.config.architecture == 'vjepa2_ac' else backend
+    if model.config.architecture in {"camera_transformer", 'vjepa2_ac', 'dreamer_rssm'}:
+        backend = model.vjepa_backend if model.config.architecture in {'vjepa2_ac', 'dreamer_rssm'} else model.camera_backend
+        renderer = backend.renderer if model.config.architecture in {'vjepa2_ac', 'dreamer_rssm'} else backend
         parts = {"map_encoder": sum(p.numel() for p in renderer.map_encoder.parameters()),
                  "renderer": backend.renderer_parameter_count(),
                  "shared_camera_geometry": sum(p.numel() for p in renderer.geometry_reader.parameters())}
-        if model.config.architecture == 'vjepa2_ac':
+        if model.config.architecture == 'dreamer_rssm':
+            parts['rssm_core'] = sum(p.numel() for p in backend.core.parameters())
+        elif model.config.architecture == 'vjepa2_ac':
             parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
     else:
@@ -650,6 +685,7 @@ def load_world_checkpoint(path, device="cpu"):
     config.setdefault("simulation_hz", 30.0)
     model = NeuralWorldModel(WorldModelConfig(**config)).to(device)
     model.load_state_dict(checkpoint["model"])
+    model.rssm_migration = checkpoint.get('rssm_migration')
     return model.eval(), checkpoint
 
 

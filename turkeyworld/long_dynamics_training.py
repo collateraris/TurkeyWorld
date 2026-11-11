@@ -23,7 +23,8 @@ LONG_COORDINATE_OFFSETS = (1, 4, 8, 16, 32, 64, 128, 256, 450)
 
 
 def long_dynamics_backward(model, ema, batch, *, context=2, chunk_size=16, amp=None,
-                           expected_horizon=450, progress_callback=None, check_gradients=True):
+                           expected_horizon=450, progress_callback=None, check_gradients=True,
+                           observed_context=None):
     """Accumulate gradients for a single full recorded-control own rollout.
 
     State/JEPA/wall chunk means receive chunk_length/full_horizon weights;
@@ -39,6 +40,9 @@ def long_dynamics_backward(model, ema, batch, *, context=2, chunk_size=16, amp=N
             or not isinstance(check_gradients,bool)):
         raise ValueError('Long dynamics requires positive context/chunk_size and an AMP context factory')
     autocast = nullcontext if amp is None else amp
+    observed = context if observed_context is None else observed_context
+    if not isinstance(observed, int) or isinstance(observed, bool) or not 1 <= observed <= context:
+        raise ValueError('Observed context must select1..context genuine past frames')
     actions, states, frames = (batch[name].detach() for name in ('actions', 'states', 'frames'))
     targets, grid = batch['target_states'].detach(), batch['map'].detach()
     if (actions.ndim != 3 or actions.shape[-1] != 4 or actions.shape[1] < 1
@@ -57,8 +61,8 @@ def long_dynamics_backward(model, ema, batch, *, context=2, chunk_size=16, amp=N
     with torch.no_grad(), autocast():
         map_features = model.encode_map(grid).detach()
     with autocast():
-        context_latents = model.core.encode_video(frames[:, :context])
-        memory = model.initialize_from_latents(context_latents, states[:, :context], map_features)
+        context_latents = model.core.encode_video(frames[:, context-observed:context])
+        memory = model.initialize_from_latents(context_latents, states[:, context-observed:context], map_features)
         regularizer, regularizer_metrics = variance_covariance_loss(context_latents)
         regularizer = .1*regularizer
     current = initial
@@ -152,6 +156,8 @@ def long_dynamics_backward(model, ema, batch, *, context=2, chunk_size=16, amp=N
         'long_report_offsets': [value for value in LONG_COORDINATE_OFFSETS if value <= horizon],
         'optimizer_step_performed': False, 'long_memory_reset_count': 0,
         'long_online_context_encoder_calls': 1, 'long_ema_target_encoder_calls': chunks,
+        'initial_observed_frames': observed,
+        'initial_observed_frame_indices': list(range(context-observed, context)),
         'long_gt_feedback': False, 'long_future_rgb_online_encoded': False,
         'long_render_calls': 0, 'rgb_supervised_steps': 0, 'image_objectives_active': False,
         'dynamics_updated': True, 'ar_wall_player_overlaps': overlaps_player,

@@ -1,7 +1,7 @@
 """Play a loaded neural world checkpoint without ground-truth corrections.
 
 The reference engine supplies a map and initial single-enemy20-value state once.
-V-JEPA models additionally encode one initial source RGB frame before rollout.
+Visual V-JEPA and RSSM models encode one initial source RGB frame before rollout.
 Every subsequent transition and base image comes from the loaded world model.
 No trained checkpoints are bundled. A successful run proves executable shapes,
 not correct combat, stable gameplay or RTX 4090 performance.
@@ -121,6 +121,9 @@ class NeuralRuntime:
             from .renderer_student import load_renderer_student
             self.renderer_metadata = load_renderer_student(self.model, args.renderer_checkpoint,
                 allow_unqualified_codec=getattr(args, 'allow_unqualified_codec', False))
+        # RSSM chooses categorical argmax in evaluation. Warmup and interactive
+        # inference must use the same deterministic mode as checkpoint loading.
+        self.model.eval()
         if getattr(args, "two_stage_upscale", False):
             native = self.model.config.image_size
             if args.sr is None or native not in (32, 64):
@@ -158,7 +161,7 @@ class NeuralRuntime:
         initial_state = initialization_game.state_vector().copy()
         self.world_architecture = getattr(self.model.config, "architecture", "legacy_cnn")
         initial_rgb = (initialization_game.render(size=self.model.config.image_size, overlays=False)
-                       if self.world_architecture == "vjepa2_ac" else None)
+                       if self.world_architecture in {"vjepa2_ac", "dreamer_rssm"} else None)
         self.engine_renders_for_initialization = int(initial_rgb is not None)
         del initialization_game
         if initial_state.shape != (STATE_DIM,):
@@ -173,6 +176,10 @@ class NeuralRuntime:
                 initial_memory = self.model.initialize_from_image(image, self.initial_state, self.map_features)
             else:
                 initial_memory = self.model.initial_memory(1, self.device, self.dtype)
+            if self.world_architecture == 'dreamer_rssm':
+                if not torch.is_tensor(initial_memory) or initial_memory.ndim != 2:
+                    raise ValueError('RSSM memory must be a packed tensor[B,h+categorical_z]')
+                initial_memory = initial_memory.float()
             if (not torch.is_tensor(initial_memory) or initial_memory.ndim < 2
                     or initial_memory.shape[0] != 1 or not bool(torch.isfinite(initial_memory).all())):
                 raise ValueError("Initial neural memory must be a finite tensor with batch dimension1")
@@ -238,7 +245,13 @@ class NeuralRuntime:
         upscale_end = time.perf_counter()
         if not bool(torch.isfinite(result["state"]).all()) or not bool(torch.isfinite(output).all()):
             raise FloatingPointError(f"non-finite neural prediction at step {self.steps + 1}")
-        self.state, self.memory = result["state"], result["memory"]
+        next_memory = result['memory']
+        if self.world_architecture == 'dreamer_rssm':
+            if (not torch.is_tensor(next_memory) or next_memory.shape != self.initial_memory.shape
+                    or not bool(torch.isfinite(next_memory).all())):
+                raise FloatingPointError(f'Invalid packed RSSM memory at step {self.steps + 1}')
+            next_memory = next_memory.float()
+        self.state, self.memory = result["state"], next_memory
         # Include actual device->CPU transfer in separately reported timing.
         frame = output[0].clamp(0, 1).mul(255).round().to(torch.uint8).permute(1, 2, 0).contiguous().cpu().numpy()
         if "events" in result:
@@ -278,7 +291,7 @@ class NeuralRuntime:
         if getattr(self.args, "two_stage_upscale", False):
             sr_kind = "neural_x4_then_bilinear_x4"
         training_steps = int(self.world_metadata.get("training_steps", 0))
-        return {
+        report = {
             "mode": "standalone_neural_world_rollout",
             "device": str(self.device),
             "device_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU",
@@ -333,6 +346,13 @@ class NeuralRuntime:
             "gameplay_correctness_evaluated": False,
             "note": "Predicted state and events are model outputs, not verified game facts. Timing applies only to the device reported above; no RTX 4090 result is implied.",
         }
+        if self.world_architecture == 'dreamer_rssm':
+            report['rssm'] = {'packed_memory_shape': list(self.memory.shape),
+                              'memory_precision': str(self.memory.dtype),
+                              'latent_selection': 'deterministic_argmax_in_eval',
+                              'initial_rgb_observations': self.engine_renders_for_initialization,
+                              'model_training': self.model.training}
+        return report
 
 
 def _headless(runtime, args):
@@ -376,7 +396,8 @@ def _interactive(runtime, args):
     screen = pygame.display.set_mode((args.display_size, args.display_size))
     font = pygame.font.Font(None, max(16, min(32, args.display_size//30)))
     show_hud = not getattr(args, "no_hud", False)
-    kind = runtime.model.config.kind.upper()
+    kind = ('RSSM' if runtime.world_architecture == 'dreamer_rssm'
+            else runtime.model.config.kind.upper())
     renderer = runtime.model.config.renderer_mode.replace("_", " ").upper()
     gameplay = "ENDLESS" if runtime.model.config.endless else "CLASSIC"
     clock = pygame.time.Clock()

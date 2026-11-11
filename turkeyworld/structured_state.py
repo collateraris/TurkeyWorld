@@ -54,6 +54,42 @@ def _straight_through(hard, soft, training):
     return hard + (soft - soft.detach()) if training else hard
 
 
+def player_command_delta(state, action, dt=1/30):
+    """Known normalized XY command after the typed turn; no collision query.
+
+    This follows structured_transition's heading/diagonal/speed arithmetic.
+    The legacy transition remains unchanged to preserve its exact numerics.
+    """
+    if (state.ndim != 2 or state.shape[-1] != STATE_DIM
+            or action.shape != (len(state), ACTION_DIM) or state.device != action.device
+            or not state.is_floating_point() or not action.is_floating_point()
+            or not isinstance(dt, (int, float)) or isinstance(dt, bool)
+            or not math.isfinite(dt) or dt <= 0):
+        raise ValueError('Player command requires matching floating state/action and positive dt')
+    dtype = torch.float32 if state.dtype in (torch.float16, torch.bfloat16) else state.dtype
+    previous, controls = state.to(dtype), action.to(dtype)
+    controls = torch.cat([controls[:, :3].clamp(-1, 1), controls[:, 3:4].clamp(0, 1)], -1)
+    alive = previous[:, 4].clamp(0, 1) > 0
+    heading = previous[:, 2:4]
+    norm = torch.linalg.vector_norm(heading, dim=-1, keepdim=True)
+    safe = norm.clamp_min(max(torch.finfo(dtype).tiny, 1e-6))
+    fallback = torch.stack([torch.zeros_like(norm[:, 0]), torch.ones_like(norm[:, 0])], -1)
+    heading = torch.where(norm > 1e-6, heading/safe, fallback)
+    angle_step = controls[:, 2]*(TURN_SPEED*dt)
+    turn_sin, turn_cos = angle_step.sin(), angle_step.cos()
+    turned = torch.stack([heading[:, 0]*turn_cos+heading[:, 1]*turn_sin,
+                          heading[:, 1]*turn_cos-heading[:, 0]*turn_sin], -1)
+    turned = turned/torch.linalg.vector_norm(turned, dim=-1, keepdim=True).clamp_min(1e-6)
+    new_heading = torch.where(alive[:, None], turned, previous[:, 2:4])
+    movement = controls[:, :2]
+    magnitude = torch.linalg.vector_norm(movement, dim=-1, keepdim=True).clamp_min(1.)
+    forward, strafe = (movement/magnitude).unbind(-1)
+    commanded = torch.stack([new_heading[:, 1]*forward-new_heading[:, 0]*strafe,
+                              new_heading[:, 0]*forward+new_heading[:, 1]*strafe], -1)
+    commanded = commanded*(PLAYER_SPEED*dt/MAP_EXTENT)
+    return commanded*alive[:, None].to(dtype)
+
+
 def structured_transition(previous, candidate, action, target_logits,
                           attack_logits, dt=1 / 30, training=False,
                           endless=False, spawn_positions=None, spawn_valid=None, respawn_enabled=True):

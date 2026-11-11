@@ -34,6 +34,10 @@ def normalize_world_config(config):
     result.setdefault("simulation_hz", 30.0)
     result.setdefault("endless", False)
     result.setdefault("navigation_only", False)
+    result.setdefault('player_motion_mode', 'delta')
+    for key, value in asdict(WorldModelConfig()).items():
+        if key.startswith('rssm_'):
+            result.setdefault(key, value)
     result.setdefault("renderer_mode", "direct")
     result.setdefault("flow_kind", "")
     result.setdefault("spatial_entities", False)

@@ -5,12 +5,17 @@ English | [Русский](README_RU.md)
 TurkeyWorld contains a first-person reference game and an experimental neural
 world model. The active configuration has **one persistent enemy**,
 a **20-value state** and **two participant conditions: player + NPC**. All
-conditions and losses use that one enemy. Single-enemy staged training is running
-in `training_runs/staged_single_20261110`; its first optimizer update is saved.
-The locally trained VQGAN and SR remain frozen. Native **32×32** playback is
+conditions and losses use that one enemy. The active dynamics run is now
+**DreamerV3-style RSSM25M**, controlled trial B in
+`training_runs/rssm25m_contact_b_20261111`; the earlier
+JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
+trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
 
-The [staged curriculum](#staged-game-curriculum) is active. The
+The [RSSM run](#current-rssm-dynamics-run) completed its 200-update distillation
+and is learning from Source. Its contact revision resumes update **339** without
+resetting the model or Adam. The [staged curriculum](#staged-game-curriculum)
+records the earlier JEPA experiment. The
 eight-enemy/90-value corpus, checkpoints and measurements below are explicitly
 historical and do not describe the new one-enemy configuration. **Training
 completion, image similarity and 15 seconds of correct autonomous gameplay
@@ -48,6 +53,200 @@ kills remain cumulative.
 Player death ends the session. `--classic` selects the finite-enemy mode.
 This command uses the original engine and classical display resizing; neural
 playback is a separate command below.
+
+## Current RSSM dynamics run
+
+The active run is `training_runs/rssm25m_contact_b_20261111`, monitored at
+**http://127.0.0.1:8765/**. Its recurrent state has **1,008 deterministic values**
+and **32 categorical variables with 32 classes each**: packed memory is
+**2,032 FP32 values**. Dynamics contain **25,007,048 parameters**, including the
+shared map and training-only observation decoder; **23,287,334 are trainable**.
+Frozen Base/Flow/VQGAN, map/geometry, appearance projection and SR retain their
+trained weights. The 25M figure excludes the image renderer and SR.
+
+This is a PyTorch adaptation of the RSSM in the
+[official DreamerV3 implementation](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/rssm.py),
+described in the [DreamerV3 paper](https://arxiv.org/abs/2301.04104).
+It uses grouped recurrent gates, straight-through categorical samples, 0.01
+uniform mixing and separately stopped dynamics/representation KL with a
+one-nat floor. Runtime uses deterministic argmax categories. There is **no EMA
+target encoder, actor or critic**: this run trains the world model, rather than
+the full Dreamer reinforcement-learning system. Its explicit 20-value game
+state, known action/clock rules and learned axis pass fractions remain part of
+the game-specific transition. Collision outcomes are learned without online
+engine queries or state corrections.
+
+The automatic plan is **200 distillation updates → 1,800 Source updates**;
+the first 200 are completed and the Source phase is in progress,
+with **batch16 × accumulation1 = effective16**. Source supervision is primary
+even during distillation; the archived teacher contributes weight **0.1** on
+short trajectories because its navigation previously failed. Future Source
+RGB enters a **separate posterior auxiliary stream** for reconstruction/KL.
+It never replaces the independent prior's own state or memory. Distillation
+uses H16; the Source phase uses **450-transition** rollouts with TBPTT16.
+Validation is every **100**
+optimizer updates and previews every **10**, with four displayed future frames.
+Neither the update plan nor a preview establishes correct 15-second gameplay.
+The contact revision resumed the saved RSSM at **339**. Neither Source-phase
+completion nor a navigation-quality pass is claimed.
+
+The source archive is
+`training_runs/staged_single_20261110/checkpoints/dynamics_before_navigation_recovery_g1633.pt`.
+The new architecture starts a **fresh Adam optimizer**; old weights, moments
+and history remain in that archive. Compatible readouts and the frozen image
+assets are copied with explicit migration lineage and tensor-hash checks.
+Initialization has already been performed. For a separate new run, the helper
+requires an unused destination and preserves its source:
+
+```powershell
+@'
+from turkeyworld.rssm_migration import initialize_rssm_checkpoint
+initialize_rssm_checkpoint(
+    'training_runs/staged_single_20261110/checkpoints/dynamics_before_navigation_recovery_g1633.pt',
+    'training_runs/rssm25m_20261111/checkpoints/rssm_initial.pt',
+    config_overrides={'rssm_deter_dim': 1008, 'rssm_hidden_dim': 1024})
+'@ | & $twPython -
+```
+
+The original recovery data is already collected and retained as replay and
+unchanged validation. Its original collector command was:
+
+```powershell
+& $twPython -m turkeyworld.navigation_recovery_data `
+  --root training_runs/staged_single_20261110/data_navigation_recovery_v1 `
+  --own-trajectory training_runs/renderer_distill_one_step_20261110T212351Z/diagnostics/autonomous450_fp16/trajectory.npz `
+  --short-train 512 --short-val 128 --long-train 64 --long-val 16 --workers 4
+```
+
+Valid recorded neural poses can initialize train-only Source branches; each
+branch then follows the ordinary no-enemy engine continuously. Held-out data
+is separate. The trainer also uses the original navigation450 pool. These
+offline labels do not add engine feedback to neural rollout execution.
+
+The exact `turkeyworld.train_rssm_dynamics` command, all data/renderer/SR paths
+and the 200/2,000-update budgets are saved in this run's `launch_command.json`.
+Do not start a second worker. Request a checkpointed stop, wait for the worker
+to exit, then remove the marker and replay the saved arguments to resume:
+
+```powershell
+$rssmRun = 'training_runs/rssm25m_contact_b_20261111'
+New-Item -ItemType File -Path (Join-Path $rssmRun 'stop_training') -Force
+# After the existing worker has saved and exited:
+Remove-Item -LiteralPath (Join-Path $rssmRun 'stop_training')
+$rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_command.json') | ConvertFrom-Json
+& $twPython @($rssmLaunch.argv[1..($rssmLaunch.argv.Count-1)])
+```
+
+Resume restores `checkpoints/rssm_world.pt` and its new optimizer/RNG/counters;
+it does not reinitialize the model or restart the archived staged runner.
+
+### Contact revision from update 339
+
+Contact pilot A regressed on held-out false stops and long navigation after
+20 revision updates. It was stopped and archived at 368 as
+`training_runs/rssm25m_20261111/checkpoints/rssm_contact_trial_a_g368.pt`.
+**Controlled trial B is running** in `training_runs/rssm25m_contact_b_20261111`.
+It starts again from 339, rather than 368, with the same overall budget.
+Weights, Adam state and RNG were verified bit-exact against
+`checkpoints/rssm_before_contact_g339.pt`; the original baseline
+[resume verification](training_runs/rssm25m_20261111/diagnostics/contact_revision/resume_verification.json)
+is retained.
+The fresh Adam described above belongs to the earlier JEPA→RSSM architecture
+change, not this continuation. Batch16, accumulation1, the own-state450 prior,
+TBPTT16, validation100 and preview10 remain unchanged.
+
+New immutable offline Source data is in
+`training_runs/rssm25m_20261111/data_contact_v1`:
+
+| Split | Initial poses | Branches / pose | Clips | Source transitions |
+|---|---:|---:|---:|---:|
+| Train | 256 | 8 | 2,048 | 65,536 |
+| Additional validation | 32 | 8 | 256 | 8,192 |
+
+The earlier short train pool had 512 clips from only 32 initial poses. New
+branches cover clearances **0.005/0.02/0.04/0.08/0.16/0.30 tiles**, all four wall
+normals, corners, both sliding directions, signed moving turns, back-away,
+idle and reapproach. These are continuous genuine Source32 recordings with
+no active enemy, physical state repair or reset inside an episode. Partial
+axis motion is not invented: its recorded cohort count is zero.
+
+Fresh RSSM339 predictions came from **32 TRAIN tapes ×450 =14,400 own
+transitions**. Of 14,432 stored states, **10,572 were legal and 3,860 rejected**;
+after XY deduplication, 64 legal own poses seed 25% of the new train poses.
+Only those legal initial states are replayed in Source to obtain new labels.
+No held-out prediction tape supplies train poses. New train/validation initial
+XY neighborhoods are separated by at least 0.25 tile; old validation neighborhoods
+are excluded from new train, and the old 128-short/16-long held-out panels remain
+unchanged. The additional 256-clip validation panel is reported separately.
+
+```powershell
+& $twPython -m turkeyworld.rssm_contact_data `
+  --root training_runs/rssm25m_20261111/data_contact_v1 `
+  --own-trajectory training_runs/rssm25m_20261111/diagnostics/contact_revision/train_own_states.npz `
+  --exclude-data-root training_runs/staged_single_20261110/data_navigation_recovery_v1 `
+  --short-train 2048 --short-val 256 --long-train 0 --long-val 0 --workers 4
+```
+
+Each auxiliary batch contains **12 new clips**, balanced over Source-labeled
+free/blocked/slide/turn-idle cohorts in their first 16 transitions, plus **4 old
+clips** for replay. Manifest filenames and hashes are pinned; unlisted NPZs
+are rejected. Auxiliary physical-motion terms use contact-balanced reductions;
+the two formerly duplicate raw/accepted terms are replaced by one physical
+motion term, with endpoint margins and swept wall supervision. Classification
+threshold 0.5 is logged separately from the physical movement-error threshold 0.2.
+These are training losses over known maps and offline labels, not inference
+collision corrections.
+
+Trial B settings are pinned in
+[contact_revision_plan.json](training_runs/rssm25m_contact_b_20261111/contact_revision_plan.json):
+Source wall weight 8, autonomous wall 0.05, autonomous XY 16, motion 7, BCE 1 and
+endpoint margin 2. The [gradient probe](training_runs/rssm25m_contact_b_20261111/diagnostics/contact_revision/gradient_probe.json)
+measured weighted norms 1.65/0.692 for Source/autonomous walls and 3.48 for
+autonomous XY, versus 8.69 for BCE, 5.60 for motion and 4.55 for endpoint margin
+on one fixed balanced batch and an own 16-step chunk.
+This calibrates numerical scale, not final quality; clipping 1 is retained.
+Three of each four updates use argmax categories and one uses categorical
+sampling (`argmax,argmax,sample,argmax`), to reduce the training/runtime gap.
+Paired latent diagnostics motivated this controlled change; they do not prove
+that sampling was the sole cause of the navigation errors.
+The diagnostic CLI below uses its module's nominal weights; the saved revision
+plan, rather than probe defaults, determines the active training weights:
+
+```powershell
+& $twPython -m turkeyworld.probe_rssm_contacts `
+  --world training_runs/rssm25m_20261111/checkpoints/rssm_before_contact_g339.pt `
+  --data-root training_runs/rssm25m_20261111/data_contact_v1 `
+  --old-data-root training_runs/staged_single_20261110/data_navigation_recovery_v1 `
+  --output training_runs/rssm25m_contact_b_20261111/diagnostics/contact_revision/gradient_probe_recheck.json `
+  --device cuda --parameter-scope all --latent-mode argmax
+```
+
+A separate **Source finetune of the compact Base and one-step RF student**
+completed its 2,000-update budget in
+`training_runs/renderer_refine_rssm25m_20261111`; results remain visible at
+**http://127.0.0.1:8768/**. Trial B dynamics continue independently on 8765.
+The selected best renderer is update 100, rather than the last update 2000:
+
+| Source comparison | Initial SSIM | Selected SSIM | Selected MAE |
+|---|---:|---:|---:|
+| Base, 128 held-out frames | 0.4082 | 0.6578 | 0.0510 |
+| RF1, same 128 held-out frames | 0.5775 | 0.6603 | 0.0478 |
+| RF1, default TRAIN pose | 0.3033 | 0.7701 | 0.0240 |
+
+The default-pose measurement is a TRAIN regression check. The held-out
+**Source SSIM≥0.90 and MAE≤0.03 gate is false**; completion does not qualify
+image fidelity or gameplay. This criterion compares Source RGB at GT poses,
+with causal-prior appearance features, rather than imitation of the old
+renderer. RSSM339, shared map/geometry, appearance, SR and every compact-VQGAN
+tensor remained bit-exact throughout all 2,000 updates. The original codec's
+failed qualification is preserved with explicit experimental-preview acceptance.
+The selected artifacts are sibling
+`checkpoints/base_student.pt` and `checkpoints/renderer_student.pt` under this
+renderer run. Trial B retains its own frozen renderer copy; these exports do
+not automatically alter the dynamics worker.
+The selected export is recorded in `training_runs/active_renderer.json`.
+The five-row model preview loads it into a separate inference model; the
+RSSM training model and its optimizer continue with their saved frozen assets.
 
 ## Historical eight-enemy data
 
@@ -178,8 +377,9 @@ Time to correct 15-second gameplay is unknown.
 ## Additional SR quality run
 
 The VQGAN is fixed at **42,216 updates**, frozen and accepted by the user;
-`quality_gate_passed=false` remains recorded. The 175M world keeps its current
-training state. The earlier 25,776-parameter SR completed 2,000 updates, with
+`quality_gate_passed=false` remains recorded. The earlier 175M training history
+is archived; this completed SR is reused frozen by the new RSSM. The earlier
+25,776-parameter SR completed 2,000 updates, with
 mean PSNR 20.907 dB and mean SSIM 0.698759 on its older 100-frame panel.
 On the new 512-frame panel, baseline clean/decoded SSIM was 0.705097/0.702811;
 at update 1,000 the new SR measured 0.806688/0.803097. These are progress measurements.
@@ -291,7 +491,7 @@ the selected SR result: clean mean SSIM **0.852550**, below its 0.90 goal.
 
 ## Training improvements V5: eight-enemy baseline history
 
-V5 is **active: training resumed from checkpoint 725 and completed update 726
+V5 was **activated: training resumed from checkpoint 725 and completed update 726
 was verified**, including generator/discriminator optimizer and EMA counters.
 It keeps the same fixed 128k transitions,
 frozen codec and selected 20,000-update SR. The batch change to **27×1=27**
@@ -355,8 +555,9 @@ cannot be compared directly; use matching-protocol held-out measurements.
 
 ## Staged game curriculum
 
-The **one-enemy** staged curriculum is running in
-`training_runs/staged_single_20261110`. Checkpoint update **1** is verified:
+**Historical JEPA run, stopped and archived at update 1633.** The **one-enemy**
+staged curriculum ran in `training_runs/staged_single_20261110`; it is not the
+current RSSM trainer. Checkpoint update **1** was verified:
 one optimizer update, 16 fragments, accumulation 1 and no pending microsteps.
 Its source is the archived eight-enemy checkpoint **818**. Compatible model
 weights were transferred with changed state/head shapes checked separately;
@@ -365,7 +566,7 @@ step numbering starts at 0 with the **5,182 updates remaining** from the prior
 6,000-update budget. The configuration stays **batch16 × accumulation1 = effective16**. VQGAN and
 the selected SR remain frozen. Every newly collected stage uses the 20-value
 state and at most one NPC; the earlier 90-value recordings are not replay data.
-The current Teacher has **180,071,125 parameters**. A production CUDA probe with
+That Teacher has **180,071,125 parameters**. A production CUDA probe with
 batch 16 and horizon 29 passed all four backward paths in 38.6 seconds, using
 11,919 MiB peak memory; this probe does not establish gameplay quality.
 
@@ -404,7 +605,7 @@ standalone trainer after its existing worker has stopped:
   --target-seconds 15 --updates 5182 --cache-mb 128
 ```
 
-The exact active arguments are also saved in the run's `launch_command.json`.
+The historical arguments are also saved in the run's `launch_command.json`.
 Request a checkpointed stop by creating `stop_training` in this run directory;
 wait until its supervisor and worker exit, then remove that marker before
 resuming. Restart this staged runner, rather than the historical `fresh_pipeline`.
@@ -443,8 +644,8 @@ There is no promised completion time or automatic Student start.
 The approved plan separates component training from the four game-content
 milestones above. It resumed the same run from optimizer step **777**. The
 renderer was fixed at **1444**, after **667 updates**, at the user's request;
-its failed quality gate remains failed. **Dynamics is running**, with its first
-new GPU update saved at **1445**. Model weights and
+its failed quality gate remains failed. **JEPA Dynamics subsequently ran**, with
+its first new GPU update saved at **1445**, before the archive at **1633**. Model weights and
 optimizer history are retained; VQGAN and SR stay frozen, with batch16 and
 accumulation1 unchanged.
 
@@ -607,44 +808,26 @@ If the local monitor is not already running:
 
 ```powershell
 & $twPython -m training_dashboard.local_server `
-  --run-dir training_runs/fresh32_pipeline_20261109 --port 8765
+  --run-dir training_runs/rssm25m_contact_b_20261111 --port 8765
 ```
 
-Open **http://127.0.0.1:8765**. The dashboard follows the active worker and keeps
-codec/SR results separate from world counters. Missing results remain missing.
-The controller also publishes the pointer for the existing monitor directory.
+Open **http://127.0.0.1:8765**. The existing monitor follows its active-run
+pointer to RSSM; starting a second server is unnecessary. Codec/SR results
+remain separate from world counters. Missing results remain missing.
 
 World previews refresh every **10 global optimizer updates**. Their five rows
-show initial context, future Source comparison, free autoregressive model RGB32,
+show initial context (one observed frame for the RSSM preview), future Source
+comparison, free autoregressive model RGB32,
 learned SR128 of that same prediction, and bilinear512 of that same SR output.
 Future Source is display-only; SR never consumes it or corrects world state.
-Codec and SR have separate previews/validation every 100 updates. Full world
-quality checks remain every 500; a light preview is not a passing quality check.
+Codec and SR retain their completed results. RSSM behavior validation runs every
+**100 updates**; a light preview is not a passing quality check.
 
-Request a graceful stop:
-
-```powershell
-New-Item -ItemType File -Path training_runs/fresh32_pipeline_20261109/stop_training -Force
-```
-
-Wait for the active worker to save and exit. Remove existing stop markers from
-the controller and stage directories, then repeat the same controller command:
-
-```powershell
-$freshRuns = @('fresh32_pipeline_20261109', 'vqgan32_20261109',
-               'sr32x4_20261109', 'vjepa175_32px_128k_20261109')
-foreach ($runName in $freshRuns) {
-  $stopRequest = Join-Path (Join-Path $PWD 'training_runs') "$runName/stop_training"
-  if (Test-Path -LiteralPath $stopRequest) { Remove-Item -LiteralPath $stopRequest }
-}
-```
-
-Saved model/optimizer states and the stage ledger are resumed. Do not start
-concurrent trainers for one run. The controller launches hidden child workers
-on Windows and waits for each GPU process to exit before the next stage.
-Keep its foreground terminal open or use a background launcher. The awake
-guard permits **Win+L** and display sleep; computer sleep, sign-out or shutdown
-still interrupts processes.
+Use the `rssm25m_contact_b_20261111/stop_training` marker and saved-argument resume command
+in the [current RSSM section](#current-rssm-dynamics-run). The old staged/fresh
+controllers are archived. Do not start concurrent trainers for one run.
+The worker's awake guard permits **Win+L** and display sleep; computer sleep,
+sign-out or shutdown still interrupts processes.
 
 ## Neural playback and 15-second evaluation
 
@@ -771,6 +954,11 @@ does not relabel those measurements or establish a new pass.
 
 | Directory under `training_runs` | Purpose |
 |---|---|
+| `rssm25m_contact_b_20261111` | Active controlled RSSM25M trial B, resumed 339 with preserved Adam/RNG |
+| `rssm25m_20261111` | Original RSSM initialization, frozen contact data and stopped pilot A archive 368 |
+| `renderer_refine_rssm25m_20261111` | Completed Source Base/RF1 refinement, selected 100; Source quality gate false |
+| `staged_single_20261110/data_navigation_recovery_v1` | Frozen recovery Source clips with separate train/validation |
+| `staged_single_20261110` | Archived JEPA dynamics at 1633 and earlier staged history |
 | `fresh32_pipeline_20261109` | Controller status/commands, fixed subset, object masks |
 | `fresh32_128k_20261109/data` | New paired 32/128 corpus and provenance |
 | `vqgan32_20261109` | Codec metrics/preview, resumable weights and qualified export |

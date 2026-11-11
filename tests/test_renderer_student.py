@@ -542,6 +542,36 @@ class RendererStudentTests(unittest.TestCase):
         for name, value in target.state_dict().items():
             torch.testing.assert_close(value, before[name], rtol=0, atol=0)
 
+    def test_old_renderer_and_base_bundles_accept_only_dynamics_mode_upgrade_without_reverting_it(self):
+        from turkeyworld.base_student import build_base_student, export_base_student, load_base_student
+        old = NeuralWorldModel(tiny_config()).eval()
+        old.flow_renderer.codec_loaded.fill_(True)
+        original_state = {name: value.clone() for name, value in old.state_dict().items()}
+        base_path = self.path.with_name('base.pt')
+        export_base_student(old, build_base_student(old), base_path, training_steps=1)
+        load_base_student(old, base_path)
+        renderer = build_renderer_student(old, steps=1, width=32, depth=1, heads=4, mlp_hidden=64)
+        export_renderer_student(old, renderer, self.path, training_steps=1)
+        upgraded = NeuralWorldModel(tiny_config(player_motion_mode='axis_fraction')).eval()
+        missing, unexpected = upgraded.load_state_dict(original_state, strict=False)
+        self.assertEqual(unexpected, [])
+        self.assertTrue(all(key.startswith('vjepa_backend.player_pass_head.') for key in missing))
+        head = upgraded.vjepa_backend.player_pass_head
+        before = {key: value.clone() for key, value in head.state_dict().items()}
+        load_renderer_student(upgraded, self.path)
+        self.assertEqual(upgraded.config.player_motion_mode, 'axis_fraction')
+        self.assertEqual(upgraded.vjepa_backend.config.player_motion_mode, 'axis_fraction')
+        self.assertIs(upgraded.vjepa_backend.player_pass_head, head)
+        self.assertTrue(hasattr(upgraded, 'base_student'))
+        for key, value in head.state_dict().items():
+            torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+        bad = NeuralWorldModel(tiny_config(player_motion_mode='axis_fraction')).eval()
+        bad.load_state_dict(original_state, strict=False)
+        with torch.no_grad():
+            next(bad.vjepa_backend.renderer.parameters()).add_(.01)
+        with self.assertRaises(ValueError):
+            load_renderer_student(bad, self.path)
+
 
 if __name__ == '__main__':
     unittest.main()

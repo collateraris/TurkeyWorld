@@ -85,15 +85,19 @@ def build_base_student(teacher=None, *, seed=173, config=None):
 
 
 def _require_teacher(teacher):
-    if (teacher.config.kind != 'teacher' or teacher.config.architecture != 'vjepa2_ac'
+    if (teacher.config.kind != 'teacher' or teacher.config.architecture not in {'vjepa2_ac', 'dreamer_rssm'}
             or teacher.config.image_size != 32 or not teacher.config.spatial_combat):
         raise ValueError('Compact Base requires the native32 spatial teacher architecture')
 
 
 def _source_config(config):
     values = asdict(WorldModelConfig(**(asdict(config) if isinstance(config, WorldModelConfig) else config)))
+    if values['architecture'] in {'vjepa2_ac', 'dreamer_rssm'}:
+        values['architecture'] = 'spatial_explicit_world'
+        values = {key: value for key, value in values.items()
+                  if not key.startswith(('vjepa_', 'rssm_'))}
     return {key: value for key, value in values.items() if not key.startswith('flow_')
-            and key not in {'renderer_mode', 'renderer_codec', 'renderer_codec_config'}}
+            and key not in {'renderer_mode', 'renderer_codec', 'renderer_codec_config', 'player_motion_mode'}}
 
 
 def base_condition_identity(teacher):
@@ -141,6 +145,8 @@ def prepare_base_student(teacher, path_or_payload):
     steps = payload.get('training_steps')
     if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
         raise ValueError('Base bundle has no positive completed training steps')
+    from .renderer_student import validate_renderer_source_lineage
+    validate_renderer_source_lineage(teacher, payload['source_teacher_config'])
     if (_source_config(payload['source_teacher_config']) != _source_config(teacher.config)
             or payload.get('conditioning_identity') != base_condition_identity(teacher)):
         raise ValueError('Base bundle source map/geometry/appearance or backbone configuration mismatch')

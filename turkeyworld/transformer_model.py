@@ -340,7 +340,7 @@ class CameraTransformerWorldModel(nn.Module):
             # cached map. Different recurrent histories cannot repaint walls
             # when those inputs are identical. 128D features remain KD-only.
             state = state.to(dtype=map_features.dtype)
-            features = (features.to(dtype=map_features.dtype) if self.config.architecture == "vjepa2_ac"
+            features = (features.to(dtype=map_features.dtype) if self.config.architecture in {"vjepa2_ac", "dreamer_rssm"}
                         else torch.zeros_like(features, dtype=map_features.dtype))
         geometry = self.geometry(state, map_features)
         if self.config.transition_mode == "event_v1":

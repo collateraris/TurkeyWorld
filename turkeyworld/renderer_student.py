@@ -50,14 +50,19 @@ def _world_config(config):
 
 
 def _backbone_config(config, *, codec_replacement=False):
-    return {key: value for key, value in _world_config(config).items()
-            if not key.startswith('flow_') and key != 'renderer_mode'
+    values = _world_config(config)
+    if values['architecture'] in {'vjepa2_ac', 'dreamer_rssm'}:
+        values['architecture'] = 'spatial_explicit_world'
+        values = {key: value for key, value in values.items()
+                  if not key.startswith(('vjepa_', 'rssm_'))}
+    return {key: value for key, value in values.items()
+            if not key.startswith('flow_') and key not in {'renderer_mode', 'player_motion_mode'}
             and not (codec_replacement and key == 'renderer_codec_config')}
 
 
 def _require_teacher(teacher):
     renderer = getattr(teacher, 'flow_renderer', None)
-    if (teacher.config.kind != 'teacher' or teacher.config.architecture != 'vjepa2_ac'
+    if (teacher.config.kind != 'teacher' or teacher.config.architecture not in {'vjepa2_ac', 'dreamer_rssm'}
             or not isinstance(renderer, LatentFlowRenderer)
             or not bool(renderer.codec_loaded)):
         raise ValueError('Renderer student requires a teacher V-JEPA world with a loaded VQGAN codec')
@@ -79,6 +84,32 @@ def renderer_condition_identity(teacher):
         'latent_normalization_sha256': _hash_tensors({'mean': flow.latent_mean, 'std': flow.latent_std}),
         'fixed_noise_sha256': _hash_tensors({'fixed_noise': flow.fixed_noise}),
     }
+
+
+def validate_renderer_source_lineage(teacher, source_config):
+    """A copied renderer may cross dynamics architectures only via migration.
+
+    Tensor identities are still checked independently by every bundle loader.
+    This explicit lineage check prevents a scratch RSSM from claiming a prior
+    teacher's trained image assets through configuration normalization alone.
+    """
+    source = _world_config(source_config)
+    if source['architecture'] == teacher.config.architecture:
+        return
+    report = getattr(teacher, 'rssm_migration', None)
+    if (source['architecture'] != 'vjepa2_ac' or teacher.config.architecture != 'dreamer_rssm'
+            or not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('source_architecture') != 'vjepa2_ac'
+            or report.get('architecture') != 'dreamer_rssm'
+            or report.get('frozen_render_assets_bitexact') is not True
+            or not isinstance(report.get('source_teacher_config'), dict)
+            or _world_config(report['source_teacher_config']) != source):
+        raise ValueError('Cross-architecture renderer reuse requires explicit RSSM migration lineage')
+    identity = report.get('source_renderer_conditioning_identity')
+    current = renderer_condition_identity(teacher)
+    if (not isinstance(identity, dict) or any(identity.get(key) != current[key]
+            for key in ('base_map_sha256', 'appearance_sha256'))):
+        raise ValueError('RSSM migration renderer lineage does not match the copied frozen assets')
 
 
 def _validate_compact_codec(teacher, codec, provenance, *, allow_unqualified_codec=False):
@@ -307,10 +338,17 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
         raise ValueError('Renderer student has no positive completed training steps')
     if payload.get('solver') != 'euler' or not _valid_solver_steps(payload.get('solver_steps')):
         raise ValueError('Renderer bundle must use an integer of one or four Euler steps')
+    validate_renderer_source_lineage(teacher, payload['source_teacher_config'])
     if (_backbone_config(payload['source_teacher_config']) != _backbone_config(teacher.config)
             or payload.get('conditioning_identity') != renderer_condition_identity(teacher)):
         raise ValueError('Renderer bundle source Base/map, appearance, codec or configuration mismatch')
-    config = WorldModelConfig(**payload['config'])
+    # Renderer bundles may predate a dynamics-only head upgrade. Keep that
+    # live mode rather than reverting it to the bundle's historical setting.
+    renderer_config = dict(payload['config'])
+    live_config = asdict(teacher.config)
+    renderer_config.update({key: value for key, value in live_config.items()
+        if key.startswith(('rssm_', 'vjepa_')) or key in {'architecture', 'player_motion_mode'}})
+    config = WorldModelConfig(**renderer_config)
     if (not _valid_solver_steps(config.flow_steps)
             or payload['solver_steps'] != config.flow_steps):
         raise ValueError('Renderer bundle solver metadata differs from its configured sampler')
