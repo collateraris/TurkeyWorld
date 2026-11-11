@@ -2,6 +2,8 @@
 
 English | [Русский](README_RU.md)
 
+Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
+
 TurkeyWorld contains a first-person reference game and an experimental neural
 world model. The active configuration has **one persistent enemy**,
 a **20-value state** and **two participant conditions: player + NPC**. All
