@@ -9,8 +9,8 @@ world model. The active configuration has **one persistent enemy**,
 a **20-value state** and **two participant conditions: player + NPC**. All
 conditions and losses use that one enemy. The active dynamics run is now
 **two DreamerV3-style RSSMs**, the retained player model plus an independent compact
-enemy model, in `training_runs/rssm_enemy20m_combat_20261112`, continued at4482
-with an enlarged20M enemy branch and temporarily combat-only training; the earlier
+enemy model, in `training_runs/rssm_loss_gated_drift_20261112`, continued at5112
+with microbatch64×accumulation4=effective256 and coordinate-drift training; the earlier
 JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
 trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
@@ -18,7 +18,8 @@ trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback i
 The [RSSM run](#current-rssm-dynamics-run) completed its initial **2,000 updates**,
 including 200 distillation updates. Continuation from 2000 is configured to train
 until navigation quality passes, without resetting the model or Adam; that
-navigation history now continues with explicit combat and navigation replay.
+navigation history now continues with explicit combat; no-enemy training replay
+is temporarily disabled while navigation validation remains.
 The [staged curriculum](#staged-game-curriculum)
 records the earlier JEPA experiment. The
 eight-enemy/90-value corpus, checkpoints and measurements below are explicitly
@@ -61,8 +62,64 @@ playback is a separate command below.
 
 ## Current RSSM dynamics run
 
-The active run is `training_runs/rssm_enemy20m_combat_20261112`, monitored at
-**http://127.0.0.1:8765/**. At4482 it retained player/shared weights and Adam,
+The active run is `training_runs/rssm_loss_gated_drift_20261112`, monitored at
+**http://127.0.0.1:8765/**. It retains the complete5112 model, all165 Adam states,
+RNG and actor/component EMA. Batch remains64×4=256; historical128/256 ledgers remain.
+The current temporary `--drift-only-plan` trains Player/NPC XY positions only:
+main own-state trajectories and late XY branches, with fixed1:1 actor weights.
+KL/floor, reconstruction, memory agreement, velocity/heading, wall/pass-BCE,
+combat and spawn objectives are disabled. Their43 dedicated tensors and Adam
+moments are frozen; all165 Adam states are retained. EMA does not normalize
+this loss and its numerical values stay frozen. Initial observed frames still
+initialize memory without a separate reconstruction/posterior objective. See
+[H52](README_HISTORY_EN.md#h52-temporary-xy-drift-only-training).
+
+The mandatory `--loss-gated-curriculum-plan` now selects the main training H:
+
+`16 → 32 → 64 → 96 → 128 → 160 → 192 → 224 → 256 → 288 → 320 → 352 → 384 → 416 → 448 → 450`.
+
+Each stage requires **10 consecutive completed optimizer updates with train loss
+< 0.25** at the current H. The loss includes main and late XY terms and is the
+mean of all four 64-example microbatches; a microbatch is not a separate success.
+A loss **≥ 0.25** resets the streak. The tenth success advances exactly one stage,
+whose counter starts at zero. The final stage continues at H450. EMA values stay
+frozen and do not scale this raw coordinate objective. The dashboard shows H and
+**N/10**. Model weights, Adam, RNG and historical clocks are preserved from5112.
+
+The active gate supersedes the **500-update schedule** and **forced H450 every
+fifth update** described below. Those clocks/plans remain checkpoint history.
+There is no forced long optimizer update. The existing eight-prefix no-grad scout
+may still run to450 to select 16-step XY recovery branches; this is not an H450
+training update or a gate success. Full held-out450 validation remains separate,
+before SGD and every250 global updates. A training-stage pass does not establish
+15-second gameplay quality. See
+[H53](README_HISTORY_EN.md#h53-loss-gated-horizons-with-ten-consecutive-updates).
+
+The following schedule and replay details describe the preceding phases only.
+The preceding5014 phase enabled Player/Enemy RSSM memory agreement at1/4/8/16, separate
+NPC speed/direction losses and balanced player per-axis displacement supervision.
+XY accumulation carries gradients within TBPTT16; numerical forward states and
+detached neural conditioning are preserved. Future RGB belongs exclusively to
+stopped memory targets. The pinned `--coordinate-curriculum-plan` schedules
+16/32/64/128/256/450 transitions; the500th new update already uses450.
+Full450 validation runs before SGD, every250 global updates and after local
+100/200/300/400/500 updates. `best_drift.json` selects full model/Adam weights
+using Source life masks, including NPCs the model incorrectly calls missing.
+This criterion remains separate from the overall quality gate. See
+[H49](README_HISTORY_EN.md#h49-coordinate-drift-training-and-memory-agreement-from-the-first-update).
+After long-horizon regression, `--replay-curriculum-plan` adds a450-transition
+update every fifth new optimizer step; the others retain the scheduled short
+horizon. The original46/500 clock continues. On the first of four short
+microbatches, eight actual own trajectories continue to450 without observations
+or h/z resets; eight recovery slots are reserved for legal late branches before
+walls, after spawn, and at motion errors. Long updates reuse their existing
+own prefixes. EMA values are separated into short/450 banks, fixed throughout
+four microbatches. The composite phase updated the selected bank after one Adam
+commit; the current XY-only phase freezes both banks' numerical values.
+Full450 validation and historical best5014 remain retained.
+Batch-dependent terms use microbatch64, not globally pooled256. Resume also
+requires the saved `--batch256-plan`; see [H47](README_HISTORY_EN.md#h47-effective256-and-an-exact-resume-after-a-status-file-lock). At4482 the preceding
+run retained player/shared weights and Adam,
 RNG and data clocks, enlarged the enemy RSSM, and disabled no-enemy navigation
 training temporarily. Exact-shape enemy Adam states are retained;29 resized
 states start fresh. At4430 the previous dual run retained the player model, Adam/RNG,
@@ -70,7 +127,8 @@ curriculum and data clocks, and appended a fresh independent enemy RSSM and Adam
 group. Player memory has **1,008 deterministic values +32 categorical variables
 with32 classes =2,032 FP32 values**. Enemy memory has **1,344 +8×32 =1,600**;
 combined memory is **3,632**. Dynamics contain **45,007,371 parameters**, including
-the shared map and training-only observation decoder; **43,287,657 are trainable**.
+the shared map and training-only observation decoder; the current XY-only phase
+trains **40,065,236 parameters**. The preceding composite phase trained43,287,657.
 The retained player branch contributes25,007,048 and the resized enemy branch20,000,323.
 The earlier first persisted dual checkpoint4440 verified10 updates, all50 new
 enemy parameter tensors changed and all1156 frozen tensors bitexact. This is not
@@ -84,31 +142,36 @@ The first full combat-only update4483 completed and was saved. The independent
 navigation slot4485. Only combat
 episodes with one enemy train the dynamics now; Player and Enemy both continue
 learning. Navigation counters and its EMA bank retain their history but do not
-advance. Navigation validation remains a forgetting check. The loss protocol
-and three-group EMA are unchanged; no new navigation/combat qualification is
+advance. Navigation validation remains a forgetting check. The combat-only
+schedule is preserved under v6; no new navigation/combat qualification is
 claimed. The saved command includes the mandatory `--combat-only-plan` and all
 previous revision pins. See
 [H43](README_HISTORY_EN.md#h43-a20m-enemy-rssm-and-temporary-combat-only-training).
 
-The page separately shows **Player loss / Enemy loss / Interaction loss** as
-their weighted contributions to the actual total. Raw group sums retain their
-original internal component coefficients but exclude constant KL floors.
-Normalized loss is raw/scale, and weighted loss is normalized×priority +floor.
-Each priority is1. Scale is the previous committed EMA, decay0.95, minimum0.1,
-with independent combat/navigation banks. Scales remain fixed across all450
-steps, TBPTT16 chunks and four microbatches, and update once after Adam commits.
-The fixed player/enemy KL floors1.1+1.1 remain unscaled and outside the EMA.
-First saved4455 calibrated the combat bank at scale1; the first update in each
-environment bank calibrates independently. This new loss unit is not directly
-comparable with the previous total or evidence of improved gameplay. Details:
-[H42](README_HISTORY_EN.md#h42-separate-player-enemy-interaction-loss-normalization).
+The page shows **Player loss / Enemy loss / Interaction loss**. Current pure XY
+uses fixed coordinate weights, with Interaction and KL-floor zero. The following
+EMA formula applies only to historical composite v6 training. In v6, each actor's BASE uses
+its inherited actor EMA; spawn and recovery use independent component EMAs and
+calibrated priorities. Component contributions are added **after** BASE
+normalization. Thus actor raw total is not divided by one actor scale:
+`actor weighted = actor priority × base_raw / actor scale + sum(component weighted) + KL-floor`,
+where `component weighted = component priority × component raw / component scale`.
+Actor scale/effective weight describe BASE only. Actor priorities remain1;
+component priorities come from the pinned measured-gradient probe. All scales
+use lagged EMA0.95/minimum0.1, stay fixed across the current horizon/TBPTT16/four microbatches,
+and update once after Adam commits. The fixed KL floors1.1+1.1 remain unscaled
+and outside EMA. First saved4945 verifies real training; its new total units
+do not establish quality improvement. Baseline4944 precedes SGD; additional
+checks after100/250 new updates are pending. Details:
+[H46](README_HISTORY_EN.md#h46-v6-combat-supervision-and-independent-component-normalization).
 
 This is a PyTorch adaptation of the RSSM in the
 [official DreamerV3 implementation](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/rssm.py),
 described in the [DreamerV3 paper](https://arxiv.org/abs/2301.04104).
 It uses grouped recurrent gates, straight-through categorical samples, 0.01
 uniform mixing and separately stopped dynamics/representation KL with a
-one-nat floor. Runtime uses deterministic argmax categories. There is **no EMA
+one-nat floor; these KL objectives and floor are disabled in the current XY-only
+phase. Runtime uses deterministic argmax categories. There is **no EMA
 target encoder, actor or critic**: this run trains the world model, rather than
 the full Dreamer reinforcement-learning system. Its explicit 20-value game
 state, known action/clock rules and learned axis pass fractions remain part of
@@ -143,7 +206,7 @@ own450 guards are retained. `--combat-recovery-plan` is mandatory on resume;
 the saved command below already includes it. Results:
 [H35](README_HISTORY_EN.md#h35-short-autonomous-branches-balanced-spawns-and-negative-attacks).
 
-Since saved update4399, the active RSSM uses **microbatch32 × accumulation4 =
+From4399 through4981, the RSSM used **microbatch32 × accumulation4 =
 effective128**, with the existing Adam/RNG and450/TBPTT16 protocol preserved.
 Each combat microbatch32 selects8 spawn,8 attack-negative,3 near-hit,3 mid-hit,
 3 far-hit,3 fired-miss and4 legacy windows. Target CE uses actual Source shots
@@ -196,16 +259,19 @@ The new immutable plan is `quality_revision_ssim091_mae2p5.json`; the page displ
 MAE on the0–255 scale. Gameplay weights are not replaced automatically.
 
 The latest user-requested paired game is the experimental session
-`training_runs/paired_compare_20261111T183210Z_tcombat`, using immutable weights from
-`training_runs/paired_compare_20261111T181714Z_latest_sr`: RSSM4250, final
-Base/RF6000 (RF cumulative15600, Euler1), frozen compact codec1900 and SRbest18100.
+`training_runs/paired_compare_20261112T064826Z_latest_enemy20m`, using immutable
+world4944, tiny renderer selected8300/RF cumulative17900 (Euler1), compact
+codec11800 and SR selected2000/cumulative40100 snapshots.
 The actual FP32 launch is recorded in its
-[launch command](training_runs/paired_compare_20261111T183210Z_tcombat/launch_command.json);
-the earlier prepared command is superseded. It starts in navigation with a shared
-camera: only the Source player's camera is used for display; NPC and HP remain
-neural predictions, and own RSSM state/memory receive no Source correction.
+[launch command](training_runs/paired_compare_20261112T064826Z_latest_enemy20m/launch.json).
+It opened in combat with autonomous, independent Source/neural trajectories;
+ready and the visible window were confirmed. The snapshot predates v6 training
+and is not updated automatically. The recorded trial later completed450 steps
+and closed; it was not reopened. In optional shared-camera diagnostics only
+the Source player's camera is used for display; own RSSM state/memory receive
+no Source correction.
 **T** switches navigation/combat, **Q/left** turn left, **E/right** turn right, **W/S/up/down** move,
-**A/D** strafe, **Space/left click** fire, **Tab** switches to the autonomous camera,
+**A/D** strafe, **Space/left click** fire, **Tab** toggles autonomous/shared camera,
 **P** pauses, **R** resets the trial explicitly and **Esc** closes it. T preserves
 player/time/h/z while explicitly initializing the one-NPC scene slot. This is a
 user-authorized experimental test, not a quality or15-second gameplay pass.
@@ -227,7 +293,7 @@ Dynamics, renderer and SR workers are independent. To resume one after a checkpo
 use that worker's saved command; do not launch a duplicate:
 
 ```powershell
-$rssmRun = 'training_runs/rssm_enemy20m_combat_20261112'
+$rssmRun = 'training_runs/rssm_loss_gated_drift_20261112'
 New-Item -ItemType File -Path (Join-Path $rssmRun 'stop_training') -Force
 # Wait for this worker to exit before removing its marker and resuming.
 Remove-Item -LiteralPath (Join-Path $rssmRun 'stop_training')
@@ -242,13 +308,17 @@ $renderCommand = @($renderLaunch.argv)
 & $twPython @($renderCommand[1..($renderCommand.Count - 1)])
 ```
 
-The combat command runs `turkeyworld.train_rssm_combat --updates 0 --batch 32 --accumulation-steps 4`;
-0 means continue until quality, not zero training. The renderer command runs
+The combat command runs `turkeyworld.train_rssm_combat --updates 0 --batch 64 --accumulation-steps 4`;
+0 means unbounded training; the active gate selects H and the final H450 continues
+until a checkpointed stop is requested. The renderer command runs
 `turkeyworld.train_renderer_enemy --steps 8000 --batch 16`, with the saved
 `--combat-data-root`, `--appearance-data-root` and source-latent weight0.1.
 Its explicit distance sampler remains enabled; crop loss remains off.
 RSSM resume also requires the saved `--batch-revision-plan`, `--preview-assets-plan`
-`--preview-assets-revision-plan`, `--loss-balance-plan` and `--combat-only-plan`;
+`--preview-assets-revision-plan`, `--loss-balance-plan`, `--combat-only-plan`
+`--combat-v6-plan`, `--batch256-plan`, `--coordinate-curriculum-plan`,
+`--replay-curriculum-plan`, `--drift-only-plan` and the mandatory
+`--loss-gated-curriculum-plan`;
 do not substitute the old batch16 command. Their stop markers and counters are independent. The sections below preserve
 the earlier navigation-only initialization and revision history.
 
@@ -1060,14 +1130,21 @@ If the local monitor is not already running:
 
 ```powershell
 & $twPython -m training_dashboard.local_server `
-  --run-dir training_runs/rssm_enemy20m_combat_20261112 --port 8765
+  --run-dir training_runs/rssm_loss_gated_drift_20261112 --port 8765
 ```
 
 Open **http://127.0.0.1:8765**. The existing monitor follows its active-run
 pointer to RSSM; starting a second server is unnecessary. Codec/SR results
 remain separate from world counters. Missing results remain missing.
 
-World previews refresh every **10 global optimizer updates**. Their five rows
+In the active gated run, **“Что показывает модель” generates the current H
+transitions** and displays four offsets spanning1..H: H16 shows1/6/11/16,
+H32 shows1/11/22/32. Preview refreshes every **10 global optimizer updates** and
+immediately after a stage advances. An old-H image is hidden until the new preview
+is ready. `preview.json` records H, generated transitions and display offsets;
+four displayed images do not shorten the generated rollout to four transitions.
+Full validation remains a separate450-transition check every250 global updates.
+The five rows
 show initial context (one observed frame for the RSSM preview), future Source
 comparison, free autoregressive model RGB32,
 learned SR128 of that same prediction, and bilinear512 of that same SR output.
@@ -1077,7 +1154,7 @@ runs every **250 global updates** and combines separate navigation/combat gates;
 the original budget used100. Parallel Base/RF image training is monitored at
 **http://127.0.0.1:8772/**. A light preview is not a passing quality check.
 
-Use the `rssm_enemy20m_combat_20261112/stop_training` marker and saved-argument resume command
+Use the `rssm_loss_gated_drift_20261112/stop_training` marker and saved-argument resume command
 in the [current RSSM section](#current-rssm-dynamics-run). The old staged/fresh
 controllers are archived. Do not start concurrent trainers for one run.
 The worker's awake guard permits **Win+L** and display sleep; computer sleep,
@@ -1220,7 +1297,13 @@ does not relabel those measurements or establish a new pass.
 
 | Directory under `training_runs` | Purpose |
 |---|---|
-| `rssm_enemy20m_combat_20261112` | Active20M enemy+retained player from4482; combat-only training, navigation validation retained |
+| `rssm_b256_20261112` | Historical64×4=256 continuation from4981 through5014 |
+| `rssm_drift_curriculum_20261112` | History5014–5060: memory agreement, XY credit and16→450 curriculum |
+| `rssm_coordinate_replay_20261112` | History5060–5079:20% long updates and late own-prefix branches |
+| `rssm_loss_gated_drift_20261112` | Active from5112: pure XY;10 consecutive losses<0.25 per stage, no forced long updates |
+| `rssm_drift_only_20261112` | History5079–5112: pure XY with the former short/450 replay schedule |
+| `rssm_components_v6_20261112` | Previous128 continuation4944→4981; component EMA and late-event supervision |
+| `rssm_enemy20m_combat_20261112` | Previous20M enemy continuation4482→4944; navigation validation retained |
 | `rssm_dual_balanced_20261111` | Previous dual RSSMs4454→4482; separate task-loss EMA retained in the new run |
 | `rssm_dual_20261111` | Dual architecture4430→4454; retained player Adam/RNG and new enemy group |
 | `rssm25m_combat_20261111` | Previous single-RSSM combat continuation3873→4430, archived without rollback |

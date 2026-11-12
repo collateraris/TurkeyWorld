@@ -6,6 +6,7 @@ corrects an autonomous state, observes future RGB, or chooses runtime spawns.
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -15,6 +16,56 @@ import shutil
 import numpy as np
 
 from .spawn import SPAWN_ANCHORS
+
+
+ATTACK_BALANCED_PROTOCOL = 'source_attack_positive_negative_balanced_v2'
+
+
+def upgrade_attack_balanced_sampler_state(previous):
+    """Explicitly retain the complete old ledger; caller-owned RNG is untouched."""
+    if previous.get('version') == 2:
+        return deepcopy(previous)
+    if (set(previous) != {'draws', 'negative_draws', 'anchor_counts'}
+            or type(previous['draws']) is not int or type(previous['negative_draws']) is not int
+            or previous['draws'] < 0 or previous['draws'] != 4*previous['negative_draws']
+            or any(type(value) is not int or value < 0 for value in previous['anchor_counts'].values())
+            or sum(previous['anchor_counts'].values()) != previous['negative_draws']):
+        raise ValueError('Cannot upgrade an incomplete legacy recovery sampler ledger')
+    retained = deepcopy(previous)
+    return {**deepcopy(previous), 'version': 2, 'protocol': ATTACK_BALANCED_PROTOCOL,
+        'v2_draws': 0, 'positive_draws': 0, 'retained_legacy_ledger': retained,
+        'retained_legacy_ledger_sha256': hashlib.sha256(json.dumps(retained, sort_keys=True).encode()).hexdigest()}
+
+
+def _attack_strata(saved, labels):
+    """Recorded attacks/eligibility only; near-wall distance never labels attacks."""
+    states = saved['states']; old, new = states[:-1, 8:18], states[1:, 8:18]
+    dt = float(saved['dt'])
+    eligible = ((old[:, 5] >= .5) & (old[:, 4] > 0) & (new[:, 5] >= .5) & (new[:, 4] > 0)
+        & (states[:-1, 4] > 0) & (old[:, 6]-dt/1.2 <= 1e-6)
+        & (((old[:, :2]-states[1:, :2])*16)**2).sum(-1).__le__(1.+1e-6))
+    if (labels['attack_positive'] & ~eligible).any():
+        raise ValueError('Recorded positive attack violates aligned Source melee eligibility')
+    cells = np.argwhere(saved['map'] > 0)[:, ::-1]
+    near = np.zeros(len(old), bool)
+    if len(cells):
+        for centers in (old[:, :2]*16, states[1:, :2]*16):
+            gap = np.maximum(np.maximum(cells[None]-centers[:, None], centers[:, None]-(cells[None]+1)), 0.)
+            near |= (gap*gap).sum(-1).min(-1) <= .75**2
+    occluded = np.zeros(len(old), bool)
+    if 'source_hard_negative_flags' in saved:
+        flags = np.asarray(saved['source_hard_negative_flags'])
+        if flags.shape != (len(old), 1) or (flags[:, 0].astype(bool) & ~labels['attack_negative']).any():
+            raise ValueError('Recorded occluded negatives do not match genuine Source eligibility')
+        occluded = flags[:, 0].astype(bool)
+        if 'source_los_clear' in saved:
+            clear = np.asarray(saved['source_los_clear'])
+            if clear.shape != flags.shape or (occluded & clear[:, 0].astype(bool)).any():
+                raise ValueError('Recorded Source occlusion flags conflict')
+    return {'positive_near_wall': labels['attack_positive'] & near,
+        'positive_open': labels['attack_positive'] & ~near,
+        'negative_occluded': labels['attack_negative'] & occluded,
+        'negative_other': labels['attack_negative'] & ~occluded}
 
 
 def file_sha(path):
@@ -121,11 +172,17 @@ def event_windows(event_indices,frames,context,horizon):
 
 class RecoveryCombatSampler:
     """B16/B32 quarter spawn, quarter hard negatives, half legacy mix."""
-    def __init__(self,data,*,context=1,horizon=16,cache_path=None,target_distance_balanced=False):
+    def __init__(self,data,*,context=1,horizon=16,cache_path=None,target_distance_balanced=False,
+                 attack_positive_balanced=False):
         from .rssm_combat_protocol import CombatTrainingSampler
         if data.split!='train':raise ValueError('Recovery sampler accepts TRAIN only')
         if not isinstance(target_distance_balanced,bool):
             raise ValueError('Target distance balancing must be an explicit boolean')
+        if not isinstance(attack_positive_balanced, bool) or attack_positive_balanced and not target_distance_balanced:
+            raise ValueError('Attack-positive balancing requires explicit target-distance B32 sampling')
+        self.attack_positive_balanced = attack_positive_balanced
+        self.attack_groups = {name: [] for name in ('positive_near_wall', 'positive_open', 'negative_occluded', 'negative_other')}
+        self.attack_masks = []; self.attack_event_counts = Counter()
         self.target_distance_balanced=target_distance_balanced
         self.target_groups={name:[] for name in ('hit_near','hit_mid','hit_far','fired_miss','wall_miss','other_miss')}
         self.target_masks=[];self.target_event_counts=Counter()
@@ -135,6 +192,13 @@ class RecoveryCombatSampler:
         for episode,record in enumerate(self.base.base.records):
             with np.load(record['path'],allow_pickle=False) as saved:
                 states=saved['states'];labels=source_recovery_labels(states,saved['attack_flags'],float(saved['dt']))
+                if self.attack_positive_balanced:
+                    masks = _attack_strata(saved, labels)
+                    self.attack_masks.append(masks)
+                    for name, mask in masks.items():
+                        self.attack_event_counts[name] += int(mask.sum())
+                        self.attack_groups[name].extend((episode, int(start)) for start in
+                            event_windows(np.flatnonzero(mask), len(states), context, horizon))
                 if self.target_distance_balanced:
                     events,hits,actions=saved['events'],saved['hit_ids'],saved['actions']
                     shot=events[:,0]>=.5;hit=shot&(hits>=0);miss=shot&(hits<0)
@@ -168,24 +232,60 @@ class RecoveryCombatSampler:
             missing=[name for name in ('hit_near','hit_mid','hit_far','fired_miss')if not len(self.target_groups[name])]
             if missing:raise ValueError('Target-balanced TRAIN pool is missing real future Source events: '+','.join(missing))
         self.anchor_counts={key:0 for key in self.anchor_groups};self.negative_draws=0;self.draws=0;self.last_sample=None
+        self.v2_draws = self.positive_draws = 0
+        self.retained_legacy_ledger = {'draws': 0, 'negative_draws': 0, 'anchor_counts': self.anchor_counts.copy()}
+        if self.attack_positive_balanced:
+            self.attack_groups = {name: np.asarray(rows, np.int64).reshape(-1, 2) for name, rows in self.attack_groups.items()}
+            if not any(len(self.attack_groups[name]) for name in ('positive_near_wall', 'positive_open')):
+                raise ValueError('Attack-balanced TRAIN pool needs genuine future positive attacks')
 
     def sample(self,count,rng):
-        if not isinstance(count,int) or isinstance(count,bool) or count not in (16,32):
-            raise ValueError('Recovery quotas require B16 or B32')
-        if self.target_distance_balanced and count!=32:
-            raise ValueError('Target-distance recovery quotas require explicit B32')
+        if (not isinstance(count,int) or isinstance(count,bool) or count not in (16,32,64)
+                or count == 64 and not self.attack_positive_balanced):
+            raise ValueError('Recovery quotas require B16/B32, or explicit positive-balanced B64')
+        if self.target_distance_balanced and count!=32 and not (self.attack_positive_balanced and count==64):
+            raise ValueError('Target-distance recovery quotas require explicit B32 or positive-balanced B64')
+        factor = count//32 if self.attack_positive_balanced else 1
         quarter=count//4
         spawned=[];chosen=[]
         for _ in range(quarter):
             lowest=min(self.anchor_counts.values());tied=[key for key,n in self.anchor_counts.items() if n==lowest]
             key=int(rng.choice(tied));group=self.anchor_groups[key]
             spawned.append(group[int(rng.integers(len(group)))]);chosen.append(key);self.anchor_counts[key]+=1
-        negative=self.negatives[rng.integers(len(self.negatives),size=quarter)]
+        attack_selection=[];attack_subquotas={}
+        if self.attack_positive_balanced:
+            selected = {}
+            for family in ('positive', 'negative'):
+                candidates = [name for name in self.attack_groups if name.startswith(family+'_') and len(self.attack_groups[name])]
+                if not candidates: raise ValueError('Attack-balanced TRAIN pool is missing '+family)
+                quota = {name: quarter//len(candidates)+(i < quarter%len(candidates)) for i, name in enumerate(candidates)}
+                if family == 'negative' and len(candidates) == 2:
+                    quota = {'negative_occluded': 6*factor, 'negative_other': 2*factor}
+                pairs = []
+                for name, size in quota.items():
+                    attack_subquotas[name] = size
+                    group = self.attack_groups[name]
+                    for pair in group[rng.integers(len(group), size=size)]:
+                        episode, start = map(int, pair); first = start+self.context-1
+                        attack_selection.append({'requested': name, 'episode': episode, 'start': start,
+                            'source_transition_indices': (np.flatnonzero(self.attack_masks[episode][name][first:first+self.horizon])+first).tolist()})
+                        pairs.append(pair)
+                selected[family] = np.asarray(pairs, np.int64)
+            negative, positive = selected['negative'], selected['positive']
+        else:
+            negative=self.negatives[rng.integers(len(self.negatives),size=quarter)]
         target_selection=[];miss_quota={}
         if self.target_distance_balanced:
-            groups=[('hit_near',3),('hit_mid',3),('hit_far',3)]
+            per_hit = 2*factor if self.attack_positive_balanced else 3
+            groups=[('hit_near',per_hit),('hit_mid',per_hit),('hit_far',per_hit)]
             wall_present=bool(len(self.target_groups['wall_miss']));other_present=bool(len(self.target_groups['other_miss']))
-            if wall_present and other_present:miss_quota={'wall_miss':2,'other_miss':1}
+            if self.attack_positive_balanced:
+                # Both miss strata rotate across consecutive B32 draws when present.
+                choose_wall = wall_present and (not other_present or (self.v2_draws//32)%2 == 0)
+                miss_quota=({'wall_miss': int(choose_wall), 'other_miss': int(not choose_wall)} if factor == 1
+                    else {'wall_miss': 1 if wall_present and other_present else 2*int(wall_present),
+                          'other_miss': 1 if wall_present and other_present else 2*int(not wall_present)})
+            elif wall_present and other_present:miss_quota={'wall_miss':2,'other_miss':1}
             elif wall_present:miss_quota={'wall_miss':3,'other_miss':0}
             else:miss_quota={'wall_miss':0,'other_miss':3}
             groups+=list(miss_quota.items());targeted=[]
@@ -197,10 +297,12 @@ class RecoveryCombatSampler:
                     target_selection.append({'requested':name,'episode':episode,'start':start,
                         'source_transition_indices':(np.flatnonzero(self.target_masks[episode][name][first:first+self.horizon])+first).tolist()})
                     targeted.append(pair)
-            ordinary=np.concatenate([np.asarray(targeted,np.int64),self.base.sample(4,rng)])
+            ordinary=np.concatenate([np.asarray(targeted,np.int64),self.base.sample(factor if self.attack_positive_balanced else 4,rng)])
         else:
             ordinary=self.base.sample(count//2,rng)
-        pairs=np.concatenate([np.asarray(spawned),negative,ordinary]);rng.shuffle(pairs)
+        arrays = [np.asarray(spawned), negative]
+        if self.attack_positive_balanced: arrays.append(positive)
+        pairs=np.concatenate([*arrays,ordinary]);rng.shuffle(pairs)
         self.draws+=count;self.negative_draws+=quarter
         self.last_sample={'version':1,'quota':{'spawn':quarter,'attack_negative':quarter,'ordinary_combat':count//2},
             'selected_spawn_anchors':chosen,'anchor_draw_counts':dict(self.anchor_counts),
@@ -213,27 +315,58 @@ class RecoveryCombatSampler:
                     number=int(mask[first:first+self.horizon].sum())
                     event_counts[name]+=number;window_counts[name]+=int(number>0)
             self.last_sample.update(target_distance_balanced_sampling=True,
-                target_subquotas={'hit_near':3,'hit_mid':3,'hit_far':3,'fired_miss':3,'legacy':4},
+                target_subquotas=({'hit_near':2*factor,'hit_mid':2*factor,'hit_far':2*factor,'fired_miss':factor,'legacy':factor} if self.attack_positive_balanced
+                    else {'hit_near':3,'hit_mid':3,'hit_far':3,'fired_miss':3,'legacy':4}),
                 fired_miss_subquotas=miss_quota,target_selected_windows=target_selection,
                 target_future_event_counts=dict(event_counts),target_future_window_counts=dict(window_counts),
                 target_counts_include_duplicate_draws=True,target_cohorts_are_nonexclusive=True)
+        if self.attack_positive_balanced:
+            self.v2_draws += count; self.positive_draws += quarter
+            self.last_sample.update(version=2, protocol=ATTACK_BALANCED_PROTOCOL,
+                quota={'spawn':quarter,'attack_negative':quarter,'attack_positive':quarter,'shooting_replay':quarter},
+                attack_positive_balanced=True, attack_subquotas=attack_subquotas,
+                attack_selected_windows=attack_selection,
+                actual_attack_future_event_counts={name: int(sum(self.attack_masks[int(ep)][name][int(start)+self.context-1:int(start)+self.context-1+self.horizon].sum()
+                    for ep,start in pairs)) for name in self.attack_groups},
+                attack_counts_include_duplicate_draws=True)
         return pairs
 
     def state_dict(self):
-        return {'draws':self.draws,'negative_draws':self.negative_draws,'anchor_counts':self.anchor_counts.copy()}
+        result = {'draws':self.draws,'negative_draws':self.negative_draws,'anchor_counts':self.anchor_counts.copy()}
+        if self.attack_positive_balanced:
+            result.update(version=2, protocol=ATTACK_BALANCED_PROTOCOL, v2_draws=self.v2_draws, positive_draws=self.positive_draws,
+                retained_legacy_ledger=deepcopy(self.retained_legacy_ledger),
+                retained_legacy_ledger_sha256=hashlib.sha256(json.dumps(self.retained_legacy_ledger,sort_keys=True).encode()).hexdigest())
+        return result
 
     def restore_state(self,state):
+        if self.attack_positive_balanced:
+            old = state.get('retained_legacy_ledger', {})
+            if (state.get('version') != 2 or state.get('protocol') != ATTACK_BALANCED_PROTOCOL
+                    or type(state.get('v2_draws')) is not int or state['v2_draws'] < 0 or state['v2_draws']%32
+                    or state.get('positive_draws') != state['v2_draws']//4
+                    or old.get('draws',-1)+state['v2_draws'] != state['draws']
+                    or old.get('negative_draws',-1)+state['v2_draws']//4 != state['negative_draws']
+                    or hashlib.sha256(json.dumps(old,sort_keys=True).encode()).hexdigest() != state.get('retained_legacy_ledger_sha256')):
+                raise ValueError('Attack-positive sampler requires explicit version2 ledger upgrade/consistent counters')
+        elif state.get('version') == 2:
+            raise ValueError('Cannot silently disable the saved positive-attack sampler')
         counts={int(k):v for k,v in state['anchor_counts'].items()}
         if (set(counts)!=set(self.anchor_counts) or any(not isinstance(n,int) or n<0 for n in counts.values())
                 or sum(counts.values())!=state['negative_draws'] or state['draws']!=4*state['negative_draws']):
             raise ValueError('Recovery sampler ledger differs from its exact1/4+1/4+1/2 quotas')
         self.anchor_counts=counts;self.draws=state['draws'];self.negative_draws=state['negative_draws']
+        if self.attack_positive_balanced:
+            self.v2_draws, self.positive_draws = state['v2_draws'], state['positive_draws']
+            self.retained_legacy_ledger = deepcopy(state['retained_legacy_ledger'])
 
     def summary(self,*,batch_size=16):
-        if not isinstance(batch_size,int) or isinstance(batch_size,bool) or batch_size not in (16,32):
-            raise ValueError('Recovery summary requires B16 or B32')
-        if self.target_distance_balanced and batch_size!=32:
-            raise ValueError('Target-balanced summary requires B32')
+        if (not isinstance(batch_size,int) or isinstance(batch_size,bool) or batch_size not in (16,32,64)
+                or batch_size == 64 and not self.attack_positive_balanced):
+            raise ValueError('Recovery summary requires B16/B32, or explicit positive-balanced B64')
+        if self.target_distance_balanced and batch_size!=32 and not (self.attack_positive_balanced and batch_size==64):
+            raise ValueError('Target-balanced summary requires B32 or positive-balanced B64')
+        factor = batch_size//32 if self.attack_positive_balanced else 1
         result={'version':1,'horizon':self.horizon,'context':self.context,
             'quota':{'spawn':batch_size//4,'attack_negative':batch_size//4,'ordinary':batch_size//2},
             'source_event_counts':dict(self.event_counts),'anchor_window_counts':{str(k):len(v) for k,v in self.anchor_groups.items()},
@@ -247,6 +380,17 @@ class RecoveryCombatSampler:
                 target_distance_geometry='Previous Source NPC position to next Source player firing position',
                 target_window_definition='Event strictly inside future[start+context-1:start+context-1+horizon]',
                 target_miss_policy='Two verified wall-occluded and one other fired miss when both exist; otherwise three available genuine fired misses')
+        if self.attack_positive_balanced:
+            result.update(version=2, protocol=ATTACK_BALANCED_PROTOCOL, attack_positive_balanced=True,
+                quota={'spawn':8*factor,'attack_negative':8*factor,'attack_positive':8*factor,'shooting_replay':8*factor},
+                target_subquotas={'hit_near':2*factor,'hit_mid':2*factor,'hit_far':2*factor,'fired_miss':factor,'legacy':factor},
+                attack_source_event_counts=dict(self.attack_event_counts),
+                attack_window_counts={name:len(rows) for name,rows in self.attack_groups.items()},
+                attack_positive_policy='Equal present near-wall/open positive window quotas; near-wall means center-to-solid-tile distance <=.75tiles',
+                attack_negative_policy=('Six recorded Source-occluded and two other eligible negative windows when both exist; otherwise eight available genuine negatives. Other is not a clear-LOS label.' if factor == 1 else
+                    'Twelve recorded Source-occluded and four other eligible negative windows when both exist; otherwise sixteen available genuine negatives. Other is not a clear-LOS label.'),
+                target_miss_policy=('One genuine miss per draw, alternating verified wall and other strata when both exist' if factor == 1 else
+                    'Two genuine misses per draw: one verified wall and one other when both exist, otherwise two available genuine misses'))
         return result
 
 

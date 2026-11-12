@@ -15,12 +15,13 @@ from .aligned_training import motion_error_parts, spawn_supervision_statistics
 from .combat_objectives import (DEFAULT_DAMAGE_WEIGHT, DEFAULT_DEATH_WEIGHT,
                                 combat_transition_losses)
 from .structured_state import ENTITY_DIM, ENTITY_SLOTS, GLOBAL_DIM, STATE_DIM
+from .rssm_kinematic_losses import prepare_kinematic_supervision, kinematic_supervised_terms
 
 
 def prepare_combat_supervision(batch, context=1, *, simulation_hz=30., none_class_weight=.2,
                                attack_pos_weight=4., npc_motion_weight=5., spawn_weight=1.,
                                damage_weight=DEFAULT_DAMAGE_WEIGHT, death_weight=DEFAULT_DEATH_WEIGHT,
-                               game_training_v5=True, target_supervision='legacy'):
+                               game_training_v5=True, target_supervision='legacy', kinematic_protocol=None):
     """Prepare loss-only Source masks/denominators over the complete B×H tape."""
     if not isinstance(context, int) or isinstance(context, bool) or context < 1:
         raise ValueError('Combat context must be a positive integer')
@@ -76,6 +77,9 @@ def prepare_combat_supervision(batch, context=1, *, simulation_hz=30., none_clas
             'continuing_count': continuing.sum(), 'spawn_count': revived.sum(), 'killable_count': killable.sum(),
             'attack_positive_count': positive_count, 'attack_negative_count': negative_count,
             'attack_class_mass': class_mass.clamp_min(1e-6)}
+    if kinematic_protocol is not None:
+        supervision['kinematic_supervision'] = prepare_kinematic_supervision(previous, targets, actions,
+            kinematic_protocol=kinematic_protocol, simulation_hz=simulation_hz)
     if target_supervision == 'shot_distance_balanced':
         hit = shot & (hits >= 0)
         miss = shot & (hits < 0)
@@ -159,9 +163,14 @@ def combat_supervised_terms(prior, previous, target, action, *, supervision, ind
                                 /supervision['continuing_count'].clamp_min(1))
     spawn = spawn_supervision_statistics(prior, previous, target)
     terms['combat_spawn'] = supervision['spawn_weight']*spawn['spawn_sum']/supervision['spawn_count'].clamp_min(1)
+    kinematic_diagnostics = {}
+    if 'kinematic_supervision' in supervision:
+        kinematic_terms, kinematic_diagnostics = kinematic_supervised_terms(prior['state'],
+            supervision=supervision['kinematic_supervision'], index=index)
+        terms.update(kinematic_terms)
     if not all(bool(torch.isfinite(value)) for value in terms.values()):
         raise FloatingPointError('Nonfinite aligned RSSM combat objective')
-    diagnostics = {**target_diagnostics, 'combat_source_hit_count': (supervision['hit_ids'][:, index] >= 0).sum().detach(),
+    diagnostics = {**target_diagnostics, **kinematic_diagnostics, 'combat_source_hit_count': (supervision['hit_ids'][:, index] >= 0).sum().detach(),
         'combat_attack_positive_count': (supervision['attack_flags'][:, index] > .5).sum().detach(),
         'combat_attack_negative_count': losses.get('attack_negative_count', prior['state'].new_zeros(())).detach(),
         'combat_death_opportunity_count': counts['killable'].detach(),

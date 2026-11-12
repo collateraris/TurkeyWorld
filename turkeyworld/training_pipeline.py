@@ -52,15 +52,27 @@ def model_fingerprint(model):
 
 
 def replace_file(temporary, destination):
-    """Windows readers may briefly keep a report or checkpoint open."""
-    for attempt in range(40):
+    """Atomically replace, allowing bounded Windows reader/share-lock delays.
+
+    The destination is never removed or modified before os.replace succeeds.
+    Access/sharing/lock and mapped-file conflicts may be temporary on Windows;
+    other errors, other platforms, and a still-blocked file remain explicit.
+    """
+    deadline = time.monotonic()+25.
+    delay = .05
+    for attempt in range(64):
         try:
             os.replace(temporary, destination)
             return
-        except PermissionError:
-            if attempt == 39:
+        except PermissionError as error:
+            if (sys.platform != 'win32' or getattr(error, 'winerror', None) not in (5, 32, 33, 1224)
+                    or attempt == 63):
                 raise
-            time.sleep(.05)
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay*2, .5)
 
 
 def atomic_json(path, value):

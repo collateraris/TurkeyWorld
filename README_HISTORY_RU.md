@@ -7,7 +7,8 @@ RSSM, дистилляции и парного окна сравнения. По
 объединены в записи о соответствующем режиме. Последовательность запросов
 восстановлена по чату; числа проверены по Git, конфигурациям и отчётам.
 
-Срез результатов: **11 ноября 2026, 16:44:45 МСК, шаг RSSM 3450**.
+Исходный срез результатов: **11 ноября 2026, 16:44:45 МСК, шаг RSSM 3450**.
+Следующие H-записи фиксируют более поздние этапы, включая продолжение с5112 в H53.
 Обучение после этого продолжалось. Время в этом журнале — МСК; поля времени
 в исходных JSON обычно записаны в UTC. Имя каталога запуска не всегда
 совпадает с датой всех экспериментов внутри него.
@@ -1509,6 +1510,331 @@ Base/RF вместе с прежними regressions прошли56 CPU tests. F
 [сохранённая команда](training_runs/rssm_enemy20m_combat_20261112/launch_command.json),
 [результаты focused CPU](training_runs/diagnostic_tools/enemy_resize_renderer_focused_tests.json),
 [тесты resize renderer](tests/test_enemy_resize_renderer.py).
+
+## H44. Парная игра с врагом20M и обновлёнными assets маленьких NPC
+
+Парная сессия `training_runs/paired_compare_20261111T221323Z_enemy20m_tiny`
+фактически открылась, ready, как PID51604: слева Source, справа нейромодель,
+изначально **combat / autonomous / FP32**. Snapshots: world4520 с врагом20000323
+параметра и памятью3632, renderer selected8300/cumulative17900, compact codec11800,
+SR selected2000/cumulative40100. Отображение: native32 → learned SR128 → bilinear1024
+→ fitted panel. Строгий NAV→combat rebind сохранил image tensors и
+codec/normalization/noise; фоновое обучение не менялось.
+
+Shape-only preflight использовал один NAV-initialized шаг, отдельно от
+фактического combat GUI trial. Durable report содержит450 парных шагов/15.0
+simulated seconds, независимые часы/состояния, конечные state/memory, ноль resets
+и engine corrections, отсутствие future Source feedback. Это не квалифицирует
+навигацию или бой. Последний статус — **closed**, trial complete; причина
+закрытия не предполагается, после этого окно не перезапускалось.
+[Фактический запуск](training_runs/paired_compare_20261111T221323Z_enemy20m_tiny/launch.json),
+[trial report](training_runs/paired_compare_20261111T221323Z_enemy20m_tiny/report.json).
+
+## H45. Read-only аудит loss и свежая проверка4930
+
+Read-only аудит сравнил первые64 и последние64 обновления с совпадающим
+составом context/latent mode. Raw loss77.6267→66.6941 снизился на14.08%:
+Player XY13.5768→13.07765, снижение3.68%, NPC XY54.9024→45.8159, снижение16.55%.
+Normalized total4.9845→5.2088 отражает движущийся знаменатель EMA, а не
+фиксированный масштаб сходимости. Это training objectives, не измеренная
+правильность игры; график и metadata явно разделяют условия и сглаживание.
+
+Свежая проверка4930 использовала тот же panel fingerprint, что4750. На450-шаговой
+панели Player XY5.418→4.2604 улучшился, NPC XY6.268→6.2543 почти не изменился,
+wall steps3799→4018 ухудшились. Правильность спавна43/128→39/128 снизилась.
+Melee true positives17/63→47/63 выросли, но false positives7/302→60/302 тоже
+увеличились. Результат смешанный и не квалифицирует игру. Настройки обучения,
+веса, optimizer и работающие процессы при этом анализе не менялись.
+
+В коде найден конкретный пробел supervision: own-memory branches разворачиваются
+на16 шагов, но прямое обучение event heads использует только шаг1. В updates4867–4930
+их205 respawns дали лишь1 прямо supervised spawn, а69 атак —0 direct attack
+positives. Поздние state/motion losses и отдельный global Source auxiliary16
+продолжают работать; это не утверждение, что heads вообще не обучаются.
+Spawn decode использует argmax/detach, блокируя XY-градиент к spawn head.
+Это подтверждённые возможные ограничения, а не доказанная единственная причина
+или уже внедрённое исправление. [Статистика](training_runs/dynamics_loss_audit_20261112/loss_statistics.json),
+[свежая валидация](training_runs/dynamics_loss_audit_20261112/validation_step_4930.json),
+[выводы](training_runs/dynamics_loss_audit_20261112/analysis_findings.json).
+
+## H46. V6 combat supervision и независимая нормировка компонентов
+
+Запуск `training_runs/rssm_components_v6_20261112` фактически продолжил4944,
+сохранив модель, все165 Adam states, RNG и actor EMA. Четыре изменения закреплены
+обязательным `--combat-v6-plan`: прямые conditional Source head targets покрывают
+все допустимые own-branch шаги1–16 вместо только1; spawn/recovery имеют независимую
+нормировку; максимум own branches увеличен с4 до8 с приоритетом first-contact/
+post-spawn и aligned local player contact; каждый auxiliary32 выбирает8 spawn,
+8 negatives (6 occluded+2 other),8 positives (4 wall+4 open),8 shooting.
+Main450/TBPTT16 и combat-only32×4 сохранены. Immutable corpora прежние.
+Source branch outputs — labels, а не исправления main prior. Spawn argmax/detach
+сохранён; differentiable spawn decoder и изменение inference-архитектуры
+не реализованы.
+
+Actor BASE использует сохранённый actor EMA. Каждый component имеет собственный
+EMA и priority; его weighted вклад обходит нормировку BASE. Поэтому
+`actor weighted = actor priority × base_raw / actor scale + sum(component weighted) + KL-floor`,
+где `component weighted = priority × raw / component scale`. Actor scale и
+effective weight относятся только к BASE. Gradient probe одного микробатча с
+нулём optimizer steps выбрал spawn-Enemy0.0493519002 и recovery Player0.0311118002/
+Enemy0.00309895852/Interaction0.00800152902. Цели —20% для spawn и15% для каждого
+recovery относительно измеренного base gradient этого probe, не проценты total
+loss. Minimum priority0.001 заменил отвергнутый floor0.05; отвергнутый report
+сохранён. Старые actor EMA/Adam/RNG сохранены, seeded только новые component
+banks. KL floors1.1+1.1 не масштабируются. Формулы v6 и component rows прошли66
+Node tests; прежнее отображение v5 поддерживается.
+
+Сохранённый4945 проверен: четыре микробатча,32 own branches,512 direct attempts/
+334 valid labels, включая3 поздних respawn CE targets и2 фактических attack
+positives. В128 auxiliary windows по32 spawn/negative/positive/shooting.
+Loss4.854975345 и gradient norm2.60344 конечны; все1156 frozen tensors совпадают
+бит-в-бит. Baseline4944 выполнен **до SGD**: close-wall recall51/63 и false
+positives60/302 — baseline, а не улучшение v6. UI показывает обе доли и шаг
+валидации. Запланированы новые control checks через100/250 updates и global250;
+они ещё не подтвердили улучшение. Total имеет новые component-normalized единицы
+и напрямую не сравнивается с v5. Параллельно запрошенная парная игра открылась
+из immutable world4944, дошла до450 шагов и закрылась; обучение её не изменяло
+и окно не открывалось заново.
+[План](training_runs/rssm_components_v6_20261112/combat_v6_revision.json),
+[калибровка](training_runs/rssm_components_v6_20261112/calibration.json),
+[проверка первого сохранённого update](training_runs/rssm_components_v6_20261112/first_v6_update_verification.json),
+[проверка live UI](training_runs/rssm_components_v6_20261112/dashboard_v6_component_verification.json),
+[парный trial](training_runs/paired_compare_20261112T064826Z_latest_enemy20m/report.json).
+
+## H47. Effective256 и точный resume после блокировки status-файла
+
+Запрошенный **64×4=256** фактически продолжил4981 в
+`training_runs/rssm_b256_20261112`. Сохранённый4982 прошёл независимый аудит:
+модель, все165 Adam states/groups, RNG, actor/component EMA и calibrated
+priorities сохранены,1156 frozen tensors совпадают бит-в-бит. Четыре
+микробатча64 дают один Adam update; batch-dependent terms используют64, не pooled256.
+Прежняя128 revision остаётся историей. Протокол v6 и его единицы loss прежние;
+resume требует сохранённый `--batch256-plan` и предшествующие revision pins.
+
+Каждый auxiliary64 имеет по16 spawn/negative/positive/shooting. Первый update
+использовал64 recovery branches:512 selection probes отличаются от1024
+попыток direct Source queries, из них566 valid и458 skipped;10 поздних
+respawns получили direct labels. Это подтверждает работу supervision,
+не улучшение боя. Затем попытка4983 остановилась из-за временной Windows-ошибки
+замены status-файла. Добавлен bounded25-секундный retry atomic replace, полный4982
+восстановлен точно; HTTP показал healthy running4982, выполняющийся4983 и отсутствие
+error banner. UI раздельно показал64×4=256 и исторический32×4=128;68 Node tests
+и build прошли. Окно игры не менялось, нового прохождения качества не заявлено.
+[Первое обновление](training_runs/rssm_b256_20261112/first_batch256_update_verification.json),
+[точный resume](training_runs/rssm_b256_20261112/resume_verification_g4982_batch256_v7.json),
+[live UI](training_runs/rssm_b256_20261112/dashboard_batch256_verification.json).
+
+## H48. Повторная валидация динамики5010 и диагностика дрейфа
+
+Неизменяемая копия5010 прошла те же held-out панели, что4944/5000:
+16 автономных прогонов по450 переходов, Source не исправляет состояния или память.
+За92 секунды проверены навигация, бой,128 спавнов и365 близких атак/отрицаний.
+Все состояния и память конечны, общий gate не пройден. Конечный средний дрейф
+игрока3.98493 клетки, NPC7.01381 (10 живых пар); столкновения во всех16 боевых
+прогонах. Спавн50/128, полнота атак58/63, ложные атаки90/302. Навигация без врага
+от одного кадра: конечный дрейф0.48773 клетки. Все7 отпечатков панелей совпали.
+Враг уже на первом шаге движется0.411 вместо0.700 клетки/с, ошибка направления34.74°.
+Выявлен ранний случай неправильного торможения игрока перед стеной и вдоль неё.
+[Полный отчёт](training_runs/dynamics_validation_20261112T094936Z/rssm_combat_validation.json),
+[сравнение](training_runs/dynamics_validation_20261112T094936Z/compactsummary.json),
+[диагностика траекторий](training_runs/dynamics_validation_20261112T094936Z/trajectory_diagnosis.json).
+
+## H49. Обучение против дрейфа и согласование памяти с первого обновления
+
+По запросу пользователя сохранён полный5014 и подготовлен
+`training_runs/rssm_drift_curriculum_20261112`, batch64×4=256.
+С первого обновления работает отдельная автономная ветка согласования памяти
+Player/Enemy RSSM: KL категорий и ошибка нормированного h на1/4/8/16 относительно
+остановленных posterior-целей. Будущие RGB используются только для целей;
+прогон не получает их или исправлений Source. Это адаптация многошагового
+согласования, а не полный алгоритм PlaNet.
+
+Добавлены Source-потери скорости/направления NPC и движения игрока по каждой оси
+с балансом свободных, заблокированных и частичных перемещений. XY-градиент
+накапливается внутри TBPTT16 без возврата нестабильного Jacobian числовых условий;
+предсказанный спавн обрывает старую цепь NPC. Прямые локальные цели сохраняют
+свои одношаговые производные. Численные прямые состояния остаются прежними.
+Первые100 обновлений используют16 переходов; затем32/64/128/256;500-е —450.
+Валидация всегда450, дополнительно до SGD и через100/200/300/400/500.
+Лучшие полные веса/Adam выбираются по дрейфу450 с жизненными масками Source,
+без исключения ошибочно пропавшего NPC; общий quality gate остаётся отдельным.
+
+CPU-проверки и реальные discarded GPU-пробы B64 на16/450 прошли: конечные
+градиенты3.41718/3.45802, peak allocated1.826/2.648GiB. В пробах не было
+optimizer/EMA commits; модель и все165 Adam states/options неизменны.
+Восстановление5014 проверено бит-в-бит, worker54164 выполнил полную базовую
+валидацию5014 и сохранил первое новое обновление5015: четыре микробатча64,
+H16,4096 основных переходов, четыре memory-backward и все три кинематические
+потери активны. Все1156 frozen tensors точны, обе RSSM изменились,161 активных
+Adam clock увеличены на1, четыре прежних неиспользуемых clock сохранены.
+Actor/component EMA обновлены ровно один раз. Loss2.511805, preclip norm3.452078;
+короткий горизонт меняет смысл train loss и не доказывает снижения длинного дрейфа.
+Исправление качества ещё требует контрольных прогонов.
+[План](training_runs/rssm_drift_curriculum_20261112/coordinate_curriculum_plan.json),
+[GPU-проба](training_runs/rssm_drift_curriculum_20261112/coordinates_probe.json),
+[точный resume](training_runs/rssm_drift_curriculum_20261112/resume_verification_g5014_coordinate_curriculum_v1.json),
+[первое сохранённое обновление](training_runs/rssm_drift_curriculum_20261112/first_coordinate_update_verification.json).
+
+## H50. Рост нормированного loss и ухудшение длинных траекторий
+
+На5015–5052 горизонт оставался16. Средние первых/последних8 обновлений:
+нормированный loss2.55960→2.92260, исходный5.26139→4.94665.
+Пересчёт тех же слагаемых с фиксированными коэффициентами5015 даёт2.52093→2.45834.
+Следовательно, рост числа на графике объясняется адаптацией EMA после перехода
+с450 на16; это не доказательство ухудшения каждой ошибки модели.
+Однако одинаковая полная валидация5014→5044 показала реальное ухудшение
+Source-masked drift score17.2866→21.9058. Короткий NPC-шаг16 улучшился
+0.1913→0.1481 клетки, но игрок ошибался при скольжении после шага16,
+а поздние собственные состояния перестали попадать в основной обучающий прогон.
+Влияние отдельных новых loss и EMA не было разделено причинным экспериментом.
+
+Перед исправлением сохранён5060, clock расписания46/500. Независимая
+проверка тех же16×450 дала score19.3318, средние ошибки игрока1.49020 и
+NPC5.94040 клетки: лучше5044, хуже исторического5014. Это trajectory-only
+проверка, не новый полный quality pass. Лучшие5014 остаются сохранены.
+[EMA-анализ](training_runs/rssm_drift_curriculum_20261112/diagnostics/loss_ema_g5052/loss_ema_diagnosis.json),
+[траектории5014/5044](training_runs/rssm_drift_curriculum_20261112/diagnostics/drift_worsening_5014_5044.json),
+[baseline5060](training_runs/coordinate_replay_audit_20261112/baseline_comparison.json).
+
+## H51. Длинный replay и поздние собственные состояния
+
+По запросу исправить ухудшение дрейфа подготовлен
+`training_runs/rssm_coordinate_replay_20261112` из полного5060.
+Каждое пятое новое обновление использует450 переходов; остальные следуют прежним
+16/32/64/128/256/450. Clock46/500, веса,165 Adam states, RNG и старые счётчики
+сохранены. Гистограмма и число переходов учитывают фактические горизонты.
+EMA коротких и450-прогонов разделена: short начинается с точных значений5060,
+long — с проверенного EMA5014. Это перенос статистики нормировки, не откат весов.
+Каждый полный64×4 update делает один Adam/EMA commit; невыбранный банк неизменен.
+
+На первом коротком микробатче восемь фактических собственных состояний и h/z
+продолжаются до450 под no_grad. Наблюдения, будущие Source-позы и исправления
+движком не поступают. RNG дополнительного прогона восстанавливается. Выборка
+резервирует8 законных поздних16-шаговых ветвей, включая приближение к стене,
+состояния после спавна и ошибки движения. На450-update уже есть собственные
+длинные префиксы, дополнительный прогон не нужен. Недобор законных ветвей
+показывается явно, не исправляется подменой координат.
+
+Реальная GPU-проба выявила конфликт кэша карты B64→B8. Добавлены scoped views
+кэшей карты и их восстановление в finally; проверены настоящий endless-spawn
+переход64→8→64 и путь с исключением. Повторные реальные B64 пробы16/450 прошли:
+norm7.21865/2.38025, поздние ветви12/16 и16/16; подтверждены контакты и поздние
+спавны. Source, модель, все Adam и оба банка EMA неизменны; optimizer commits0.
+Восстановление5060 в worker59592 проверено бит-в-бит. Первый полный batch затем
+выявил NumPy-int в новом счётчике: запись метрик после SGD не состоялась,
+checkpoint остался5060. Счётчики приведены к Python int; добавлена проверка
+обычного JSON перед optimizer commit и регрессия с NumPy bool. Worker70360
+повторно загрузил5060: модель,165 Adam и NumPy/CPU/CUDA RNG проверены точными,
+несохранённая попытка повторяется. Исторический best5014
+перенесён отдельно; автоматической подмены игры нет. Новое качество проверяется
+тем же полным450-панелем, отдельно от работоспособности кода.
+[План](training_runs/rssm_coordinate_replay_20261112/replay_curriculum_plan.json),
+[проба](training_runs/rssm_coordinate_replay_20261112/replay_probe.json),
+[resume](training_runs/rssm_coordinate_replay_20261112/resume_verification_g5060_coordinate_long_replay_v1.json),
+[восстановление после ошибки метрик](training_runs/rssm_coordinate_replay_20261112/metadata_failure_recovery_g5060.json).
+
+Первые пять сохранённых обновлений5061–5065 проверены независимо:4×H16 и1×H450,
+EMA commits4/1,1156 frozen tensors точны,165 Adam сохранены, clock46→51.
+Фактический cumulative main count320000 включает прежние46 обновлений;
+поздних ветвей49 от коротких scout и61 от полного прогона. Валидация5065 дала
+score19.8004 (+2.42% к5060), поэтому улучшение тогда не заявлялось.
+После десяти обновлений5070 score18.2629 (−5.53% к5060): средний дрейф
+игрока1.49020→1.41254, NPC5.94040→5.60012 клетки. При этом конечная ошибка
+NPC6.61512→7.88826 и p95 score53.8209→57.0478 ухудшились; пропуски живого
+Source NPC506→668. Выигрыш игрока в основном в451 полностью заблокированном
+Source-переходе; свободное движение и2066 переходов со скольжением пока хуже.
+Координатная ошибка на Source-slide1.23480→1.31936 клетки, velocity MAE
+0.35218→0.46786 клетки/с. Это частичный выигрыш средней траектории, не устранение
+дрейфа и не прохождение quality gate. Исторический5014 остаётся лучшим по score.
+Обучение продолжается.
+[Проверка первого цикла](training_runs/rssm_coordinate_replay_20261112/first_replay_cycle_verification.json),
+[валидация5070](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/drift_trajectory_validation.json),
+[сравнение](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/comparison.json),
+[типы контакта](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/source_contact_cohorts.json).
+
+## H52. Временное обучение только XY-дрейфа
+
+Пользователь попросил временно оставить только ошибку дрейфа. Полный5079 сохранён,
+`training_runs/rssm_drift_only_20261112` продолжает его без сброса Adam/RNG,
+clock65/500 и replay19. Первый новый5080 закономерно использует450, следующие —16;
+дальнейшие32/64/128/256/450 также поддержаны. Batch64×4=256 прежний.
+Цели — только smooth-L1 XY Player/NPC в клетках карты, веса1:1, и XY поздних
+собственных ветвей на1/4/8/16 (прежний множитель ветвей0.25). Source life masks
+не исключают ошибочно пропавшего NPC; исключён сам тик Source-телепорта.
+
+Никаких KL, reconstruction, memory overshooting, state-field, velocity/heading,
+wall/pass-BCE, combat/spawn/event loss и auxiliary RGB-forward нет. Специальные
+головы и decoder заморожены; разрешённые40,065,236 параметра/122 тензора получают
+только XY-градиенты, включая начальное кодирование наблюдённого контекста.
+43 дополнительных тензора и их Adam steps/moments сохраняются точно: grad=None
+защищает также от momentum/weight decay. Все165 canonical names/groups/states
+остаются в CP, даже при requires_grad=False. В shared core могут изменяться
+признаки, подаваемые замороженным головам: неизменные веса не обещают неизменных
+боевых предсказаний. EMA не масштабирует XY; все её значения заморожены.
+Прежние счётчики продвигаются как ledger optimizer-updates. Вспомогательный sampler
+резервирует только индексы для старого RNG/ledger, без загрузки batch или обучения
+другим событиям; actual auxiliary fragments/queries0. Валидация измеряет полную
+динамику450, но не обучает остальные задачи.
+
+Baseline5079 на том же16×450: score20.97706, средняя ошибка Player1.62325/NPC6.43040
+клетки. CPU-проверки и реальные B64 пробы16/450 прошли; other-objective calls0,
+off-head gradientsNone, модель/165Adam/EMA неизменны в discarded probe.
+Worker56368 запущен с точным восстановлением5079. Независимый audit сохранённого
+5083 подтвердил четыре pure XY commits:5080H450,5081–5083H16;122 allowed tensors
+действительно изменились и Adam clock+4,1199 frozen tensors точны, включая43
+новых замороженных и все их Adam fields. Численные short/long/nav EMA точны,
+clock65→69; Interaction/floor0, aux/posterior/decoder/memory calls0.
+Первый H450 loss3.31025; короткие0.03045/0.01488/0.03396 имеют другой горизонт
+и не доказывают снижения450-дрейфа. Best5014 сохранён; обучение продолжается.
+[План](training_runs/rssm_drift_only_20261112/drift_only_plan.json),
+[GPU-проба](training_runs/rssm_drift_only_20261112/drift_only_probe.json),
+[audit5079→5083](training_runs/rssm_drift_only_20261112/first_drift_only_update_verification.json),
+[baseline5079](training_runs/drift_only_audit_20261112/baseline_g5079/drift_trajectory_validation.json).
+
+## H53. Горизонт по loss и десять успешных обновлений подряд
+
+Пользователь заменил фиксированный бюджет горизонтов и обязательные длинные шаги
+каждое пятое обновление на gate координатного loss. Активный
+`training_runs/rssm_loss_gated_drift_20261112` сохранил полный5112 остановленного
+`rssm_drift_only_20261112`: все веса,165 Adam names/groups/states, RNG, прежние
+coordinate/replay-счётчики и численные значения замороженной EMA. Сброса нет.
+Прежние500-шаговый бюджет и принудительный H450 остались только историей.
+Подготовительный single-pass вариант архивирован без использования до GPU-проб
+и обучения; исполненный план требует **10 последовательных успехов**.
+
+Точный путь основного горизонта:
+`16 → 32 → 64 → 96 → 128 → 160 → 192 → 224 → 256 → 288 → 320 → 352 → 384 → 416 → 448 → 450`.
+Успех — одно **завершённое64×4 обновление optimizer**, учитывающее средний train
+loss основного и позднего XY на текущем H. Строгое **loss<0,25** увеличивает серию;
+**≥0,25** сбрасывает её. Только десятый последовательный успех переводит ровно
+на следующий этап и обнуляет его счётчик. Финальный этап продолжается на H450.
+Цель остаётся pure XY с постоянными весами: EMA scaling, KL/floor, реконструкция,
+бой/спавн, wall, velocity и прочие цели не включаются. Обучаются122 разрешённых
+тензора/40 065 236 параметров;43 выделенных тензора и их Adam moments/steps
+заморожены, все165 optimizer histories сохраняются. Прежний no-grad scout до450
+только выбирает короткие XY recovery-ветви; он не задаёт принудительный H450
+optimizer-update и не увеличивает счётчик gate.
+
+«Что показывает модель» генерирует текущий H и показывает четыре смещения от1 доH.
+При смене этапа preview обновляется сразу; старая картинка скрыта до готовности
+новой. Полная held-out450 валидация отделена от preview: до SGD и каждые250
+глобальных обновлений optimizer. При продолжении обязателен
+`--loss-gated-curriculum-plan` вместе со всеми прежними plan pins. Активный
+маркер остановки — `rssm_loss_gated_drift_20261112/stop_training`.
+
+Пройдены обновлённые проверки последовательной серии, градиентов/знаменателей
+на всех16 горизонтах и preview. Отброшенные GPU-пробы B64 на H16/H96/H450 дали
+конечные нормы градиента0,55141/0,92469/3,17332 и loss0,003823/0,060369/3,074499.
+Модель,165 Adam states, EMA и Source-файл остались точными; disabled gradients —
+None, optimizer commits0, приватный gate остался0/10. H450 был только capacity-
+проверкой. Первая фактическая серия5113–5122 целиком использовала H16: первые
+девять обновлений удержали H16; шаг5122 с loss0,005570620024911932 перевёл наH32
+со счётчиком0. Новое preview сгенерировало32 перехода. Это подтверждение требуемого
+перехода этапа; полное качество450-шаговой игры и устранение дрейфа не заявлены.
+[План gate](training_runs/rssm_loss_gated_drift_20261112/loss_gated_curriculum_plan.json),
+[сохранение Source](training_runs/rssm_loss_gated_drift_20261112/initialization.json),
+[GPU-проба](training_runs/rssm_loss_gated_drift_20261112/loss_gated_probe.json),
+[audit первой последовательной серии](training_runs/rssm_loss_gated_drift_20261112/first_loss_gated_streak_verification.json).
 
 ## Изменения целей, batch и единиц данных
 

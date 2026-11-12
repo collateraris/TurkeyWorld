@@ -22,7 +22,9 @@ SETTINGS = {'version': 1, 'ema_decay': .95, 'minimum_scale': .1,
 COMBAT_GROUPS = {'combat_events': 'interaction', 'combat_target': 'interaction',
     'combat_attack': 'interaction', 'combat_damage_npc': 'interaction',
     'combat_damage_player': 'interaction', 'combat_death_npc': 'interaction',
-    'combat_spawn': 'enemy', 'combat_npc_motion': 'enemy'}
+    'combat_spawn': 'enemy', 'combat_npc_motion': 'enemy',
+    'combat_kinematic_player_axes': 'player', 'combat_kinematic_npc_speed': 'enemy',
+    'combat_kinematic_npc_direction': 'enemy'}
 
 
 def split_state_loss(prediction, target):
@@ -64,7 +66,7 @@ def combat_loss_groups(terms):
 
 class GroupLossAccumulator:
     """One microbatch's differentiable task sums with immutable scale values."""
-    def __init__(self, scales=None, priorities=None):
+    def __init__(self, scales=None, priorities=None, *, gradient_meter=None):
         self.scales = {name: float((scales or {}).get(name, 1.)) for name in GROUPS}
         self.priorities = {name: float((priorities or {}).get(name, 1.)) for name in GROUPS}
         if not all(math.isfinite(x) and x > 0 for x in (*self.scales.values(), *self.priorities.values())):
@@ -72,9 +74,13 @@ class GroupLossAccumulator:
         self.raw = dict.fromkeys(GROUPS, 0.)
         self.floors = dict.fromkeys(GROUPS, 0.)
         self.calls = 0
+        self.gradient_meter = gradient_meter
+        self.component_raw = {}
 
-    def combine(self, parts, *, floors=None):
+    def combine(self, parts, *, floors=None, component=None):
         floors = floors or {}
+        if component is not None and (component not in ('spawn', 'recovery') or floors):
+            raise ValueError('Known components have no constant KL floors')
         if not parts or set(parts)-set(GROUPS) or set(floors)-set(parts):
             raise ValueError('Every objective must belong to exactly one known task')
         total = None
@@ -90,6 +96,8 @@ class GroupLossAccumulator:
                 raise ValueError('Grouped objective is below its declared constant KL floor')
             # Clipping only detached round-off in bookkeeping cannot change gradients.
             pending.append((name, max(raw, 0.), floor))
+            if component is not None and self.gradient_meter is not None:
+                self.gradient_meter.capture(component, name, variable)
             weighted = variable*(self.priorities[name]/self.scales[name])+floor
             total = weighted if total is None else total+weighted
         if not bool(torch.isfinite(total)):
@@ -97,6 +105,9 @@ class GroupLossAccumulator:
         for name, raw, floor in pending:
             self.raw[name] += raw
             self.floors[name] += floor
+            if component is not None:
+                bucket = self.component_raw.setdefault(component, {})
+                bucket[name] = bucket.get(name, 0.)+raw
         self.calls += 1
         return total
 
@@ -246,7 +257,11 @@ def balanced_batch_boundary_valid(state):
     except (ValueError, TypeError, KeyError):
         return False
     step = state['global_training_step']
-    return (state.get('loss_protocol') == LOSS_PROTOCOL and bool(revision.get('sha256'))
+    protocol_valid = state.get('loss_protocol') == LOSS_PROTOCOL
+    if state.get('loss_protocol') == 'rssm_dual_combat_components_v6':
+        from .rssm_combat_v6 import v6_boundary_valid
+        protocol_valid = v6_boundary_valid(state)
+    return (protocol_valid and bool(revision.get('sha256'))
         and revision.get('loss_protocol') == LOSS_PROTOCOL
         and revision.get('last_optimizer_step') == step
         and revision.get('updates') == step-revision.get('start_optimizer_step', step+1)

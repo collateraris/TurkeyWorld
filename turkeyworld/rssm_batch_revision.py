@@ -102,4 +102,13 @@ def batch_commit_size(state):
             or revision.get('last_optimizer_step') != step
             or revision.get('updates') != step-revision.get('start_optimizer_step', step+1)):
         raise ValueError('Effective128 commits require the exact bound32x4 batch revision')
+    if state['rssm_training'].get('batch256_revision') is not None:
+        from .rssm_batch256 import batch256_boundary_valid
+        if not batch256_boundary_valid(state):
+            raise ValueError('Effective256 requires the exact bound64x4 revision')
+        return 256
+    protocol = state.get('training_protocol', {})
+    if (state.get('batch_protocol') == 'rssm_effective256_v7'
+            or protocol.get('microbatch_size') == 64 or protocol.get('effective_batch_size') == 256):
+        raise ValueError('Saved effective256 metadata cannot silently lose its revision ledger')
     return 128

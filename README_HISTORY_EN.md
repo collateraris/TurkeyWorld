@@ -8,7 +8,8 @@ requests to “launch it again” are grouped under the relevant mode. The seque
 of requests was reconstructed from the chat; numbers were checked against Git,
 configurations and reports.
 
-Results snapshot: **11 November 2026, 16:44:45 Moscow time, RSSM step 3450**.
+Original results snapshot: **11 November 2026, 16:44:45 Moscow time, RSSM step 3450**.
+Later H entries record subsequent runs, including the continuation from5112 in H53.
 Training continued after this snapshot. Times in this journal are Moscow time;
 timestamps in the original JSON files are usually UTC. A run directory's name
 does not always match the dates of every experiment inside it.
@@ -1537,6 +1538,330 @@ Sources: [combat-only plan](training_runs/rssm_enemy20m_combat_20261112/combat_o
 [saved launch](training_runs/rssm_enemy20m_combat_20261112/launch_command.json),
 [focused CPU results](training_runs/diagnostic_tools/enemy_resize_renderer_focused_tests.json),
 [resize renderer tests](tests/test_enemy_resize_renderer.py).
+
+## H44. Paired game with the20M enemy and updated tiny-image assets
+
+The paired session `training_runs/paired_compare_20261111T221323Z_enemy20m_tiny`
+actually opened, ready, as PID51604: Source left, neural output right, initially
+**combat / autonomous / FP32**. Snapshots: world4520 with enemy20000323 parameters
+and memory3632, renderer selected8300/cumulative17900, compact codec11800, SR
+selected2000/cumulative40100. Display: native32 → learned SR128 → bilinear1024
+→ fitted panel. Strict NAV→combat rebinding preserved image tensors and
+codec/normalization/noise; background training was untouched.
+
+The shape-only preflight used one NAV-initialized step, separately from the
+actual combat GUI trial. The durable report records450 paired steps/15.0
+simulated seconds, independent clocks/states, finite state/memory, zero resets
+or engine corrections and no future Source feedback. This does not qualify
+navigation or combat. The final status is **closed**, trial complete; no reason
+for closing is inferred, and the window was not relaunched afterward.
+[Actual launch](training_runs/paired_compare_20261111T221323Z_enemy20m_tiny/launch.json),
+[trial report](training_runs/paired_compare_20261111T221323Z_enemy20m_tiny/report.json).
+
+## H45. Read-only loss audit and fresh validation4930
+
+A read-only audit compared the first64 and last64 updates with matched
+context/latent-mode composition. Raw loss77.6267→66.6941 decreased14.08%:
+Player XY13.5768→13.07765, down3.68%, and NPC XY54.9024→45.8159, down16.55%.
+Normalized total4.9845→5.2088 reflects the moving EMA denominator, not a fixed
+convergence scale. These are training objectives, not measured gameplay accuracy;
+the plot and its metadata keep the conditions and smoothing explicit.
+
+Fresh validation4930 used the same panel fingerprint as4750. On the450-step
+panel, Player XY5.418→4.2604 improved, NPC XY6.268→6.2543 barely changed, and
+wall steps3799→4018 worsened. Spawn correctness43/128→39/128 declined. Melee
+true positives17/63→47/63 increased, but false positives7/302→60/302 also rose.
+The result is mixed and does not qualify gameplay. Training settings, weights,
+optimizer and running processes were not changed by this analysis.
+
+Code review found a concrete supervision gap: own-memory branches unroll16
+steps, but direct event-head supervision uses step1 only. In updates4867–4930,
+their205 respawns supplied only1 directly supervised spawn, and69 attacks
+supplied0 direct attack positives. Later state/motion losses and the separate
+global Source auxiliary16 remain active; this is not a claim that those heads
+receive no training at all. Spawn decoding uses argmax/detach, blocking its XY
+gradient to the spawn head. These are supported candidate limitations, not a
+proven sole cause or an implemented fix. [Statistics](training_runs/dynamics_loss_audit_20261112/loss_statistics.json),
+[fresh validation](training_runs/dynamics_loss_audit_20261112/validation_step_4930.json),
+[findings](training_runs/dynamics_loss_audit_20261112/analysis_findings.json).
+
+## H46. V6 combat supervision and independent component normalization
+
+Run `training_runs/rssm_components_v6_20261112` actually continued from4944,
+preserving model, all165 Adam states, RNG and actor EMA. Four changes are pinned
+by mandatory `--combat-v6-plan`: direct conditional Source head targets cover
+all legal own-branch steps1–16, rather than only1; spawn/recovery have independent
+normalization; own branches increase from at most4 to8 with first-contact/
+post-spawn priority and aligned local player contact; each auxiliary32 selects
+8 spawn,8 negatives (6 occluded+2 other),8 positives (4 wall+4 open),8 shooting.
+Main450/TBPTT16 and combat-only32×4 remain. Immutable corpora are retained.
+Source branch outputs are labels, not corrections to the main prior. Spawn
+argmax/detach remains; no differentiable spawn decoder or inference architecture
+change was implemented.
+
+Actor BASE uses the inherited actor EMA. Each component uses its own EMA and
+priority; its weighted contribution bypasses BASE normalization. Therefore
+`actor weighted = actor priority × base_raw / actor scale + sum(component weighted) + KL-floor`,
+with `component weighted = priority × raw / component scale`. Actor scale and
+effective weight refer only to BASE. A one-microbatch gradient probe with zero
+optimizer steps selected spawn-Enemy0.0493519002 and recovery Player0.0311118002/
+Enemy0.00309895852/Interaction0.00800152902. Targets were20% for spawn and15%
+for each recovery relative to the measured base gradient in that probe, not
+percentages of total loss. Minimum priority0.001 replaced a rejected0.05 floor;
+the rejected report remains saved. Old actor EMA/Adam/RNG were retained, only
+new component banks seeded. KL floors1.1+1.1 remain unscaled. UI v6 formulas and
+component rows passed66 Node tests; the old v5 display remains supported.
+
+Saved4945 is verified: four microbatches,32 own branches,512 direct attempts/
+334 valid labels, including3 late respawn CE targets and2 actual attack positives.
+The128 auxiliary windows contain32 each spawn/negative/positive/shooting.
+Loss4.854975345 and gradient norm2.60344 were finite; all1156 frozen tensors
+remain bitexact. Baseline4944 was evaluated **before SGD**: close-wall recall51/63
+and false positives60/302 are baseline, not v6 improvement. The UI shows both
+rates and validation step. New control checks after100/250 updates and global250
+checks are scheduled; they have not yet established improvement. Total has
+new component-normalized units and is not directly comparable with v5. In
+parallel, the requested paired game opened from immutable world4944, reached
+450 steps and closed; it was not reopened or altered by this training.
+[Plan](training_runs/rssm_components_v6_20261112/combat_v6_revision.json),
+[calibration](training_runs/rssm_components_v6_20261112/calibration.json),
+[saved first-update proof](training_runs/rssm_components_v6_20261112/first_v6_update_verification.json),
+[live UI proof](training_runs/rssm_components_v6_20261112/dashboard_v6_component_verification.json),
+[paired trial](training_runs/paired_compare_20261112T064826Z_latest_enemy20m/report.json).
+
+## H47. Effective256 and an exact resume after a status-file lock
+
+The requested **64×4=256** actually continued from4981 in
+`training_runs/rssm_b256_20261112`. Saved4982 passed the independent audit:
+model, all165 Adam states/groups, RNG, actor/component EMA and calibrated
+priorities were retained, and1156 frozen tensors remained bitexact. Four
+microbatches64 produce one Adam update; batch-dependent terms use64, not pooled256.
+The old128 revision remains historical. Protocol v6 and its loss units are unchanged;
+resume requires the saved `--batch256-plan` plus earlier revision pins.
+
+Each auxiliary64 has16 each spawn/negative/positive/shooting. The actual first
+update used64 recovery branches:512 selection probes are distinct from1024
+direct Source-query attempts, of which566 were valid and458 skipped;10 late
+respawns received direct labels. These counts prove exercised supervision,
+not better combat. An attempted4983 then stopped on a transient Windows status-file
+replacement error. Bounded25-second atomic-replace retry was added, and full4982
+was restored exactly; HTTP showed healthy running4982 with4983 underway and no
+error banner. UI displayed64×4=256 and historical32×4=128 separately;68 Node tests
+and build passed. No game window was altered and no new quality pass is claimed.
+[First update](training_runs/rssm_b256_20261112/first_batch256_update_verification.json),
+[exact resume](training_runs/rssm_b256_20261112/resume_verification_g4982_batch256_v7.json),
+[live UI](training_runs/rssm_b256_20261112/dashboard_batch256_verification.json).
+
+## H48. Revalidating dynamics5010 and diagnosing coordinate drift
+
+An immutable5010 copy used the unchanged4944/5000 held-out panels:
+16 autonomous450-transition windows without Source state or memory correction.
+Navigation, combat,128 spawn events and365 close-melee transitions completed
+in92 seconds. All states/memories were finite; the overall gate failed.
+Final mean player drift was3.98493tiles, NPC7.01381 (10 common-alive pairs),
+with wall overlap in all16 combat windows. Spawn accuracy50/128; attack recall
+58/63; false attacks90/302. One-frame no-enemy navigation ended at0.48773tiles.
+All7 panel fingerprints matched. At the first step, NPC speed was0.411 versus
+0.700tiles/s with34.74° direction error. An early player case slowed before
+contact and suppressed the legal sliding axis.
+[Full report](training_runs/dynamics_validation_20261112T094936Z/rssm_combat_validation.json),
+[comparison](training_runs/dynamics_validation_20261112T094936Z/compactsummary.json),
+[trajectory diagnosis](training_runs/dynamics_validation_20261112T094936Z/trajectory_diagnosis.json).
+
+## H49. Coordinate-drift training and memory agreement from the first update
+
+At the user's request, full5014 was retained and copied to
+`training_runs/rssm_drift_curriculum_20261112`, keeping64×4=256.
+From the first update, a separate autonomous branch aligns Player/Enemy RSSM
+categorical priors and normalized h at1/4/8/16 to stopped posterior targets.
+Future RGB is exclusive to targets; no observation or Source correction enters
+the autonomous branch. This adapts multi-step agreement, rather than reproducing
+the complete PlaNet algorithm.
+
+Source NPC speed/direction losses and player per-axis displacement supervision
+balance free, blocked and partial cases. XY gradients accumulate within TBPTT16
+without restoring the unstable numerical-conditioning Jacobian. Predicted spawn
+teleports sever the old NPC chain; direct local targets keep one-step derivatives.
+Numerical forward states stay unchanged. The first100 updates use16 transitions,
+then32/64/128/256; update500 uses450. Validation always uses450, including a
+pre-SGD baseline and local100/200/300/400/500 controls. Best full model/Adam
+weights are selected by450-step drift using Source life masks, so a model-missing
+NPC cannot hide its coordinate error. Overall qualification remains separate.
+
+CPU checks and real discarded B64 GPU probes at16/450 passed: finite gradient
+norms3.41718/3.45802, peak allocated1.826/2.648GiB. Probes committed no optimizer
+or EMA updates; model and all165 Adam states/options remained unchanged.
+Exact5014 restoration passed. Worker54164 completed the full5014 baseline and
+saved first update5015: four64-example microbatches, H16,4096 main transitions,
+four memory backwards and all three kinematic terms active. All1156 frozen
+tensors remained exact; both RSSMs changed;161 active Adam clocks advanced once
+while four legacy unused clocks remained unchanged. Actor/component EMA committed
+exactly once. Loss2.511805, preclip norm3.452078; the shorter horizon changes the
+meaning of training loss and does not establish reduced long-horizon drift.
+Quality improvement still requires control rollouts.
+[Plan](training_runs/rssm_drift_curriculum_20261112/coordinate_curriculum_plan.json),
+[GPU probe](training_runs/rssm_drift_curriculum_20261112/coordinates_probe.json),
+[exact resume](training_runs/rssm_drift_curriculum_20261112/resume_verification_g5014_coordinate_curriculum_v1.json),
+[first saved update](training_runs/rssm_drift_curriculum_20261112/first_coordinate_update_verification.json).
+
+## H50. Rising normalized loss and worse long trajectories
+
+Horizon stayed16 over5015–5052. First/last8-update means: normalized loss
+2.55960→2.92260, raw5.26139→4.94665. Reweighting identical recorded terms
+with fixed5015 coefficients gives2.52093→2.45834. The plotted rise is therefore
+explained by EMA adaptation after450→16; it does not prove each model error worsened.
+However, identical full5014/5044 validation shows a real Source-masked drift-score
+increase17.2866→21.9058. NPC step16 improved0.1913→0.1481tiles, while player
+sliding worsened beyond16 and late own states disappeared from the main training
+rollout. The individual causal effects of the new objectives and EMA were not isolated.
+
+Checkpoint5060 was retained before the fix, preserving curriculum clock46/500.
+An independent identical16×450 check gave score19.3318, player/NPC mean errors
+1.49020/5.94040tiles: recovered versus5044 but worse than historical5014.
+This is trajectory-only validation, not a new full quality pass. Best5014 remains retained.
+[EMA audit](training_runs/rssm_drift_curriculum_20261112/diagnostics/loss_ema_g5052/loss_ema_diagnosis.json),
+[5014/5044 trajectories](training_runs/rssm_drift_curriculum_20261112/diagnostics/drift_worsening_5014_5044.json),
+[5060 baseline](training_runs/coordinate_replay_audit_20261112/baseline_comparison.json).
+
+## H51. Long replay and late own-prefix states
+
+At the user's request to fix drift regression,
+`training_runs/rssm_coordinate_replay_20261112` continues full5060.
+Every fifth new update uses450 transitions; the others follow the existing
+16/32/64/128/256/450 schedule. Clock46/500, model,165 Adam states, RNG and old
+counters are retained. Histograms and transition counts use actual horizons.
+Short/450 EMA values are separated: short starts with exact5060 statistics,
+long with the checked5014 EMA. Only normalization statistics are transferred;
+model weights do not roll back. Each complete64×4 update commits Adam/EMA once,
+leaving the inactive horizon bank unchanged.
+
+On the first short microbatch, eight actual own states and h/z continue to450
+under no_grad, without observations, future Source poses or engine correction.
+The extra rollout's RNG is restored. Selection reserves8 legal late16-step
+branches spanning pre-contact, post-spawn and motion-error states. H450 updates
+already supply long own prefixes and need no extra rollout. Missing legal slots
+are reported rather than filled through coordinate repair.
+
+The real GPU probe found a B64→B8 map-cache mismatch. Scoped map-cache views and
+finally restoration were added, with real endless-spawn64→8→64 and exception
+tests. Repeated real B64 probes16/450 passed: gradient norms7.21865/2.38025,
+late branches12/16 and16/16, exercising contact and late spawn labels.
+Source, model, all Adam and both horizon EMA banks stayed unchanged; optimizer
+commits0. Worker59592 restored5060 bitexactly. The first full batch then exposed
+a NumPy-int in new telemetry: the metrics write after SGD failed, leaving the
+durable checkpoint at5060. Counters now use Python int; plain JSON is checked
+before optimizer commit, with a NumPy-bool regression test. Worker70360 reloaded
+5060, verifying exact model,165 Adam and NumPy/CPU/CUDA RNG; the unsaved attempt
+is repeated. Historical best5014 was inherited
+separately; no game was automatically changed. Quality uses the same full450
+panel and is assessed separately from implementation correctness.
+[Plan](training_runs/rssm_coordinate_replay_20261112/replay_curriculum_plan.json),
+[probe](training_runs/rssm_coordinate_replay_20261112/replay_probe.json),
+[resume](training_runs/rssm_coordinate_replay_20261112/resume_verification_g5060_coordinate_long_replay_v1.json),
+[telemetry-failure recovery](training_runs/rssm_coordinate_replay_20261112/metadata_failure_recovery_g5060.json).
+
+The first five saved updates5061–5065 passed independent verification:4×H16,
+1×H450, EMA commits4/1,1156 frozen tensors exact,165 Adam retained, clock46→51.
+The actual cumulative main count320000 includes the preceding46 updates;
+late branches total49 from short scouts and61 from the full rollout.
+Validation5065 scored19.8004 (+2.42% versus5060), so improvement was not claimed.
+After ten updates5070 scored18.2629 (−5.53% versus5060): mean player drift
+1.49020→1.41254, NPC5.94040→5.60012tiles. However final NPC error worsened
+6.61512→7.88826, score p9553.8209→57.0478, and missing Source-alive NPC
+steps506→668. Player improvement mainly comes from451 fully blocked Source
+transitions; free movement and2066 Source sliding transitions remain worse.
+Source-slide coordinate error1.23480→1.31936tiles, velocity MAE
+0.35218→0.46786tiles/s. This is a partial mean-trajectory gain, not eliminated drift or
+a quality pass. Historical5014 remains best by score. Training continues.
+[First-cycle proof](training_runs/rssm_coordinate_replay_20261112/first_replay_cycle_verification.json),
+[5070 validation](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/drift_trajectory_validation.json),
+[comparison](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/comparison.json),
+[contact cohorts](training_runs/coordinate_replay_audit_20261112/post_cycle_g5070/source_contact_cohorts.json).
+
+## H52. Temporary XY drift-only training
+
+The user requested coordinate drift alone. Full5079 was retained;
+`training_runs/rssm_drift_only_20261112` continues it without resetting Adam/RNG,
+clock65/500 or replay19. First new5080 correctly uses450, followed by16; future
+32/64/128/256/450 horizons are supported. Batch stays64×4=256.
+Only smooth-L1 Player/NPC XY in map tiles is supervised, fixed1:1 actor weights,
+plus late own-state XY at1/4/8/16 with the existing0.25 branch multiplier.
+Source life masks retain errors for model-missing NPCs, excluding exact Source
+teleport ticks.
+
+There are no KL, reconstruction, memory-overshooting, state-field, velocity/heading,
+wall/pass-BCE, combat/spawn/event objectives or auxiliary RGB forwards. Dedicated
+heads and the decoder are frozen. The allowed40,065,236 parameters/122 tensors
+receive XY gradients only, including initial observed-context encoding.
+All43 additional frozen tensors and their Adam steps/moments remain exact:
+grad=None also prevents momentum and weight decay. All165 canonical optimizer
+names/groups/states remain checkpointed, including requires_grad=False entries.
+Shared-core features can change inputs to frozen heads; frozen weights do not
+promise identical combat predictions. EMA does not scale XY and all its values
+stay frozen. Old counters advance as optimizer-update ledgers. The old auxiliary
+sampler reserves indices only for RNG/ledger compatibility, without loading a
+batch or training events; actual auxiliary fragments/queries0. Validation still
+measures full450 dynamics without training other objectives.
+
+Baseline5079 uses the same16×450: score20.97706, mean Player/NPC coordinate errors
+1.62325/6.43040tiles. CPU tests and real B64 probes16/450 passed: other-objective
+calls0, off-head gradientsNone, discarded-copy model/165Adam/EMA unchanged.
+Worker56368 restored5079 exactly. Independent saved5083 audit verifies four pure
+XY commits:5080H450,5081–5083H16. All122 allowed tensors actually changed with
+Adam clock+4;1199 frozen tensors remain exact, including43 new frozen heads and
+every corresponding Adam field. Short/long/navigation EMA values are exact,
+clock65→69; Interaction/floor0 and auxiliary/posterior/decoder/memory calls0.
+First H450 loss3.31025; short losses0.03045/0.01488/0.03396 use a different horizon
+and do not establish improved450-step drift. Best5014 is retained; training continues.
+[Plan](training_runs/rssm_drift_only_20261112/drift_only_plan.json),
+[GPU probe](training_runs/rssm_drift_only_20261112/drift_only_probe.json),
+[5079→5083 audit](training_runs/rssm_drift_only_20261112/first_drift_only_update_verification.json),
+[5079 baseline](training_runs/drift_only_audit_20261112/baseline_g5079/drift_trajectory_validation.json).
+
+## H53. Loss-gated horizons with ten consecutive updates
+
+The user replaced the fixed horizon budget and forced one-in-five long updates
+with a coordinate-loss gate. The active
+`training_runs/rssm_loss_gated_drift_20261112` retains full5112 from the stopped
+`rssm_drift_only_20261112`: all model weights,165 Adam names/groups/states, RNG,
+historical coordinate/replay counters and frozen EMA values. There is no reset.
+The former500-update horizon budget and forced H450 cadence are history-only.
+The earlier single-pass preparation was archived unused before GPU probing or
+training; the executed plan requires **10 consecutive successes**.
+
+The exact main-horizon path is
+`16 → 32 → 64 → 96 → 128 → 160 → 192 → 224 → 256 → 288 → 320 → 352 → 384 → 416 → 448 → 450`.
+Each success is one **completed64×4 optimizer update**, using its mean train loss
+including main and late XY terms at the current H. Strict loss **<0.25** increments
+the streak; **≥0.25** resets it. Only the tenth consecutive success advances one
+stage and resets its counter to zero. H450 continues as the final stage.
+The numerical objective remains pure XY with fixed weights: no EMA scaling,
+KL/floor, reconstruction, combat/spawn, wall, velocity or other objective is enabled.
+The122 allowed tensors/40,065,236 parameters train;43 dedicated tensors and their
+Adam moments/steps remain frozen, while all165 optimizer histories stay saved.
+The existing no-grad450 scout only selects short XY recovery branches; it does
+not force an H450 optimizer update or increment the loss gate.
+
+“Что показывает модель” generates the current H and displays four offsets spanning
+1..H. It refreshes on a stage advance and hides an old-H preview until the new one
+is ready. Full450 held-out validation remains separate, before SGD and every250
+global optimizer updates. Mandatory `--loss-gated-curriculum-plan` is retained
+alongside every legacy plan pin when resuming; the active stop marker is
+`rssm_loss_gated_drift_20261112/stop_training`.
+
+The revised consecutive-gate tests, all16 horizon gradient/denominator tests and
+preview tests passed. Discarded B64 GPU probes H16/H96/H450 passed with finite
+gradient norms0.55141/0.92469/3.17332 and losses0.003823/0.060369/3.074499.
+Model,165 Adam states, EMA and Source bytes stayed exact; disabled gradients were
+None, optimizer commits0 and the private gate stayed0/10. H450 was a capacity
+probe only. The first actual series5113–5122 used H16 throughout: the first nine
+updates held H16; update5122 loss0.005570620024911932 advanced toH32 with streak0.
+Its new preview generated32 transitions. This confirms the requested transition,
+not full450 gameplay quality or elimination of drift.
+[Gate plan](training_runs/rssm_loss_gated_drift_20261112/loss_gated_curriculum_plan.json),
+[source preservation](training_runs/rssm_loss_gated_drift_20261112/initialization.json),
+[GPU probe](training_runs/rssm_loss_gated_drift_20261112/loss_gated_probe.json),
+[first consecutive-series audit](training_runs/rssm_loss_gated_drift_20261112/first_loss_gated_streak_verification.json).
 
 ## Changes to goals, batches and data units
 

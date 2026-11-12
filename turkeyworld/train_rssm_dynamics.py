@@ -192,23 +192,23 @@ class RSSMTraining:
                     if (not name.startswith(('flow_renderer.', 'base_student.'))
                             and name in client_state and client_state[name].shape == value.shape):
                         client_state[name].copy_(value)
-        batch = self.short_val.batch(1, context=1, horizon=4, indices=np.asarray([[0, 0]]))
-        with torch.inference_mode():
-            fmap = client.encode_map(batch['map'])
-            state = batch['states'][:, 0].float()
-            memory = client.initialize_from_image(batch['context_frames'], batch['states'][:, :1], fmap)
-            images = []
-            for offset in range(4):
-                result = client.transition(state, batch['actions'][:, offset], fmap, memory)
-                state, memory = result['state'], result['memory']
-                images.append(client.render(state, result['features'], fmap)[0].float())
-            generated = torch.stack(images)
+        from .rssm_stage_preview import stage_preview_spec, stage_preview_batch, generate_stage_preview
+        spec = stage_preview_spec(self.state)
+        horizon, context, offsets = spec['horizon'], spec['context'], spec['display_offsets']
+        data = self.long_val if spec['gated'] else self.short_val
+        batch = stage_preview_batch(data, spec)
+        generated, source = generate_stage_preview(client, batch, spec)
+        offset_label = ', '.join(str(offset) for offset in offsets)
         def rgb(value):
             return value.detach().float().clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         preview = {'context': rgb(batch['context_frames'][0]),
-            'source': rgb(batch['target_frames'][0]), 'generated': rgb(generated),
+            'source': rgb(source), 'generated': rgb(generated),
             'generated_float': generated.cpu(), 'metadata': {
-                'step': self.state['global_training_step'], 'every': 10, 'context': 1, 'horizon': 4,
+                'step': self.state['global_training_step'], 'every': 10, 'context': context, 'horizon': horizon,
+                'generated_rollout_transitions': horizon, 'display_offsets': offsets,
+                'displayed_future_frames': len(offsets), 'current_stage_preview': spec['gated'],
+                'loss_gated_curriculum_plan_sha256': spec.get('plan_sha256'),
+                'loss_gated_stage_index': spec.get('stage_index'),
                 'kind': 'rssm_free_autoregressive_future', 'model_kind': 'RSSM',
                 'component_phase': self.state['rssm_training']['phase'],
                 'renderer_checkpoint': str(renderer_checkpoint),
@@ -216,10 +216,10 @@ class RSSMTraining:
                 'preview_assets': pinned,
                 'generated_at': now(), 'source_held_out': True, 'split': 'val',
                 'future_source_feedback': False, 'generated_finite': bool(torch.isfinite(generated).all()),
-                'caption': 'RSSM: четыре собственных перехода; замороженный нейрорендер ученика, один Euler шаг'+(' · updated NPR '+str(pinned['renderer_refinement_updates'])+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
-                'row_labels': {'context': 'CONTEXT: one observed frame | RSSM',
-                    'source': 'SOURCE: future measurement targets only',
-                    'generated': 'RSSM MODEL: prior-only autonomous future | frozen student renderer'+(' | updated NPR '+str(pinned['renderer_refinement_updates'])+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
+                'caption': 'RSSM: собственная траектория H'+str(horizon)+'; показаны offsets '+offset_label+'; замороженный нейрорендер, один Euler шаг'+(' · updated NPR '+str(pinned['renderer_refinement_updates'])+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
+                'row_labels': {'context': 'CONTEXT: '+str(context)+' observed frame(s) | RSSM',
+                    'source': 'SOURCE: target-only offsets '+offset_label,
+                    'generated': 'RSSM MODEL: free H'+str(horizon)+' | offsets '+offset_label+' | frozen renderer'+(' | updated NPR '+str(pinned['renderer_refinement_updates'])+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
         self.state['prediction_preview'] = save_autoregressive_preview(preview,
             self.root/'preview.png', step=self.state['global_training_step'], every=10,
             sr_model=self.sr, sr_metadata=self.sr_metadata)

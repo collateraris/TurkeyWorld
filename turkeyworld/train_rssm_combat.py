@@ -92,7 +92,9 @@ class RSSMCombatTraining(RSSMTraining):
             self.state['rssm_training']['loss_balance_state'] = self.loss_balancer.state_dict()
         if getattr(self, 'recovery_sampler', None) is not None:
             self.state['rssm_training']['combat_recovery_revision']['sampler_state'] = self.recovery_sampler.state_dict()
-        names = [name for name, value in model.named_parameters() if value.requires_grad]
+        names = getattr(self, '_optimizer_parameter_names', None)
+        if names is None:
+            names = [name for name, value in model.named_parameters() if value.requires_grad]
         payload = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration','enemy_rssm_resize') if key in metadata}
         payload.update(stage='world', state_schema=dict(STATE_SCHEMA), config=asdict(model.config),
             model=model.state_dict(), optimizer=optimizer.state_dict(), optimizer_parameter_names=names,
@@ -147,6 +149,22 @@ class RSSMCombatTraining(RSSMTraining):
             'navigation': navigation, 'combat': {'heads': heads, 'trajectory': trajectory, **gate},
             'passed': bool(navigation['passed'] and gate['passed']), 'source_held_out': True,
             'source_future_feedback': False, 'renderer_evaluated': False, 'gameplay_qualified': False}
+        if getattr(self, 'coordinate_curriculum', None) is not None:
+            from .rssm_drift_selection import heldout_drift_score
+            report['drift_selection'] = heldout_drift_score(trajectory,
+                directory/'combat/trajectory/heldout_trajectory_states.npz')
+            report['coordinate_curriculum_updates'] = self.coordinate_curriculum['updates']
+            if self.coordinate_curriculum['updates'] not in self.coordinate_curriculum['completed_validation_updates']:
+                self.coordinate_curriculum['completed_validation_updates'].append(self.coordinate_curriculum['updates'])
+        if getattr(self, 'replay_revision', None) is not None:
+            report['replay_curriculum_updates'] = self.replay_revision['updates']
+            self.replay_revision['baseline_complete'] = True
+        if getattr(self, 'drift_only_revision', None) is not None:
+            report['objective_protocol'] = 'rssm_coordinate_drift_only_v1'
+            self.drift_only_revision['baseline_complete'] = True
+        if getattr(self, 'loss_gated_curriculum', None) is not None:
+            report['loss_gated_curriculum_updates'] = self.loss_gated_curriculum['updates']
+            self.loss_gated_curriculum['baseline_complete'] = True
         if expanded_spawn is not None:
             report['combat'].update(expanded_spawn=expanded_spawn, close_wall_melee=melee)
             self.recovery_revision['baseline_complete'] = True
@@ -158,6 +176,19 @@ class RSSMCombatTraining(RSSMTraining):
         atomic_json(self.root/'rssm_validation_latest.json', report)
         self.state.update(rssm_validation=report, validation_progress={'status': 'complete', 'step': step})
         self.publish()
+        if getattr(self, 'coordinate_curriculum', None) is not None:
+            from .rssm_drift_selection import drift_candidate_improves, publish_best_drift
+            selector_path = self.root/'best_drift.json'
+            previous = json.loads(selector_path.read_text(encoding='utf-8')) if selector_path.exists() else None
+            if drift_candidate_improves(report['drift_selection'], previous['score'] if previous else None):
+                # Save the exact just-validated full model/Adam before publishing a selector.
+                self.save(model, self._drift_optimizer, self._drift_metadata)
+                self.state['best_drift'] = publish_best_drift(self.checkpoint, self.root, step=step,
+                    score=report['drift_selection'], validation_report=directory/'rssm_combat_validation.json',
+                    combined_quality_passed=report['passed'])
+            elif previous:
+                self.state['best_drift'] = previous
+            self.publish()
 
     def run(self):
         args = self.args; torch.set_num_threads(4)
@@ -257,7 +288,8 @@ class RSSMCombatTraining(RSSMTraining):
             self.batch_revision = bind_batch_revision(self.state, batch_plan, sha256=_digest(batch_path),path=batch_path,
                 parent_recovery_sha=self.recovery_revision['sha256'],
                 source_checkpoint_sha=_digest(Path(batch_plan['source_checkpoint'])),
-                cli_microbatch=self.microbatch,cli_accum=self.accumulation)
+                cli_microbatch=32 if getattr(args,'batch256_plan',None) is not None else self.microbatch,
+                cli_accum=self.accumulation)
             preview_path = getattr(args, 'preview_assets_plan', None)
             if (batch_plan.get('preview_assets_sha256') is not None
                     and (preview_path is None or _digest(preview_path)!=batch_plan['preview_assets_sha256'])):
@@ -304,11 +336,118 @@ class RSSMCombatTraining(RSSMTraining):
                 source_checkpoint_sha256=_digest(Path(schedule_plan['source_checkpoint'])),
                 loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
                 base_plan_sha256=self.plan_sha, loss_balance_plan_sha256=self.loss_balance_revision['sha256'])
+        self.combat_v6_revision = None
+        self.attack_positive_balanced_sampling = False
+        v6_path = getattr(args, 'combat_v6_plan', None)
+        if v6_path is None and self.state['rssm_training'].get('combat_v6_revision'):
+            raise ValueError('Saved late-event/component training requires its immutable v6 plan')
+        if v6_path is not None:
+            if self.combat_only_revision is None or self.loss_balancer is None:
+                raise ValueError('Combat v6 preserves the current combat-only dual-RSSM continuation')
+            from .rssm_combat_v6 import bind_combat_v6
+            from .rssm_component_balance import LOSS_PROTOCOL
+            v6_plan = json.loads(v6_path.read_text(encoding='utf-8'))
+            calibration_path = Path(v6_plan['gradient_calibration'])
+            calibration = json.loads(calibration_path.read_text(encoding='utf-8'))
+            self.combat_v6_revision, self.loss_balancer, combat_branches = bind_combat_v6(
+                self.state, v6_plan, calibration, path=v6_path, sha256=_digest(v6_path),
+                calibration_sha256=_digest(calibration_path),
+                source_checkpoint_sha256=_digest(Path(v6_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
+                base_plan_sha256=self.plan_sha)
+            self.loss_protocol = LOSS_PROTOCOL
+            self.attack_positive_balanced_sampling = True
+        self.batch256_revision = None
+        batch256_path = getattr(args,'batch256_plan',None)
+        if batch256_path is None and self.state['rssm_training'].get('batch256_revision'):
+            raise ValueError('Saved64x4 training requires its immutable batch256 plan')
+        if batch256_path is not None:
+            if self.combat_v6_revision is None:
+                raise ValueError('Batch256 preserves the current aligned-event/component protocol')
+            from .rssm_batch256 import bind_batch256_revision
+            batch256_plan=json.loads(batch256_path.read_text(encoding='utf-8'))
+            probe_path=Path(batch256_plan['batch64_probe'])
+            probe=json.loads(probe_path.read_text(encoding='utf-8'))
+            self.batch256_revision,combat_branches=bind_batch256_revision(self.state,batch256_plan,probe,
+                path=batch256_path,sha256=_digest(batch256_path),probe_sha256=_digest(probe_path),
+                source_checkpoint_sha256=_digest(Path(batch256_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists()else initial),
+                cli_microbatch=self.microbatch,cli_accumulation=self.accumulation)
+        self.coordinate_curriculum = None
+        self.coordinate_plan = None
+        coordinate_path = getattr(args, 'coordinate_curriculum_plan', None)
+        if coordinate_path is None and self.state['rssm_training'].get('coordinate_curriculum'):
+            raise ValueError('Saved coordinate curriculum requires its immutable plan')
+        if coordinate_path is not None:
+            if self.batch256_revision is None or self.feedback_mode != 'detached':
+                raise ValueError('Coordinate curriculum preserves the validated64x4 component continuation')
+            from .rssm_coordinate_curriculum import bind_coordinate_curriculum
+            self.coordinate_plan = json.loads(coordinate_path.read_text(encoding='utf-8'))
+            self.coordinate_curriculum = bind_coordinate_curriculum(self.state, self.coordinate_plan,
+                path=coordinate_path, sha256=_digest(coordinate_path),
+                source_checkpoint_sha256=_digest(Path(self.coordinate_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
+                base_plan_sha256=self.plan_sha, cli_microbatch=self.microbatch,
+                cli_accumulation=self.accumulation)
+            self.combat_loss_overrides = {**self.combat_loss_overrides,
+                'kinematic_protocol': self.coordinate_plan['kinematic_protocol']}
+        self.replay_revision = None
+        self.replay_plan = None
+        replay_path = getattr(args, 'replay_curriculum_plan', None)
+        if replay_path is None and (self.state['rssm_training'].get('replay_curriculum')
+                or 'horizon_ema_banks' in self.state['rssm_training'].get('loss_balance_state', {})):
+            raise ValueError('Saved long replay requires its immutable plan and separate horizon EMA banks')
+        if replay_path is not None:
+            if self.coordinate_curriculum is None or self.loss_balancer is None:
+                raise ValueError('Long replay preserves the existing coordinate and component continuation')
+            from .rssm_replay_curriculum import bind_replay_curriculum
+            self.replay_plan = json.loads(replay_path.read_text(encoding='utf-8'))
+            seed_path = Path(self.replay_plan['long_seed_checkpoint'])
+            seed_checkpoint = torch.load(seed_path, map_location='cpu', weights_only=False, mmap=True)
+            seed_balance = copy.deepcopy(seed_checkpoint['run_state']['rssm_training']['loss_balance_state'])
+            del seed_checkpoint
+            self.replay_revision, self.loss_balancer = bind_replay_curriculum(self.state, self.replay_plan,
+                path=replay_path, sha256=_digest(replay_path),
+                source_checkpoint_sha256=_digest(Path(self.replay_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
+                long_seed_checkpoint_sha256=_digest(seed_path), long_seed_loss_balance_state=seed_balance,
+                base_plan_sha256=self.plan_sha, cli_microbatch=self.microbatch, cli_accumulation=self.accumulation)
+        self.drift_only_revision = None
+        drift_path = getattr(args, 'drift_only_plan', None)
+        if drift_path is None and (self.state['rssm_training'].get('drift_only_revision')
+                or self.state.get('objective_protocol') == 'rssm_coordinate_drift_only_v1'):
+            raise ValueError('Saved coordinate-only training requires its immutable objective plan')
+        if drift_path is not None:
+            if self.replay_revision is None:
+                raise ValueError('Coordinate-only training preserves the existing short/long replay curriculum')
+            from .rssm_drift_only_protocol import bind_drift_only
+            drift_plan = json.loads(drift_path.read_text(encoding='utf-8'))
+            self.drift_only_revision = bind_drift_only(self.state, drift_plan,
+                path=drift_path, sha256=_digest(drift_path),
+                source_checkpoint_sha256=_digest(Path(drift_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
+                base_plan_sha256=self.plan_sha, optimizer_parameter_names=saved['optimizer_parameter_names'])
+        self.loss_gated_curriculum = None
+        gate_path = getattr(args, 'loss_gated_curriculum_plan', None)
+        if gate_path is None and (self.state['rssm_training'].get('loss_gated_curriculum')
+                or self.state.get('horizon_curriculum_protocol') == 'rssm_xy_loss_gated_horizon_v1'):
+            raise ValueError('Saved loss-gated horizon training requires its immutable plan')
+        if gate_path is not None:
+            if self.drift_only_revision is None:
+                raise ValueError('Loss-gated horizons preserve the existing pure-XY-only objective')
+            from .rssm_loss_gated_curriculum import bind_loss_gated_curriculum
+            gate_plan = json.loads(gate_path.read_text(encoding='utf-8'))
+            self.loss_gated_curriculum = bind_loss_gated_curriculum(self.state,gate_plan,
+                path=gate_path,sha256=_digest(gate_path),
+                source_checkpoint_sha256=_digest(Path(gate_plan['source_checkpoint'])),
+                loaded_checkpoint_sha256=_digest(self.checkpoint if self.checkpoint.exists() else initial),
+                base_plan_sha256=self.plan_sha)
         model.rssm_migration = saved['rssm_migration']
         model.enemy_rssm_resize = saved.get('enemy_rssm_resize')
         model.to(self.device).float(); policy = configure_rssm_training(model)
         names = [name for name, value in model.named_parameters() if value.requires_grad]
         if names != saved['optimizer_parameter_names']: raise ValueError('Combat Adam parameter names changed')
+        self._optimizer_parameter_names = list(names)
         named_parameters=dict(model.named_parameters())
         groups=[{'params':[named_parameters[saved['optimizer_parameter_names'][index]]for index in group['params']]}
             for group in saved['optimizer']['param_groups']]
@@ -330,9 +469,14 @@ class RSSMCombatTraining(RSSMTraining):
             from .rssm_spawn_curriculum import RecoveryCombatSampler
             sampler = self.recovery_sampler = RecoveryCombatSampler(self.short, context=1, horizon=16,
                 cache_path=self.root/'recovery_sampling.json',
-                target_distance_balanced=self.target_distance_balanced_sampling)
+                target_distance_balanced=self.target_distance_balanced_sampling,
+                attack_positive_balanced=self.attack_positive_balanced_sampling)
             if self.recovery_revision['sampler_state'] is not None:
-                sampler.restore_state(self.recovery_revision['sampler_state'])
+                sampler_state = self.recovery_revision['sampler_state']
+                if self.attack_positive_balanced_sampling and sampler_state.get('version') != 2:
+                    from .rssm_spawn_curriculum import upgrade_attack_balanced_sampler_state
+                    sampler_state = upgrade_attack_balanced_sampler_state(sampler_state)
+                sampler.restore_state(sampler_state)
             self.negative_val = StagedSequenceData(negative_root/'moving1/rgb/val', self.device,
                 mode='stream', cache_bytes=32*1024**2)
             atomic_json(self.root/'recovery_sampling_summary.json', sampler.summary(batch_size=self.microbatch))
@@ -358,9 +502,43 @@ class RSSMCombatTraining(RSSMTraining):
         if self.combat_only_revision is not None:
             restore_tag = 'combatonly_v1'
             restore_proof.update(training_schedule='combat_only_v1', navigation_replay_enabled=False)
+        if self.combat_v6_revision is not None:
+            restore_tag = 'combat_components_v6'
+            restore_proof.update(loss_protocol=self.loss_protocol, late_event_supervised_horizon=16,
+                component_priorities=self.loss_balancer.state['components']['priorities'])
+        if self.batch256_revision is not None:
+            restore_tag='batch256_v7'
+            restore_proof.update(batch_protocol='rssm_effective256_v7',recovery_branches_per_microbatch=16,
+                direct_query_budget_per_microbatch=256)
+        if self.coordinate_curriculum is not None:
+            restore_tag = 'coordinate_curriculum_v1'
+            restore_proof.update(coordinate_curriculum_plan_sha256=self.coordinate_curriculum['sha256'],
+                coordinate_curriculum_updates=self.coordinate_curriculum['updates'],
+                coordinate_gradient_protocol=self.coordinate_plan['coordinate_gradient_protocol'],
+                memory_overshooting_protocol=self.coordinate_plan['overshooting_protocol'])
+        if self.replay_revision is not None:
+            restore_tag = 'coordinate_long_replay_v1'
+            restore_proof.update(replay_curriculum_plan_sha256=self.replay_revision['sha256'],
+                replay_curriculum_updates=self.replay_revision['updates'],
+                separate_short_long_ema=True, long_ema_seed_step=5014)
+        if self.drift_only_revision is not None:
+            from .rssm_drift_only_protocol import configure_drift_only_training
+            drift_policy = configure_drift_only_training(model, optimizer_parameter_names=self._optimizer_parameter_names)
+            policy['dynamics_trainable'] = drift_policy['trainable_parameters']
+            self.state['rssm_training']['drift_only_parameter_policy'] = drift_policy
+            restore_tag = 'drift_only_v1'
+            restore_proof.update(objective_protocol='rssm_coordinate_drift_only_v1',
+                drift_only_plan_sha256=self.drift_only_revision['sha256'],
+                full_optimizer_parameter_names_preserved=True, ema_values_frozen=True)
+        if self.loss_gated_curriculum is not None:
+            restore_tag = 'loss_gated_drift_v1'
+            restore_proof.update(loss_gated_curriculum_plan_sha256=self.loss_gated_curriculum['sha256'],
+                loss_gated_stage_index=self.loss_gated_curriculum['stage_index'],
+                loss_gated_current_horizon=self.loss_gated_curriculum['current_horizon'],forced_long_replay=False)
         restore_name = f"resume_verification_g{saved['training_steps']}_{restore_tag}.json"
         atomic_json(self.root/restore_name, restore_proof)
         metadata = {key: saved[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration','enemy_rssm_resize') if key in saved}
+        self._drift_optimizer, self._drift_metadata = optimizer, metadata
         self.state.update(status='running', model_parameters=saved['run_state'].get('model_parameters'),
             frozen_assets_fingerprint=frozen, keep_awake={'system_required': True, 'display_required': False})
         self.state['rssm_training'].update(dynamics_trainable=policy['dynamics_trainable'])
@@ -371,11 +549,23 @@ class RSSMCombatTraining(RSSMTraining):
             atomic_json(self.root/'updated_preview_assets_verification.json',preview_proof)
             self.preview(model);self.save(model,optimizer,metadata)
         if (self.state['rssm_training']['last_validation_step'] is None
-                or self.recovery_revision is not None and not self.recovery_revision['baseline_complete']):
-            self.validate(model); self.save(model, optimizer, metadata)
+                or self.recovery_revision is not None and not self.recovery_revision['baseline_complete']
+                or self.combat_v6_revision is not None and not self.combat_v6_revision['baseline_complete']
+                or self.coordinate_curriculum is not None
+                    and 0 not in self.coordinate_curriculum['completed_validation_updates']
+                or self.replay_revision is not None and not self.replay_revision.get('baseline_complete', False)):
+            self.validate(model)
+            if self.combat_v6_revision is not None:self.combat_v6_revision['baseline_complete'] = True
+            self.save(model, optimizer, metadata)
+        elif self.drift_only_revision is not None and not self.drift_only_revision.get('baseline_complete', False):
+            self.validate(model)
+            if self.combat_v6_revision is not None:self.combat_v6_revision['baseline_complete'] = True
+            self.save(model, optimizer, metadata)
+        elif self.loss_gated_curriculum is not None and not self.loss_gated_curriculum.get('baseline_complete',False):
+            self.validate(model);self.save(model,optimizer,metadata)
         while (not args.updates or self.state['rssm_training']['combat_completed'] < args.updates):
             training = self.state['rssm_training']; completed = training['combat_completed']
-            if training['quality_streak'] >= 2: break
+            if training['quality_streak'] >= 2 and self.loss_gated_curriculum is None: break
             if (self.root/'stop_training').exists():
                 self.state['status'] = 'stopped'; self.save(model, optimizer, metadata); return
             step = self.state['global_training_step']+1
@@ -384,20 +574,46 @@ class RSSMCombatTraining(RSSMTraining):
             # Latent mode and observed context vary independently of the3:1 task cycle.
             mode = plan['latent_cycle'][(completed//4) % 4]
             context = 1+(completed//16) % 2
-            configure_rssm_training(model); model.core.train(mode == 'sample')
+            main_horizon = 450
+            if self.coordinate_curriculum is not None:
+                from .rssm_coordinate_curriculum import coordinate_horizon
+                main_horizon = coordinate_horizon(self.coordinate_curriculum['updates'])
+            replay_choice = None
+            if self.replay_revision is not None:
+                from .rssm_replay_curriculum import replay_training_horizon
+                replay_choice = replay_training_horizon(self.state)
+                main_horizon = replay_choice['horizon']
+                self.loss_balancer.select_update(horizon=main_horizon)
+            configure_rssm_training(model)
+            if self.drift_only_revision is not None:
+                from .rssm_drift_only_protocol import configure_drift_only_training
+                configure_drift_only_training(model, optimizer_parameter_names=self._optimizer_parameter_names)
+            model.core.train(mode == 'sample')
             optimizer.zero_grad(set_to_none=True)
             pool = combat_long if environment == 'combat' else nav_long
             micro_rows=[];sample_rows=[];group_reports=[]
             for micro in range(self.accumulation):
                 pairs = np.column_stack([self.rng.integers(len(pool.episodes),size=self.microbatch),
                     np.zeros(self.microbatch,np.int64)])
-                batch = pool.batch(self.microbatch,context=context,horizon=450,indices=pairs)
+                batch = pool.batch(self.microbatch,context=context,horizon=main_horizon,indices=pairs)
                 if environment == 'combat':
                     aux_pairs=sampler.sample(self.microbatch,self.rng)
-                    auxiliary=self.short.batch(self.microbatch,context=1,horizon=16,indices=aux_pairs)
+                    auxiliary=(None if self.drift_only_revision is not None else
+                        self.short.batch(self.microbatch,context=1,horizon=16,indices=aux_pairs))
                     sample_rows.append(copy.deepcopy(sampler.last_sample))
+                    if self.drift_only_revision is not None:
+                        sample_rows[-1].update(index_reservation_only=True, used_aux_fragments=0,
+                            auxiliary_source_queries=0, training_cases_used=False)
                 else:
                     auxiliary=nav_short.batch(self.microbatch,context=1,horizon=16,rng=self.rng)
+                late_kwargs = {}
+                if self.replay_revision is not None and (main_horizon == 450 or micro == 0):
+                    late_kwargs['late_prefix_protocol'] = self.replay_plan['late_prefix_protocol']
+                    if main_horizon < 450:
+                        late_data = pool.batch(8, context=context, horizon=450, indices=pairs[:8])
+                        late_kwargs['late_prefix_batch'] = {
+                            'actions': late_data['actions'].detach(), 'map': late_data['map'].detach()}
+                        del late_data
                 def progress(processed,horizon):
                     self.state['long_training_progress']={'step':step,'transitions_processed':processed,
                         'horizon':horizon,'tbptt_chunk':16,'optimizer_updated':False,
@@ -405,27 +621,50 @@ class RSSMCombatTraining(RSSMTraining):
                         'completed_microbatches':micro,'microbatch_size':self.microbatch,
                         'effective_batch_size':self.microbatch*self.accumulation,
                         'environment':environment,'source_future_feedback':False}
+                    if replay_choice is not None:
+                        self.state['long_training_progress']['ema_bank'] = replay_choice['ema_bank']
+                    if self.drift_only_revision is not None:
+                        self.state['long_training_progress']['objective_protocol'] = 'rssm_coordinate_drift_only_v1'
                     self.publish()
                 with environment_profile(model,navigation_only=environment=='navigation'):
-                    task_losses = self.loss_balancer.new_microbatch(environment) if self.loss_balancer is not None else None
-                    row=rssm_dynamics_backward(model,batch,auxiliary_batch=auxiliary,context=context,
+                    task_losses = (self.loss_balancer.new_microbatch(environment)
+                        if self.loss_balancer is not None and self.drift_only_revision is None else None)
+                    if self.drift_only_revision is not None:
+                        from .rssm_drift_only_objective import drift_only_backward
+                        row=drift_only_backward(model,batch,context=context,observed_context=context,
+                            expected_horizon=main_horizon,amp=nullcontext,progress_callback=progress,
+                            coordinate_gradient_protocol=self.coordinate_plan['coordinate_gradient_protocol'],
+                            combat_branch_protocol=combat_branches,**late_kwargs)
+                    else:
+                        row=rssm_dynamics_backward(model,batch,auxiliary_batch=auxiliary,context=context,
                         observed_context=context,auxiliary_context=1,auxiliary_observed_context=1,
-                        expected_horizon=450,amp=nullcontext,progress_callback=progress,
+                        expected_horizon=main_horizon,amp=nullcontext,progress_callback=progress,
                         contact_protocol=settings,**({'combat_protocol':{**plan['combat_loss'],**self.combat_loss_overrides},
                             'combat_branch_protocol':combat_branches}if environment=='combat'else
                             {'contact_branch_protocol':branches}if branches else{}),
                         numeric_state_feedback=self.feedback_mode if environment=='combat'else'attached',
-                        **({'loss_groups': task_losses} if task_losses is not None else {}))
-                if task_losses is not None:group_reports.append(row['loss_groups'])
+                        **({'coordinate_gradient_protocol': self.coordinate_plan['coordinate_gradient_protocol'],
+                            'memory_overshooting_protocol': self.coordinate_plan['overshooting_protocol']}
+                           if self.coordinate_curriculum is not None else {}),
+                        **late_kwargs,
+                            **({'loss_groups': task_losses} if task_losses is not None else {}))
+                if task_losses is not None or self.drift_only_revision is not None:group_reports.append(row['loss_groups'])
                 micro_rows.append(row)
                 del batch,auxiliary
             from .rssm_accumulation import accumulated_metrics,average_accumulated_gradients
             average_accumulated_gradients(model.parameters(),self.accumulation)
             metrics=accumulated_metrics(micro_rows)
             if self.loss_balancer is not None:
-                metrics['loss_groups'] = self.loss_balancer.summarize(group_reports, environment=environment, step=step)
+                if self.drift_only_revision is not None:
+                    from .rssm_drift_only_protocol import summarize_drift_groups
+                    metrics['loss_groups'] = summarize_drift_groups(group_reports, step=step)
+                else:
+                    metrics['loss_groups'] = self.loss_balancer.summarize(group_reports, environment=environment, step=step)
                 metrics['train_loss'] = metrics['loss_groups']['total']
                 metrics['train_loss_without_kl_floor'] = metrics['train_loss']-metrics['loss_groups']['kl_floor']
+            # Reject invalid telemetry before an irreversible Adam/counter
+            # commit, using the same encoder as the durable metrics writer.
+            json.dumps(metrics, ensure_ascii=False, allow_nan=False)
             self.state['long_training_progress']['completed_microbatches']=self.accumulation
             metrics['world_grad_norm'] = float(clip_finite_grad_norm_(model.named_parameters(), context=f'RSSM combat update{step}'))
             optimizer.step();commit_combat_update(self.state,step=step,environment=environment,
@@ -438,7 +677,11 @@ class RSSMCombatTraining(RSSMTraining):
             if self.batch_revision is not None:
                 self.batch_revision['updates']+=1;self.batch_revision['last_optimizer_step']=step
             if self.loss_balancer is not None:
-                self.loss_balancer.commit(metrics['loss_groups'], step=step)
+                if self.drift_only_revision is not None:
+                    from .rssm_drift_only_protocol import advance_frozen_balance_clock
+                    advance_frozen_balance_clock(self.loss_balancer, step=step)
+                else:
+                    self.loss_balancer.commit(metrics['loss_groups'], step=step)
                 self.loss_balance_revision['updates'] += 1
                 self.loss_balance_revision['last_optimizer_step'] = step
                 training['loss_balance_state'] = self.loss_balancer.state_dict()
@@ -446,6 +689,52 @@ class RSSMCombatTraining(RSSMTraining):
             if self.combat_only_revision is not None:
                 from .rssm_training_schedule import commit_combat_only_update
                 commit_combat_only_update(self.state, step=step, environment=environment)
+            if self.combat_v6_revision is not None:
+                self.combat_v6_revision['updates'] += 1
+                self.combat_v6_revision['last_optimizer_step'] = step
+            if self.batch256_revision is not None:
+                from .rssm_batch256 import commit_batch256_update
+                commit_batch256_update(self.state,step=step,sampler_draws=self.recovery_sampler.draws)
+            if self.coordinate_curriculum is not None:
+                from .rssm_coordinate_curriculum import commit_coordinate_update
+                commit_coordinate_update(self.state, step=step, horizon=main_horizon,
+                    sampler_draws=self.recovery_sampler.draws)
+                metrics.update(coordinate_curriculum_updates=self.coordinate_curriculum['updates'],
+                    coordinate_curriculum_plan_sha256=self.coordinate_curriculum['sha256'],
+                    coordinate_gradient_protocol=self.coordinate_plan['coordinate_gradient_protocol'],
+                    memory_overshooting_protocol=self.coordinate_plan['overshooting_protocol'])
+            if self.replay_revision is not None:
+                from .rssm_replay_curriculum import commit_replay_update
+                commit_replay_update(self.state, step=step, horizon=main_horizon,
+                    forced_long_replay=replay_choice['forced_long_replay'])
+                metrics.update(replay_curriculum_updates=self.replay_revision['updates'],
+                    replay_curriculum_plan_sha256=self.replay_revision['sha256'],
+                    long_replay_update=replay_choice['forced_long_replay'],
+                    curriculum_scheduled_horizon=replay_choice['curriculum_horizon'],
+                    horizon_ema_bank=replay_choice['ema_bank'])
+            if self.drift_only_revision is not None:
+                from .rssm_drift_only_protocol import commit_drift_only_update
+                commit_drift_only_update(self.state,step=step,sampler_draws=self.recovery_sampler.draws)
+                metrics.update(objective_protocol='rssm_coordinate_drift_only_v1',
+                    drift_only_updates=self.drift_only_revision['updates'],
+                    drift_only_plan_sha256=self.drift_only_revision['sha256'],
+                    ema_values_frozen=True, ema_learning=False, index_reservation_only=True,
+                    auxiliary_source_queries=0, used_aux_fragments=0,
+                    full_optimizer_parameter_names_preserved=True)
+            gate_advanced = False
+            if self.loss_gated_curriculum is not None:
+                from .rssm_loss_gated_curriculum import commit_loss_gated_update
+                gate = commit_loss_gated_update(self.state,step=step,horizon=main_horizon,
+                    train_loss=metrics['train_loss'],microbatches=len(micro_rows),
+                    microbatch_size=self.microbatch,effective_batch_size=self.microbatch*self.accumulation)
+                gate_advanced = gate['last_stage_advanced']
+                metrics.update(loss_gated_curriculum_plan_sha256=gate['sha256'],
+                    loss_gated_curriculum_updates=gate['updates'],loss_gated_stage_index=gate['stage_index'],
+                    loss_gated_current_horizon=gate['current_horizon'],last_training_horizon=main_horizon,
+                    loss_gate_threshold=.25,loss_gate_passed=gate['last_gate_passed'],
+                    loss_gate_consecutive_below_threshold=gate['consecutive_below_threshold'],
+                    loss_gate_required_consecutive_passes=10,loss_gate_goal_met=gate['goal_met'],
+                    loss_gate_stage_advanced=gate_advanced,forced_long_replay_active=False)
             metrics.update(step=step, global_training_step=step, rssm_phase='combat', component_phase='combat',
                 stage='rssm_combat_dynamics', loss_protocol=self.loss_protocol, training_environment=environment,
                 contact_branch_active=environment == 'navigation' and branches is not None,
@@ -453,17 +742,20 @@ class RSSMCombatTraining(RSSMTraining):
                 environment_navigation_only=environment == 'navigation', rssm_latent_training_mode=mode,
                 microbatch_size=self.microbatch,gradient_accumulation_steps=self.accumulation,
                 effective_batch_size=self.microbatch*self.accumulation,completed_microbatches=len(micro_rows),
-                dynamics_updated=True, image_objectives_active=False, timestamp=now())
+                dynamics_updated=True, image_objectives_active=False, timestamp=now(),
+                main_horizon=main_horizon, main_numeric_context=context, main_observed_context=context,
+                main_window_start=0)
             metrics['training_schedule'] = self.state.get('training_schedule', 'combat3_navigation1')
+            metrics['batch_protocol']=self.state.get('batch_protocol','rssm_effective128_v4')
             if environment=='combat':
                 metrics['combat_sampling']=(sample_rows[0]if self.accumulation==1 else
-                    {'microbatches':sample_rows,'quota':{'spawn':self.microbatch*self.accumulation//4,
-                        'attack_negative':self.microbatch*self.accumulation//4,
-                        'ordinary_combat':self.microbatch*self.accumulation//2},
+                    {'microbatches':sample_rows,'quota':{name:sum(row['quota'].get(name,0) for row in sample_rows)
+                        for name in set().union(*(set(row['quota']) for row in sample_rows))},
                      'microbatch_quota':sample_rows[0]['quota'],'source_labels_only':True})
             self.state['long_training_progress']['optimizer_updated'] = True
             self.state.update(loss=metrics['train_loss'], latest_metrics=metrics, current=step, status='running',
-                message='One-enemy Source combat' if environment == 'combat' else 'Explicit no-enemy navigation replay')
+                message=('Coordinate drift only; other training objectives frozen' if self.drift_only_revision is not None
+                    else 'One-enemy Source combat' if environment == 'combat' else 'Explicit no-enemy navigation replay'))
             with (self.root/'metrics.jsonl').open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps(metrics, ensure_ascii=False, allow_nan=False)+'\n')
             first_recovery = self.recovery_revision is not None and self.recovery_revision['updates'] == 1
@@ -471,11 +763,26 @@ class RSSMCombatTraining(RSSMTraining):
             first_balance=self.loss_balance_revision is not None and self.loss_balance_revision['updates']==1
             early_balance=self.loss_balance_revision is not None and self.loss_balance_revision['updates']<=4
             early_combat_only=self.combat_only_revision is not None and self.combat_only_revision['updates']<=4
-            if completed == 0 or first_recovery or first_batch or early_balance or early_combat_only or step % 10 == 0:
+            early_v6=self.combat_v6_revision is not None and self.combat_v6_revision['updates']<=4
+            early_batch256=self.batch256_revision is not None and self.batch256_revision['updates']<=4
+            early_coordinate=self.coordinate_curriculum is not None and self.coordinate_curriculum['updates']<=4
+            early_replay=self.replay_revision is not None and self.replay_revision['updates']<=5
+            early_drift=self.drift_only_revision is not None and self.drift_only_revision['updates']<=5
+            early_gate=self.loss_gated_curriculum is not None and self.loss_gated_curriculum['updates']<=5
+            if completed == 0 or first_recovery or first_batch or early_balance or early_combat_only or early_v6 or early_batch256 or early_coordinate or early_replay or early_drift or early_gate or gate_advanced or step % 10 == 0:
                 self.save(model, optimizer, metadata)
-            if step % 250 == 0:
-                self.validate(model); self.save(model, optimizer, metadata)
-            if step % 10 == 0: self.preview(model)
+            control = (self.combat_v6_revision is not None
+                and self.combat_v6_revision['updates'] in (100,250)
+                and self.combat_v6_revision['updates'] not in self.combat_v6_revision['completed_control_validations'])
+            coordinate_control = (self.coordinate_curriculum is not None
+                and self.loss_gated_curriculum is None
+                and self.coordinate_curriculum['updates'] in self.coordinate_plan['validation_curriculum_updates']
+                and self.coordinate_curriculum['updates'] not in self.coordinate_curriculum['completed_validation_updates'])
+            if step % 250 == 0 or control or coordinate_control:
+                self.validate(model)
+                if control:self.combat_v6_revision['completed_control_validations'].append(self.combat_v6_revision['updates'])
+                self.save(model, optimizer, metadata)
+            if step % 10 == 0 or gate_advanced: self.preview(model)
             if completed == 0 or first_recovery or first_batch or first_balance or step % 250 == 0:
                 current = _hash_tensors({name: value for name, value in model.state_dict().items()
                     if name.startswith(('flow_renderer.', 'vjepa_backend.renderer.', 'vjepa_backend.feature_head.'))})
@@ -505,10 +812,18 @@ def main(argv=None):
     parser.add_argument('--preview-assets-revision-plan',type=Path)
     parser.add_argument('--loss-balance-plan',type=Path)
     parser.add_argument('--combat-only-plan',type=Path)
+    parser.add_argument('--combat-v6-plan',type=Path)
+    parser.add_argument('--batch256-plan',type=Path)
+    parser.add_argument('--coordinate-curriculum-plan', type=Path)
+    parser.add_argument('--replay-curriculum-plan', type=Path)
+    parser.add_argument('--drift-only-plan', type=Path)
+    parser.add_argument('--loss-gated-curriculum-plan', type=Path)
     args = parser.parse_args(argv)
-    if ((args.batch,args.accumulation_steps)not in((16,1),(32,4))or args.updates<0
-            or (args.batch,args.accumulation_steps)==(32,4)and args.batch_revision_plan is None):
-        parser.error('Use legacy16x1 or explicitly revised32x4; updates0 means no finite budget')
+    if ((args.batch,args.accumulation_steps)not in((16,1),(32,4),(64,4))or args.updates<0
+            or (args.batch,args.accumulation_steps)in((32,4),(64,4))and args.batch_revision_plan is None
+            or (args.batch,args.accumulation_steps)==(64,4)and(args.batch256_plan is None or args.combat_v6_plan is None)
+            or args.batch256_plan is not None and(args.batch,args.accumulation_steps)!=(64,4)):
+        parser.error('Use legacy16x1, revised32x4, or explicitly measured64x4; updates0 means no finite budget')
     for key, value in vars(args).items():
         if isinstance(value, Path): setattr(args, key, value.resolve())
     from .vqgan_pipeline import process_alive

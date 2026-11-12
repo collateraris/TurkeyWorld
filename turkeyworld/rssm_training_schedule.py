@@ -7,6 +7,18 @@ from copy import deepcopy
 COMBAT_ONLY_SCHEDULE = 'combat_only_v1'
 
 
+def _expected_combat_draws(state, start, step):
+    """Keep128-example history when a later explicit revision uses256."""
+    revision = state['rssm_training'].get('batch256_revision')
+    if revision is None:
+        return (step-start)*state['training_protocol'].get('effective_batch_size',128)
+    split = revision.get('start_optimizer_step')
+    if (type(split) is not int or split < start or revision.get('previous_effective_batch_size') != 128
+            or revision.get('effective_batch_size') != 256):
+        raise ValueError('Invalid batch transition in combat-only draw history')
+    return (min(step,split)-start)*128+max(0,step-split)*256
+
+
 def bind_combat_only_revision(state, plan, *, path, sha256, source_checkpoint_sha256,
                               loaded_checkpoint_sha256, base_plan_sha256, loss_balance_plan_sha256):
     expected = {'version': 1, 'training_schedule': COMBAT_ONLY_SCHEDULE,
@@ -20,7 +32,6 @@ def bind_combat_only_revision(state, plan, *, path, sha256, source_checkpoint_sh
                    for key, value in expected.items())):
         raise ValueError('Combat-only curriculum or immutable parent pins changed')
     training = state['rssm_training'];step = state['global_training_step']
-    batch = state['training_protocol'].get('effective_batch_size', 128)
     start = plan.get('start_optimizer_step')
     if type(start) is not int or not 0 <= start <= step:
         raise ValueError('Combat-only curriculum requires a complete optimizer boundary')
@@ -51,7 +62,7 @@ def bind_combat_only_revision(state, plan, *, path, sha256, source_checkpoint_sh
                 or previous.get('last_optimizer_step') != step or previous.get('updates') != step-start
                 or training['combat_long_updates']-previous.get('combat_long_updates_at_start', -1) != step-start
                 or training['navigation_replay_updates'] != previous.get('navigation_replay_updates_at_start')
-                or training['combat_auxiliary_draws']-previous.get('combat_auxiliary_draws_at_start', -1) != (step-start)*batch
+                or training['combat_auxiliary_draws']-previous.get('combat_auxiliary_draws_at_start', -1) != _expected_combat_draws(state,start,step)
                 or training['navigation_auxiliary_draws'] != previous.get('navigation_auxiliary_draws_at_start')):
             raise ValueError('Saved combat-only curriculum identity or counters changed')
     state['training_schedule'] = COMBAT_ONLY_SCHEDULE
@@ -84,12 +95,11 @@ def commit_combat_only_update(state, *, step, environment):
     revision = state['rssm_training']['combat_only_revision']
     training = state['rssm_training']
     expected_updates = revision['updates']+1
-    batch = state['training_protocol'].get('effective_batch_size', 128)
     if (environment != 'combat' or step != state['global_training_step']
             or step != revision['last_optimizer_step']+1
             or step-revision['start_optimizer_step'] != expected_updates
             or training['combat_long_updates']-revision['combat_long_updates_at_start'] != expected_updates
-            or training['combat_auxiliary_draws']-revision['combat_auxiliary_draws_at_start'] != expected_updates*batch
+            or training['combat_auxiliary_draws']-revision['combat_auxiliary_draws_at_start'] != _expected_combat_draws(state,revision['start_optimizer_step'],step)
             or training['navigation_replay_updates'] != revision['navigation_replay_updates_at_start']
             or training['navigation_auxiliary_draws'] != revision['navigation_auxiliary_draws_at_start']):
         raise ValueError('Combat-only clocks commit only after a successful combat optimizer update')

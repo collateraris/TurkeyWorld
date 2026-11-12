@@ -130,6 +130,8 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
     combat_diagnostics = {}
     combat_names = ('combat_events', 'combat_target', 'combat_attack', 'combat_damage_npc',
                     'combat_damage_player', 'combat_death_npc', 'combat_spawn', 'combat_npc_motion')
+    if combat_protocol is not None and combat_protocol.get('kinematic_protocol') is not None:
+        combat_names += ('combat_kinematic_player_axes', 'combat_kinematic_npc_speed', 'combat_kinematic_npc_direction')
     if combat_protocol is not None:
         from .rssm_combat_objectives import prepare_combat_supervision, combat_supervised_terms
         combat_supervision = prepare_combat_supervision(batch, context, **combat_protocol)
@@ -154,6 +156,7 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
         with autocast():
             parts = {}
             task_parts = {}
+            spawn_part = None
             for index in range(first, last):
                 post = model.vjepa_backend.observe_step(previous[:, index], actions[:, index], features,
                     memory, frames[:, context+index])
@@ -214,6 +217,9 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
                     if combat_supervision is not None:
                         for name, value in combat_loss_groups(combat_terms).items():
                             task_values[name] = task_values[name]+value
+                        value = combat_terms['combat_spawn']
+                        task_values['enemy'] = task_values['enemy']-value
+                        spawn_part = value if spawn_part is None else spawn_part+value
                     for name, value in task_values.items():
                         task_parts[name] = task_parts.get(name, 0)+value
                 for name, value in values.items(): parts[name] = parts.get(name, 0)+value
@@ -239,6 +245,8 @@ def _posterior_backward(model, batch, *, context, observed, autocast, chunk_size
                 floors = {'player': kl_floor*(last-first)/horizon}
                 if dual_enemy: floors['enemy'] = floors['player']
                 loss = loss_groups.combine(task_parts, floors=floors)
+                if spawn_part is not None:
+                    loss = loss+loss_groups.combine({'enemy': spawn_part}, component='spawn')
         if not bool(torch.isfinite(loss)): raise FloatingPointError('Nonfinite RSSM posterior/motion objective')
         loss.backward(); calls += 1
         if check_gradients: finite_gradient_norm(model.named_parameters(), context=f'RSSM posterior backward {last}/{horizon}')
@@ -276,7 +284,9 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                            auxiliary_observed_context=None, chunk_size=16, teacher_weight=.1,
                            amp=None, progress_callback=None, expected_horizon=None, check_gradients=True,
                            contact_protocol=None, contact_branch_protocol=None, combat_protocol=None,
-                           numeric_state_feedback='attached', combat_branch_protocol=None, loss_groups=None):
+                           numeric_state_feedback='attached', combat_branch_protocol=None, loss_groups=None,
+                           coordinate_gradient_protocol=None, memory_overshooting_protocol=None,
+                           late_prefix_protocol=None, late_prefix_batch=None):
     """Backpropagate own prior trajectory, then separate posterior/Source labels.
 
     Distillation uses1..16 own teacher/student transitions plus Source anchors.
@@ -285,6 +295,10 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
     """
     if numeric_state_feedback not in ('attached', 'detached'):
         raise ValueError('Unknown numeric-state gradient feedback protocol')
+    from .rssm_coordinate_gradients import normalize_coordinate_gradient_protocol, integrate_coordinate_gradients
+    coordinate_gradient_protocol = normalize_coordinate_gradient_protocol(coordinate_gradient_protocol)
+    if coordinate_gradient_protocol is not None and numeric_state_feedback != 'detached':
+        raise ValueError('XY identity credit requires detached neural state conditioning')
     if loss_groups is not None and (phase != 'source' or loss_groups.calls != 0):
         raise ValueError('Grouped losses require a fresh Source microbatch accumulator')
     own_combat_protocol = None
@@ -312,6 +326,24 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
     expected = (450 if phase == 'source' else horizon) if expected_horizon is None else expected_horizon
     if horizon != expected or phase == 'distill' and horizon > 16:
         raise ValueError('RSSM source learning requires450 steps; distillation is bounded to16')
+    late_settings = None
+    if late_prefix_protocol is not None:
+        from .rssm_late_prefix_recovery import normalize_late_prefix_protocol, continue_own_prefix_candidates
+        late_settings = normalize_late_prefix_protocol(late_prefix_protocol)
+        if phase != 'source' or own_combat_protocol is None or own_combat_protocol['version'] != 2:
+            raise ValueError('Late own prefixes require actual Source combat branches version2')
+        if numeric_state_feedback != 'detached':
+            raise ValueError('Late own-prefix recovery preserves detached numerical conditioning')
+    if late_prefix_batch is not None and late_settings is None:
+        raise ValueError('Late-prefix controls require their explicit protocol')
+    if late_settings is not None and horizon < late_settings['scout_horizon']:
+        scout_count = min(len(states), late_settings['scout_batch_size'])
+        if (not isinstance(late_prefix_batch, dict) or set(late_prefix_batch) != {'actions', 'map'}
+                or late_prefix_batch['actions'].shape != (scout_count, late_settings['scout_horizon'], 4)
+                or late_prefix_batch['map'].shape != grid[:scout_count].shape
+                or not torch.equal(late_prefix_batch['map'], grid[:scout_count])
+                or not torch.equal(late_prefix_batch['actions'][:, :horizon].detach().float(), actions[:scout_count])):
+            raise ValueError('Late-prefix controls/maps must match the exact first8 main Source pairs')
     autocast = nullcontext if amp is None else amp
     teacher_values = (_teacher_targets(teacher, states, frames, actions, grid, context, observed)
                       if phase == 'distill' else None)
@@ -346,6 +378,7 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
                 transition_state = current.detach() if numeric_state_feedback == 'detached' else current
                 result = model.transition(transition_state, actions[:, index], features, memory)
                 _valid_result(result, expected_shape, f'own prior {index+1}')
+                result = integrate_coordinate_gradients(current, result, coordinate_gradient_protocol)
                 current, memory = result['state'], result['memory']
                 predicted.append(current)
                 if teacher_values is not None:
@@ -395,12 +428,22 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         if check_gradients: finite_gradient_norm(model.named_parameters(), context=f'RSSM own prior backward {last}/{horizon}')
         for name, part in parts.items(): totals[name] += float(part.detach())
         if progress_callback: progress_callback(last, horizon)
+    late_scout_metrics = {}
+    if late_settings is not None and horizon < late_settings['scout_horizon']:
+        extra_candidates, late_scout_metrics = continue_own_prefix_candidates(model,
+            current[:scout_count], memory[:scout_count], features[:scout_count], grid[:scout_count],
+            late_prefix_batch['actions'], start=horizon, late_prefix_protocol=late_settings, amp=amp)
+        combat_candidates.extend(extra_candidates)
     branch_metrics = (contact_branches_backward(model, branch_candidates,
         contact_branch_protocol=branch_protocol, contact_protocol=contact_protocol,
         amp=amp, check_gradients=check_gradients,
         **({'loss_groups': loss_groups} if loss_groups is not None else {})) if branch_protocol is not None else {})
     combat_branch_metrics = (combat_branches_backward(model, combat_candidates,
         combat_branch_protocol=own_combat_protocol, amp=amp, check_gradients=check_gradients,
+        coordinate_gradient_protocol=coordinate_gradient_protocol,
+        kinematic_protocol=(combat_protocol or {}).get('kinematic_protocol'),
+        **({'late_prefix_protocol': late_settings} if late_settings is not None else {}),
+        **({'contact_protocol': contact_protocol} if own_combat_protocol.get('version') == 2 else {}),
         **({'loss_groups': loss_groups} if loss_groups is not None else {}))
         if own_combat_protocol is not None else {})
     if auxiliary_batch is None:
@@ -412,7 +455,15 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
     auxiliary = _posterior_backward(model, auxiliary_batch, context=aux_context, observed=aux_observed,
         autocast=autocast, chunk_size=min(chunk_size, 4), check_gradients=check_gradients,
         contact_protocol=contact_protocol, combat_protocol=combat_protocol, loss_groups=loss_groups)
-    total = sum(totals.values())+auxiliary['loss']+branch_metrics.get('loss', 0.)+combat_branch_metrics.get('loss', 0.)
+    memory_metrics = {}
+    if memory_overshooting_protocol is not None:
+        from .rssm_memory_overshooting import memory_overshooting_backward
+        memory_metrics = memory_overshooting_backward(model, auxiliary_batch, context=aux_context,
+            observed_context=aux_observed, protocol=memory_overshooting_protocol,
+            coordinate_gradient_protocol=coordinate_gradient_protocol,
+            loss_groups=loss_groups, check_gradients=check_gradients)
+    total = (sum(totals.values())+auxiliary['loss']+branch_metrics.get('loss', 0.)
+        +combat_branch_metrics.get('loss', 0.)+memory_metrics.get('loss', 0.))
     kl_settings = _kl_settings(model)
     floor = kl_settings['free_nats']*(kl_settings['dynamics_scale']+kl_settings['representation_scale'])
     if getattr(getattr(model,'config',None),'enemy_rssm_enabled',False):floor*=2
@@ -426,6 +477,9 @@ def rssm_dynamics_backward(model, batch, *, phase='source', teacher=None, auxili
         **{'rssm_aux_'+name: value for name, value in auxiliary.items()},
         **{'rssm_contact_branch_'+name: value for name, value in branch_metrics.items()},
         **{'rssm_combat_branch_'+name: value for name, value in combat_branch_metrics.items()},
+        **{'rssm_memory_overshooting_'+name: value for name, value in memory_metrics.items()},
+        **{'rssm_late_prefix_scout_'+name: value for name, value in late_scout_metrics.items()},
+        'rssm_integrated_xy_gradients': coordinate_gradient_protocol is not None,
         'rssm_phase': phase, 'rssm_prior_horizon': horizon, 'rssm_prior_tbptt_chunks': chunks,
         'rssm_prior_context_frames': observed, 'rssm_prior_numerical_resets': 0,
         'rssm_prior_future_rgb_inputs': 0, 'rssm_posterior_feedback_to_prior': False,

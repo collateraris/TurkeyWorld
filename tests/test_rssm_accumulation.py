@@ -16,6 +16,24 @@ class RSSMAccumulationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):torch.set_num_threads(2)
 
+    def test_late_direct_events_and_query_work_sum_over_four_microbatches_including_empty(self):
+        key='rssm_combat_branch_direct_per_step_counts'
+        rows=[{'train_loss':1.,'rssm_combat_branch_branches':0}]
+        for number in (1,2,3):
+            counts=[dict(queries=number,valid=number,hit=0,attack=0,respawn=0)for _ in range(16)]
+            counts[4]['respawn']=number
+            rows.append({'train_loss':2.,key:counts,'rssm_combat_branch_direct_supervised_queries':16*number,
+                'rssm_combat_branch_direct_source_query_attempts':16*number})
+        original=copy.deepcopy(rows);out=accumulated_metrics(rows)
+        self.assertEqual(out[key][4]['respawn'],6)
+        self.assertEqual(sum(row['respawn']for row in out[key]),6)
+        self.assertEqual(out[key][0]['valid'],6)
+        self.assertEqual(out['rssm_combat_branch_direct_supervised_queries'],96)
+        self.assertEqual(out['rssm_combat_branch_direct_source_query_attempts'],96)
+        self.assertEqual(rows,original)
+        bad=copy.deepcopy(rows);bad[-1][key].pop()
+        with self.assertRaises(ValueError):accumulated_metrics(bad)
+
     def test_four_complete32_backwards_mean_and_one_adam_match_separable_full128(self):
         with torch.random.fork_rng():
             torch.manual_seed(173)

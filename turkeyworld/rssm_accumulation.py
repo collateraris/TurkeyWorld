@@ -10,9 +10,25 @@ def accumulated_metrics(rows):
     if not rows:raise ValueError('At least one completed backward microbatch is required')
     if len(rows)==1:return dict(rows[0])
     output=deepcopy(rows[-1]);keys=set.union(*(set(row)for row in rows))
-    count_suffixes=('_count','_sum','_calls','_probes','_draws','_chunks','_branches','_forward_transitions')
+    count_suffixes=('_count','_sum','_calls','_probes','_draws','_chunks','_branches','_forward_transitions','_queries','_attempts')
     summed=[];averaged=[]
     for key in keys:
+        if key.endswith('_direct_per_step_counts'):
+            present=[row[key] for row in rows if key in row]
+            if not present or not all(isinstance(value,list) for value in present):
+                raise ValueError('Expected per-step direct-event count lists')
+            length=len(present[0])
+            if any(len(value)!=length for value in present):
+                raise ValueError('Direct-event horizons differ across accumulated microbatches')
+            combined=[]
+            for index in range(length):
+                names=set().union(*(set(value[index]) for value in present))
+                if not all(type(value[index].get(name,0))is int and value[index].get(name,0)>=0
+                           for value in present for name in names):
+                    raise ValueError('Direct-event counts must be nonnegative integers')
+                combined.append({name:sum(value[index].get(name,0) for value in present) for name in names})
+            output[key]=combined;summed.append(key)
+            continue
         is_count=key.endswith(count_suffixes)
         is_count_dict=key.endswith(('_counts','_cohorts'))
         if not is_count and not is_count_dict and any(key not in row for row in rows):
