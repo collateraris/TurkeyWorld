@@ -59,9 +59,13 @@ def candidate_assessment(report,baseline,*,empty_mae_tolerance=.005,empty_ssim_t
 
 
 def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None,
-                           require_base_preservation=False,preservation_cohorts=None,base_anchor=None):
+                           require_base_preservation=False,preservation_cohorts=None,base_anchor=None,
+                           small_enemy_rebalance=False,far_wall_supervision=False):
+    if far_wall_supervision and not small_enemy_rebalance:
+        raise ValueError('Far-depth validation requires the native-area renderer protocol')
     parts={key:[] for key in ('base','rgb','source','mask','background','codec_reference','dynamic',
                               'states','endpoint','source_endpoint')}
+    if small_enemy_rebalance: parts['map']=[]
     with _isolated_validation(model,data,173):
         for first in range(0,len(panel),batch_size):
             ids=panel[first:first+batch_size]
@@ -76,6 +80,7 @@ def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None
                 'background':conditions['background'],'codec_reference':reference,'dynamic':conditions['dynamic'],
                 'states':conditions['state'],'endpoint':endpoint,
                 'source_endpoint':model.flow_renderer.normalize_latents(source_codes)}
+            if small_enemy_rebalance: values['map']=conditions['map']
             if any(not bool(torch.isfinite(value).all()) for value in values.values()):
                 raise FloatingPointError('Nonfinite Source enemy rendering validation')
             for key,value in values.items():parts[key].append(value.detach().cpu())
@@ -153,6 +158,14 @@ def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None
     report['selection_score']=(report['rf1']['visible_enemy']['foreground_mae']
         +.5*report['base']['visible_enemy']['foreground_mae']
         +.25*(report['rf1']['overall']['mae_mean']+report['base']['overall']['mae_mean']))
+    if small_enemy_rebalance:
+        from .renderer_small_enemy_protocol import native_area_report
+        from .renderer_wall_supervision import wall_validation_report
+        report['native_area_validation']=native_area_report(arrays)
+        report['source_wall_validation']=wall_validation_report(arrays)
+    if far_wall_supervision:
+        from .renderer_wall_depth import depth_banded_wall_report
+        report['depth_banded_wall_validation']=depth_banded_wall_report(arrays)
     return report,arrays
 
 

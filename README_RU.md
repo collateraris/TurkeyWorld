@@ -221,6 +221,27 @@ SRbest18100 (cumulative38100); обучающие image-assets не заменя
 сохраняет собственные assets.
 См. [H39](README_HISTORY_RU.md#h39-дистанционное-обучение-effective128-и-обновлённые-assets-превью).
 
+Активное продолжение обучения студента Base/RF1 идёт в
+`training_runs/renderer_far_geometry_20261112`. Полные веса, 317 состояний Adam,
+RNG и MAIN sampler сохранены из завершённого v5 control на шаге 2000;
+целевой счётчик рендера —6000, валидация каждые 100, preview каждые 10.
+RSSM 5152, compact VQGAN 997539 (E7) и SR 38100 заморожены; основное обучение RSSM
+продолжается отдельно. Исходный MAIN batch 16 сохраняет квоты NPC/replay и losses.
+Четыре дополнительных TRAIN-only кадра дальних стен дают отдельный far-only loss
+с весом 0.25. Для стен на глубине 5–8, 8–12 и ≥12 клеток независимо нормируются
+ошибки границ, рёбер и тонких углов. В фиксированном TRAIN-пуле из 2048 кандидатов
+есть 271 deep, 481 other thin-face и 255 other far-wall примеров; новый сбор данных
+и подбор по VAL не понадобились. Main 256, native-area 256 и distance 192 VAL-панели
+сохранены. Завершённый pixel-residual pilot на 500 обновлений не выбран:
+control 2000 показал лучший результат. На 2100 ошибки дальних стен снизились на
+фиксированной main-панели, но общие RF MAE/SSIM и NPC error ухудшились;
+preservation gates ещё не пройдены. Эти ранние результаты не подтверждают
+исправление полигонов или качество автономной игры.
+Мониторинг: **http://127.0.0.1:8777/** уже показывает проверенный работающий v6 worker.
+Диагностика codec и одинаковых Source-поз: **http://127.0.0.1:8780/**.
+См. [H54](README_HISTORY_RU.md#h54-обучение-студента-рендера-на-маленьких-врагах-и-стенах)
+и [H55](README_HISTORY_RU.md#h55-дальние-стены-и-продолжение-с-сохранённым-adam).
+
 Исходный этап Base/RF завершил **6000 локальных обновлений** в
 `training_runs/renderer_repair_corrected_20261111`, с дообученным и снова
 замороженным compact VQGAN1900, замороженными RSSM/map/SR и выключенным GAN.
@@ -304,9 +325,9 @@ $rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_comman
 $rssmCommand = @($rssmLaunch.argv)
 & $twPython @($rssmCommand[1..($rssmCommand.Count - 1)])
 # Продолжение рендера: только после остановки его отдельного worker.
-$renderRun = 'training_runs/renderer_distance_refine_20261111/training_rebalance_only'
+$renderRun = 'training_runs/renderer_far_geometry_20261112'
 Remove-Item -LiteralPath (Join-Path $renderRun 'stop_training') -ErrorAction SilentlyContinue
-$renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_8000.json') | ConvertFrom-Json
+$renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_command.json') | ConvertFrom-Json
 $renderCommand = @($renderLaunch.argv)
 & $twPython @($renderCommand[1..($renderCommand.Count - 1)])
 ```
@@ -314,9 +335,10 @@ $renderCommand = @($renderLaunch.argv)
 Боевая команда запускает `turkeyworld.train_rssm_combat --updates 0 --batch 64 --accumulation-steps 4`;
 0 означает обучение без фиксированного лимита: gate выбирает H, а финальный H450
 продолжается до запроса остановки с checkpoint. Рендер запускается
-через `turkeyworld.train_renderer_enemy --steps 8000 --batch 16`, с сохранёнными
-`--combat-data-root`, `--appearance-data-root` и весом source-latent0.1.
-Явный distance sampler включён, crop loss выключен.
+через `turkeyworld.train_renderer_enemy --steps 6000 --batch 16`, с сохранёнными
+`--small-enemy-rebalance`, `--far-wall-supervision`, `--native-phase-parent`,
+data/asset pins и весом source-latent0.1. Все сохранённые аргументы нужны для
+истории Adam/RNG/MAIN и отдельного sampler четырёх far-wall кадров.
 RSSM resume также требует сохранённые `--batch-revision-plan`, `--preview-assets-plan`
 `--preview-assets-revision-plan`, `--loss-balance-plan`, `--combat-only-plan`
 `--combat-v6-plan`, `--batch256-plan`, `--coordinate-curriculum-plan`,
@@ -1169,7 +1191,8 @@ Preview обновляется каждые **10 глобальных обнов
 У codec/SR сохраняются завершённые результаты. Проверка поведения в продолжении
 RSSM — каждые **250 глобальных обновлений** с раздельными navigation/combat gates;
 первый бюджет использовал100. Параллельное обучение изображений Base/RF:
-**http://127.0.0.1:8772/**. Preview не засчитывается как прохождение проверки.
+**http://127.0.0.1:8777/**; проверки codec и одинаковых Source-поз:
+**http://127.0.0.1:8780/**. Preview не засчитывается как прохождение проверки.
 
 Используйте маркер `rssm_loss_gated_drift_20261112/stop_training` и сохранённые аргументы
 продолжения из [раздела RSSM](#текущее-обучение-динамики-rssm). Прежние staged/fresh
@@ -1330,6 +1353,8 @@ RF-bundle автоматически загружает проверенные �
 | `rssm25m_combat_20261111` | Прежний single-RSSM бой3873→4430, архивирован без отката |
 | `small_enemy_pipeline_20261111` | Цепочка codec→SR→Base/RF; codec2000 завершён, SR запущен, renderer ожидает |
 | `renderer_combat_navigation_20261111` | Параллельный Base/RF1 по бою/NPC/навигации; те же Adam2000→6000, codec frozen |
+| `renderer_objects_walls_20261112` | Завершённый v5 control2000 студента Base/RF1 от выбранного6600; источник полного продолжения v6 |
+| `renderer_far_geometry_20261112` | Активный v6 Base/RF1, полный Adam2000→6000 сохранён; MAIN16 + отдельный far-wall aux4, frozen RSSM5152/codec/SR |
 | `combat_source_20261111` | Неизменяемый Source-корпус боя с одним NPC и подробной навигации;1280 проверенных NPZ |
 | `rssm25m_contact_b_20261111` | Навигационный вариант B: продолжение339, архивирован на3873 для перехода к бою |
 | `rssm25m_20261111` | Начальная RSSM-миграция, зафиксированные contact-данные и архив остановленного пилота A 368 |

@@ -1863,6 +1863,139 @@ not full450 gameplay quality or elimination of drift.
 [GPU probe](training_runs/rssm_loss_gated_drift_20261112/loss_gated_probe.json),
 [first consecutive-series audit](training_runs/rssm_loss_gated_drift_20261112/first_loss_gated_streak_verification.json).
 
+## H54. Student renderer training for small enemies and walls
+
+Started `training_runs/renderer_objects_walls_20261112` alongside the unchanged
+loss-gated RSSM training. The student Base/RF1 starts from selected renderer 6600,
+because its later 8000 continuation was worse. This phase has fresh renderer Adam
+and a 2000-update budget, batch 16, validation every 100 and preview every 10.
+The feature source is an immutable RSSM 5152 snapshot; compact VQGAN 997539 (E7)
+and SR 38100 are also frozen. The live RSSM continues its separate pure-XY schedule.
+Training: **http://127.0.0.1:8777/**. Same-pose Source/codec/Base/RF comparisons:
+**http://127.0.0.1:8780/**.
+
+The existing parent corpus already provides 146386 TRAIN and 31277 independent
+VAL rows. Living visible NPCs include 16988/2840 examples of area 1–16 pixels and
+21719/2320 of area 17–64 pixels in TRAIN/VAL. No new collection was needed.
+The sampler assigns 25% each to tiny NPCs, small NPCs, far NPCs and original replay.
+Foreground/background errors are normalized independently. Native NPC crops add
+L 1 weight 0.25 and edge weight 0.1; wall-boundary and wall-edge terms use 0.2 and 0.1.
+Exact Source DDA geometry supplies wall labels, excluding NPC and weapon pixels.
+Source targets and masks are loss labels; they are not future-image conditions
+or inference inputs. The original main VAL 256 and distance VAL 192 remain, with
+a supplementary disjoint VAL 256:64 tiny,64 small,64 far and 64 empty frames.
+
+The focused suite passed 75 CPU tests, and an actual batch 16 GPU backward was finite.
+The saved local 90 checkpoint then passed the actual-SGD audit: both Base and RF
+changed; all 317 Adam states belong to those components;128 codec tensors and
+nonparameter Flow tensors remain bit-exact E7. RSSM and SR pins are unchanged.
+The first full held-out validation at 100 updates shows limited improvement:
+
+| Check | Before | Update 100 |
+| --- | ---: | ---: |
+| Main VAL 256 RF MAE |0.0355328|0.0341181|
+| Main VAL 256 RF SSIM |0.744158|0.746047|
+| Fixed 8 Source-pose RF NPC error |0.150260|0.143220|
+| Fixed 8 Source-pose RF wall-boundary error |0.0999496|0.0979165|
+| Fixed 8 Source-pose Base wall-boundary error |0.105151|0.0970501|
+
+These selected eight queries improve RF NPC error by 4.69% and RF wall-boundary
+error by 2.03%; they do not establish a global quality pass. The codec is unchanged:
+its corresponding baseline NPC/wall errors are 0.092925/0.0381032, empirical
+reconstruction references rather than mathematical quality ceilings. Native-NPC
+and HP 0/Base guards still fail; release and experimental selection remain false.
+Training continues toward 2000 updates. No new game assets are deployed and no
+autonomous gameplay-quality claim follows from these teacher-forced image checks.
+
+Evidence: [launch](training_runs/renderer_objects_walls_20261112/launch_command.json),
+[data inventory](training_runs/renderer_objects_walls_20261112/inputs/parent_native_area_inventory.json),
+[GPU backward](training_runs/renderer_objects_walls_20261112/gpu_backward_probe.json),
+[actual SGD/freeze audit](training_runs/renderer_objects_walls_20261112/first_native_area_renderer_update_verification.json),
+[initial validation](training_runs/renderer_objects_walls_20261112/validation_initial.json),
+[validation 100](training_runs/renderer_objects_walls_20261112/validation/step_000100.json).
+
+## H55. Far-wall strata and preserved Adam continuation
+
+The v 5 control completed update 2000. A separate pixel-residual pilot completed
+500 updates, but was not selected: the control was better on the actual full
+native Source checks and the same eight NPC/wall queries. Before that pilot,
+two CUDA migration attempts failed before SGD and did not modify weights.
+Migration was corrected to compare matching model modes and gradient flags;
+the actual CUDA output-preservation check then passed. The pixel architecture
+remains an evaluated experiment rather than the source of the active continuation.
+
+The selected full control checkpoint at 2000 starts
+`training_runs/renderer_far_geometry_20261112` with a target renderer counter
+of 6000. This is full continuation: Base/RF weights, all 317 Adam states and
+moments/options, MAIN PCG at 32000 draws and all four RNG states were verified
+exact after restoration. The next optimizer update is 2001. RSSM 5152, compact
+codec E7 and SR 38100 remain frozen; live RSSM training continues independently.
+The healthy v 6 worker is monitored at **http://127.0.0.1:8777/**; the diagnostic
+page remains **http://127.0.0.1:8780/**. Validation runs every 100 and preview every 10.
+
+Far wall faces can occupy only one or two native 32 pixels and disappear inside
+the average error of large nearby walls. New loss-only Source DDA labels split
+walls into 5–8, 8–12 and ≥12-tile depth bands, with separate present-image/region
+normalization. Each present band combines boundary L1 with weight 0.2 and edge,
+corner, thin-face and thin-height errors with weight 0.1 each. Thin-face means
+a same-plane/material wall segment occupying 1–2 camera columns at depth≥5;
+thin-height means a projected height≤2 native pixels. NPC/weapon occlusion is
+excluded. These derived DDA bands, masks and target RGB are supervision labels;
+they add no oracle to the rendering conditions or runtime. The existing map/state
+conditions remain unchanged, and codec reconstruction is an empirical reference.
+
+MAIN batch 16 retains all v 5 NPC/replay quotas and existing objectives. A separate
+four-frame auxiliary batch contributes only far-wall losses with weight 0.25,
+so it does not turn the original mixture into a uniform batch 20 loss.
+Its independent fresh sampler selects from a fixed, bounded 2048-row TRAIN-only
+candidate set:271 depth≥12 frames,481 remaining thin-face frames and 255 remaining
+depth≥8 frames. These disjoint strata receive equal quotas. Pool construction
+and auxiliary reads leave the complete MAIN sampler unchanged; the auxiliary
+RNG/counts restore independently. No VAL mining, generated-image mining, full
+corpus DDA scan or new Source collection was needed. Existing held-out panels
+and all NPC/empty/HP0/Base preservation checks remain.
+
+The combined suite passed 97 CPU tests. An actual CUDA MAIN 16+aux 4 backward
+passed with finite Base/RF gradients and combined loss 0.613047, while all model
+weights/buffers remained unchanged with zero optimizer steps; peak allocated
+memory was 0.614 GiB. This proves the training path runs, not that distant wall
+polygons are repaired.
+
+The first scheduled validation at 2100 uses the same main 256 fingerprint as the
+2000 baseline. It shows a tradeoff rather than a global pass:
+
+| Main held-out panel, RF1 | Baseline 2000 | Update 2100 |
+| --- | ---: | ---: |
+| Full-image MAE |0.0331371|0.0338718|
+| Full-image SSIM |0.755794|0.745421|
+| NPC foreground MAE |0.0948809|0.0967419|
+| Depth≥12 boundary L1 |0.169387|0.130909|
+| Depth≥12 thin-face L1 (5 frames) |0.101501|0.0733054|
+| Depth≥12 thin-height L1 (14 frames) |0.0766423|0.0648545|
+
+The distant-wall terms improve on this panel, but full-image/NPC quality worsens.
+Other native-area guards still report thin-wall regressions, and NPC/HP0/Base
+checks fail. Experimental selection and Source/gameplay release remain false;
+these results do not justify replacing game assets or claiming general repair.
+The deep-wall support is only 35 exposed native pixels on this panel.
+The balanced comparison is also available in the diagnostic page and
+[its JSON report](http://127.0.0.1:8780/far_geometry_first100.json).
+
+An independent actual-SGD audit passed for source 2000→saved 2090: all 317 Adam
+clocks reached 2090, MAIN had 33440 draws (8360 per quarter), and the separate
+auxiliary sampler had 360 draws (120 per stratum). Both PCGs were independently
+replayed bit-exact. All 128 E7 codec tensors, Flow buffers, RSSM 5152, SR and 2344
+Source files remained unchanged; no model parameters were added.
+
+Evidence: [launch](training_runs/renderer_far_geometry_20261112/launch_command.json),
+[full continuation plan/proof](training_runs/renderer_far_geometry_20261112/far_wall_phase_plan.json),
+[independent actual-SGD audit](training_runs/renderer_far_geometry_20261112/first_far_geometry_update_verification.json),
+[real CUDA backward](training_runs/renderer_far_geometry_20261112/gpu_backward_probe.json),
+[initial validation](training_runs/renderer_far_geometry_20261112/validation_initial.json),
+[validation 2100](training_runs/renderer_far_geometry_20261112/validation/step_002100.json),
+[fixed Source depth inventory](training_runs/renderer_objects_walls_20261112/diagnostics/wall_depth_inventory_256.json),
+[actual auxiliary-pool smoke](training_runs/renderer_objects_walls_20261112/diagnostics/far_wall_pool_smoke.json).
+
 ## Changes to goals, batches and data units
 
 | What changed | Chat sequence / outcome |

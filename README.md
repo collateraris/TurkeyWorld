@@ -219,6 +219,27 @@ preview revision retains the original6000 pin and history. Full Source and
 gameplay qualification remain false, and the open game keeps its own assets.
 See [H39](README_HISTORY_EN.md#h39-distance-supervision-effective128-and-updated-preview-assets).
 
+Active student Base/RF1 continuation runs in
+`training_runs/renderer_far_geometry_20261112`. It preserves the full weights,
+317 Adam states, RNG and MAIN sampler from the completed v5 control at update 2000;
+the target renderer counter is 6000, with validation every 100 and preview every 10.
+RSSM 5152, compact VQGAN 997539 (E7) and SR 38100 remain frozen; live RSSM training
+continues separately. The original MAIN batch 16 keeps its NPC/replay quotas and
+losses. Four additional TRAIN-only far-wall frames contribute a separate far-only
+loss with weight 0.25. The 5–8, 8–12 and ≥12-tile wall bands have independently
+normalized boundaries, edges and thin corners. A fixed 2048-candidate TRAIN pool
+provides 271 deep, 481 other thin-face and 255 other far-wall examples; no collection
+or VAL mining was needed. The main 256, native-area 256 and distance 192 VAL panels
+remain. The completed 500-update pixel-residual pilot was not selected because
+control 2000 performed better. At 2100, distant-wall errors improved on the fixed
+main panel, while overall RF MAE/SSIM and NPC error worsened; preservation gates
+still fail. These early results do not establish repaired polygons or autonomous
+gameplay quality.
+Monitoring: **http://127.0.0.1:8777/** now serves the verified healthy v6 worker.
+Codec and same-pose diagnostics: **http://127.0.0.1:8780/**.
+See [H54](README_HISTORY_EN.md#h54-student-renderer-training-for-small-enemies-and-walls)
+and [H55](README_HISTORY_EN.md#h55-far-wall-strata-and-preserved-adam-continuation).
+
 The original Base/RF phase completed **6000 local updates** in
 `training_runs/renderer_repair_corrected_20261111`, using fine-tuned and refrozen
 compact VQGAN1900, frozen RSSM/map/SR and GAN off. Each batch16 mixes8 combat,
@@ -301,9 +322,9 @@ $rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_comman
 $rssmCommand = @($rssmLaunch.argv)
 & $twPython @($rssmCommand[1..($rssmCommand.Count - 1)])
 # Renderer continuation: only after its separate worker has stopped.
-$renderRun = 'training_runs/renderer_distance_refine_20261111/training_rebalance_only'
+$renderRun = 'training_runs/renderer_far_geometry_20261112'
 Remove-Item -LiteralPath (Join-Path $renderRun 'stop_training') -ErrorAction SilentlyContinue
-$renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_8000.json') | ConvertFrom-Json
+$renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_command.json') | ConvertFrom-Json
 $renderCommand = @($renderLaunch.argv)
 & $twPython @($renderCommand[1..($renderCommand.Count - 1)])
 ```
@@ -311,9 +332,10 @@ $renderCommand = @($renderLaunch.argv)
 The combat command runs `turkeyworld.train_rssm_combat --updates 0 --batch 64 --accumulation-steps 4`;
 0 means unbounded training; the active gate selects H and the final H450 continues
 until a checkpointed stop is requested. The renderer command runs
-`turkeyworld.train_renderer_enemy --steps 8000 --batch 16`, with the saved
-`--combat-data-root`, `--appearance-data-root` and source-latent weight0.1.
-Its explicit distance sampler remains enabled; crop loss remains off.
+`turkeyworld.train_renderer_enemy --steps 6000 --batch 16`, with the saved
+`--small-enemy-rebalance`, `--far-wall-supervision`, `--native-phase-parent`,
+data/asset pins and source-latent weight0.1. Resume its complete saved arguments
+to retain full Adam/RNG/MAIN history and the independent four-frame far-wall sampler.
 RSSM resume also requires the saved `--batch-revision-plan`, `--preview-assets-plan`
 `--preview-assets-revision-plan`, `--loss-balance-plan`, `--combat-only-plan`
 `--combat-v6-plan`, `--batch256-plan`, `--coordinate-curriculum-plan`,
@@ -1152,7 +1174,8 @@ Future Source is display-only; SR never consumes it or corrects world state.
 Codec and SR retain their completed results. RSSM continuation behavior validation
 runs every **250 global updates** and combines separate navigation/combat gates;
 the original budget used100. Parallel Base/RF image training is monitored at
-**http://127.0.0.1:8772/**. A light preview is not a passing quality check.
+**http://127.0.0.1:8777/**; fixed Source-pose and codec diagnostics are at
+**http://127.0.0.1:8780/**. A light preview is not a passing quality check.
 
 Use the `rssm_loss_gated_drift_20261112/stop_training` marker and saved-argument resume command
 in the [current RSSM section](#current-rssm-dynamics-run). The old staged/fresh
@@ -1309,6 +1332,8 @@ does not relabel those measurements or establish a new pass.
 | `rssm25m_combat_20261111` | Previous single-RSSM combat continuation3873→4430, archived without rollback |
 | `small_enemy_pipeline_20261111` | Ordered codec→SR→Base/RF; codec2000 complete, SR started, renderer queued |
 | `renderer_combat_navigation_20261111` | Parallel Base/RF1 on combat/appearance/navigation; same-Adam2000→6000, frozen codec |
+| `renderer_objects_walls_20261112` | Completed v5 student Base/RF1 control2000 from selected6600; source of v6 full continuation |
+| `renderer_far_geometry_20261112` | Active v6 Base/RF1, preserved full Adam2000→6000; MAIN16 + separate far-wall aux4, frozen RSSM5152/codec/SR |
 | `combat_source_20261111` | Immutable one-enemy combat and detailed-navigation Source corpus;1280 verified NPZ |
 | `rssm25m_contact_b_20261111` | Navigation trial B, resumed339 and archived at3873 for combat continuation |
 | `rssm25m_20261111` | Original RSSM initialization, frozen contact data and stopped pilot A archive 368 |

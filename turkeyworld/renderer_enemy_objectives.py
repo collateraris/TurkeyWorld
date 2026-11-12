@@ -117,7 +117,8 @@ def source_object_crop_ssim(prediction, target, mask, *, padding=2):
 
 def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contrast_weight=.1,
                           base_only=False, latent_weight=0., detach_base=True,
-                          base_regression_weight=0., object_crop_weight=0.):
+                          base_regression_weight=0., object_crop_weight=0., small_enemy_rebalance=False,
+                          far_wall_supervision=False):
     """Supervise compact Base/RF1 with equal present foreground/background mass."""
     for name, value in (('ssim_weight', ssim_weight), ('edge_weight', edge_weight),
                         ('contrast_weight', contrast_weight), ('latent_weight', latent_weight),
@@ -128,6 +129,12 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
         raise ValueError('base_only must be an explicit boolean')
     if not isinstance(detach_base, bool):
         raise ValueError('detach_base must be an explicit boolean')
+    if not isinstance(small_enemy_rebalance, bool):
+        raise ValueError('small_enemy_rebalance must be an explicit boolean')
+    if not isinstance(far_wall_supervision,bool)or(far_wall_supervision and not small_enemy_rebalance):
+        raise ValueError('Far-wall v6 requires an explicit boolean and the native-area v5 objective')
+    if small_enemy_rebalance:
+        from .renderer_small_enemy_protocol import separate_region_loss, native_crop_loss, small_enemy_protocol
     flow = model.flow_renderer
     codec = flow.codec
     if (flow.kind != 'student' or flow.steps != 1 or codec.training or codec.quantize.training
@@ -150,8 +157,26 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
         raise FloatingPointError('Nonfinite enemy Base/RF1 output')
     target, mask, background = (conditions[name] for name in ('target', 'object_mask', 'background'))
     terms = {}
+    separate_regions = {}
+    crop_terms = {}
+    wall_terms = {}
+    far_terms = {}
+    if small_enemy_rebalance:
+        from .renderer_wall_supervision import source_wall_masks,wall_loss_terms
+        wall_labels = source_wall_masks(conditions['map'],conditions['state'],mask)
+    if far_wall_supervision:
+        from .renderer_wall_depth import source_wall_depth_labels
+        from .renderer_far_wall_protocol import far_wall_loss,far_wall_protocol
+        far_labels=source_wall_depth_labels(conditions['map'],conditions['state'],mask)
     for name, prediction in predictions:
-        terms[name+'_source_l1'] = balanced_image_l1(prediction, target, mask)
+        if small_enemy_rebalance:
+            separate_regions[name] = separate_region_loss(prediction, target, mask)
+            terms[name+'_source_l1'] = separate_regions[name]['loss']
+            crop_terms[name] = native_crop_loss(prediction, target, mask)
+            wall_terms[name] = wall_loss_terms(prediction,target,wall_labels)
+            if far_wall_supervision:far_terms[name]=far_wall_loss(prediction,target,far_labels)
+        else:
+            terms[name+'_source_l1'] = balanced_image_l1(prediction, target, mask)
         terms[name+'_source_ssim_loss'] = decoded_ssim_loss(prediction, target, mask)
         terms[name+'_source_edge'] = balanced_edge_l1(prediction, target, mask)
         terms[name+'_foreground_contrast'] = foreground_contrastive_loss(prediction, target, background, mask)
@@ -159,6 +184,9 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
                 +edge_weight*terms[name+'_source_edge']+contrast_weight*terms[name+'_foreground_contrast']
                 for name, _ in predictions)
     common_rgb = total
+    if small_enemy_rebalance:
+        total = total+sum(value[0] for value in crop_terms.values())+sum(value['loss'] for value in wall_terms.values())
+    if far_wall_supervision:total=total+sum(value[0]for value in far_terms.values())
     if object_crop_weight > 0:
         for name,prediction in predictions:
             crop=source_object_crop_ssim(prediction,target,mask)
@@ -170,7 +198,8 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
         # Flow/Base condition or an observation supplied to the world prior.
         with torch.no_grad():
             target_z = flow.normalize_latents(codec.encode(target)['quantized']).detach()
-        latent = balanced_mse(endpoint, target_z, mask)
+        latent = (separate_region_loss(endpoint,target_z,mask,squared=True)['loss']
+                  if small_enemy_rebalance else balanced_mse(endpoint, target_z, mask))
         total = total+latent_weight*latent
     regression = None
     if base_regression_weight > 0 and not base_only:
@@ -194,9 +223,29 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
         common_old_latent01_objective=float((common_rgb+.1*latent).detach()) if latent is not None else None,
         common_objective_scope='Same RGB terms; canonical latent weight0.1 excludes the new preservation penalty',
         region_reduction='equal_present_foreground_background_per_image')
+    if small_enemy_rebalance:
+        metrics.update(small_enemy_protocol=small_enemy_protocol(),
+            region_reduction='L1_and_latent: .5*mean_visible_foreground+.5*mean_present_background',
+            native_crop_active=True, source_wall_supervision_active=True, source_wall_masks_are_loss_only=True,
+            source_pixels_resized=False,
+            common_objective_scope='v5 independent regional L1; legacy SSIM/edge/contrast, crop reported separately')
+        metrics.pop('common_old_latent01_objective',None)
+        for name in separate_regions:
+            for region in ('foreground','background'):
+                metrics[name+'_'+region+'_l1'] = float(separate_regions[name][region].detach())
+                metrics[name+'_'+region+'_images'] = separate_regions[name][region+'_images']
+            _, crop = crop_terms[name]
+            metrics.update({name+'_'+key:float(value.detach()) if torch.is_tensor(value) else int(value)
+                            for key,value in crop.items()})
+            metrics.update({name+'_wall_'+key:float(value.detach()) if torch.is_tensor(value) else int(value)
+                            for key,value in wall_terms[name].items()})
     if object_crop_weight > 0:
         metrics.update(object_crop_weight=float(object_crop_weight),
             object_crop_scope='Native Source foreground bbox+2pixels; loss only, no resize or inference inputs')
+    if far_wall_supervision:
+        metrics.update(far_wall_protocol=far_wall_protocol(),far_wall_supervision_active=True)
+        for name,(_,values)in far_terms.items():
+            metrics.update({name+'_far_wall_'+key:value for key,value in values.items()})
     if regression is not None:
         metrics.update(rf1_base_regression_loss=float(regression.detach()),
             base_regression_weight=float(base_regression_weight),
@@ -210,3 +259,27 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
         metrics.update(pixel_residual_abs_mean=float(residual.detach().abs().mean()),
                        pixel_residual_max_abs=float(residual.detach().abs().max()))
     return total, metrics
+
+
+def far_wall_refinement_loss(model,batch,*,detach_base=True):
+    """Auxiliary GT-pose renderer query with ONLY the explicit v6 far terms."""
+    from .renderer_far_wall_protocol import far_wall_loss,far_wall_protocol
+    from .renderer_wall_depth import source_wall_depth_labels
+    flow=model.flow_renderer;codec=flow.codec
+    if (not isinstance(detach_base,bool)or flow.kind!='student'or flow.steps!=1
+            or codec.training or codec.quantize.training
+            or any(parameter.requires_grad for parameter in codec.parameters())):
+        raise ValueError('Far-only auxiliary requires RF1 and the entire frozen codec in eval')
+    conditions=enemy_conditions(model,batch)
+    base,rgb,_=refinement_forward(model,conditions,detach_base=detach_base)
+    labels=source_wall_depth_labels(conditions['map'],conditions['state'],conditions['object_mask'])
+    total=base.sum()*0;metrics={'far_wall_protocol':far_wall_protocol(),
+        'far_wall_aux_examples':len(base),'far_wall_aux_objective_scope':'v6 far-depth terms only',
+        'far_wall_aux_future_source_feedback':False}
+    for name,prediction in (('base',base),('rf1',rgb)):
+        value,terms=far_wall_loss(prediction,conditions['target'],labels)
+        total=total+value
+        metrics.update({'far_wall_aux_'+name+'_'+key:term for key,term in terms.items()})
+    if not bool(torch.isfinite(total)):raise FloatingPointError('Nonfinite far-only renderer auxiliary')
+    metrics['far_wall_aux_loss']=float(total.detach())
+    return total,metrics

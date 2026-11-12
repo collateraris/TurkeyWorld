@@ -23,6 +23,11 @@ from .renderer_student import load_renderer_student,_hash_tensors
 from .training_pipeline import atomic_json,now
 
 
+def _phase_plan_filename(args):
+    if getattr(args,'far_wall_supervision',False):return 'far_wall_phase_plan.json'
+    return 'small_enemy_phase_plan.json'if getattr(args,'small_enemy_rebalance',False)else 'distance_phase_plan.json'
+
+
 class EnemyRendererTraining:
     def __init__(self,args):
         self.args=args;self.root=Path(args.run_dir).resolve();self.root.mkdir(parents=True,exist_ok=True)
@@ -51,6 +56,18 @@ class EnemyRendererTraining:
                 source_mixture={'near':.25,'mid':.25,'far':.25,'original_replay':.25},
                 distance_mixture={'near':.25,'mid':.25,'far':.25,'original_replay':.25},
                 object_crop_weight=getattr(args,'object_crop_weight',0.))
+        if getattr(args,'small_enemy_rebalance',False):
+            from .renderer_small_enemy_protocol import small_enemy_protocol
+            protocol=small_enemy_protocol()
+            self.state.update(loss_protocol=protocol['name'],small_enemy_protocol=protocol,
+                source_mixture=protocol['source_quotas'],distance_mixture=protocol['source_quotas'],
+                optimizer_initialization='fresh_AdamW_from_selected_renderer',
+                source_feature_policy='frozen_current_snapshot_previous_Source_observation_prior')
+        if getattr(args,'far_wall_supervision',False):
+            from .renderer_far_wall_protocol import far_wall_protocol
+            protocol=far_wall_protocol()
+            self.state.update(loss_protocol=protocol['name'],far_wall_protocol=protocol,
+                optimizer_initialization='preserve_full_native_parent_AdamW_RNG_sampler')
         if getattr(args,'until_enemy_quality',False):
             self.state.update(total=None,training_until_enemy_quality=True,eta_seconds=None,
                 scope='Experimental NPC-appearance target; not full Source/gameplay qualification')
@@ -60,6 +77,10 @@ class EnemyRendererTraining:
 
     def run(self):
         args=self.args;device=torch.device(args.device)
+        preview_saver=save_enemy_preview
+        if getattr(args,'small_enemy_rebalance',False):
+            from .renderer_small_enemy_protocol import save_small_enemy_preview
+            preview_saver=save_small_enemy_preview
         if device.type=='cuda':torch.cuda.init()
         torch.set_num_threads(args.threads)
         random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
@@ -146,10 +167,25 @@ class EnemyRendererTraining:
             from .renderer_distance_data import DistanceBalancedFrames,SourceDistancePanel
             if not getattr(args,'combat_data_root',None) or not getattr(args,'distance_panel',None):
                 raise ValueError('Distance phase needs the parent combat mixture and immutable held-out panel')
-            train=DistanceBalancedFrames(train)
+            if getattr(args,'small_enemy_rebalance',False):
+                from .renderer_small_enemy_data import SmallEnemyBalancedFrames
+                train=SmallEnemyBalancedFrames(train)
+            else:train=DistanceBalancedFrames(train)
             distance_validation=SourceDistancePanel(args.distance_panel)
             if any(bytes.fromhex(row['scene_key']) in train.scene_keys for row in distance_validation.records):
                 raise ValueError('Distance VAL pose overlaps a TRAIN pose')
+        small_supplement=small_supplement_panel=None
+        native_panel_receipt=None
+        if getattr(args,'small_enemy_rebalance',False):
+            from .renderer_native_panel import build_native_panel
+            small_supplement=validation
+            small_supplement_panel,native_panel_receipt=build_native_panel(validation,excluded_indices=panel,seed=args.seed)
+        far_auxiliary=None
+        if getattr(args,'far_wall_supervision',False):
+            from .renderer_far_wall_data import FarWallFrames
+            from .renderer_far_wall_protocol import far_wall_protocol
+            auxiliary=far_wall_protocol()['auxiliary']
+            far_auxiliary=FarWallFrames(train,candidate_count=auxiliary['candidate_count'],seed=auxiliary['seed'])
         hp0_validation=hp0_panel=None
         if getattr(args,'hp0_validation',False):
             if not getattr(args,'combat_data_root',None):raise ValueError('Supplemental HP0 needs the explicit combat Source corpus')
@@ -172,37 +208,40 @@ class EnemyRendererTraining:
             for file_index in rng.choice(sorted(groups),count,replace=False):
                 warmup_panel.append(int(rng.choice(groups[int(file_index)])))
         if original_base is not None:
-            from .renderer_enemy_objectives import enemy_conditions
-            from .renderer_refinement import refinement_forward
-            conditions=enemy_conditions(working,validation.batch(4,indices=panel[:4]))
-            original_base.to(device).eval().requires_grad_(False)
-            with torch.no_grad():
-                old_base=original_base(conditions['state'],conditions['features'],conditions['geometry'])
-                new_base,residual=working.base_student.forward_with_residual(conditions['state'],conditions['features'],conditions['geometry'])
-                flow=working.flow_renderer
-                endpoint=flow.latent_sample(old_base,conditions['state'],noise=flow.fixed_noise,map_condition=conditions['map'])
-                old_rgb=flow.codec.decode(flow.codec.quantize(flow.denormalize_latents(endpoint))['quantized'])
-                _,new_rgb,_=refinement_forward(working,conditions)
-            if not (torch.equal(old_base,new_base) and torch.equal(old_rgb,new_rgb) and not residual.any()):
-                raise AssertionError('Zero pixel residual changed the parent renderer function')
+            from .renderer_pixel_migration import verify_zero_pixel_residual
+            proof=verify_zero_pixel_residual(working,original_base,validation.batch(4,indices=panel[:4]))
             migration={'kind':'zero_initialized_post_codec_pixel_residual','parent_renderer':str(args.renderer_checkpoint),
                 'parent_renderer_sha256':_digest(args.renderer_checkpoint),'new_parameters':1740,
                 'base_parameters':policy['base_trainable'],'base_rgb_bitexact_at_initialization':True,
-                'final_rgb_bitexact_at_initialization':True,'codec_frozen':True,'amplitude':.5}
+                'final_rgb_bitexact_at_initialization':True,'codec_frozen':True,'amplitude':.5,**proof}
             atomic_json(self.root/'pixel_residual_migration.json',migration)
             self.publish(pixel_residual_migration=migration)
-            del original_base,conditions;gc.collect()
+            del original_base;gc.collect()
         identity={'world_sha256':_digest(args.world),'renderer_sha256':_digest(args.renderer_checkpoint),
             'train':(train.parent.identity if distance_validation is not None else train.identity),
             'val':validation.identity,'panel':panel,
             'panel_fingerprint':validation.panel_fingerprint(panel),'codec_sha256':codec_identity,
             'warmup_train_panel':warmup_panel}
+        if getattr(args,'small_enemy_rebalance',False):
+            identity['frozen_feature_snapshot']={'world_sha256':identity['world_sha256'],
+                'all_frozen_tensors_sha256':frozen,
+                'static_features':'zero128_no_target_observation',
+                'dynamic_features':'frozen_snapshot_prior(previous_Source_RGB,state,action)',
+                'future_source_feedback':False}
+        if getattr(args,'far_wall_supervision',False):
+            from .renderer_far_wall_protocol import far_wall_protocol
+            identity['far_wall_protocol']=far_wall_protocol()
+            identity['far_wall_aux_pool']=far_auxiliary.identity
         if hp0_validation is not None:
             identity.update(hp0_validation=hp0_validation.identity,hp0_panel=hp0_panel,
                 hp0_panel_fingerprint=hp0_validation.panel_fingerprint(hp0_panel))
         if distance_validation is not None:
             identity.update(distance_sampling=train.identity['distance_sampling'],
                 distance_panel_fingerprint=distance_validation.panel_fingerprint(list(range(len(distance_validation.rows)))))
+        if small_supplement is not None:
+            identity.update(native_area_guard_panel=small_supplement_panel,
+                native_area_guard_receipt=native_panel_receipt,
+                native_area_guard_fingerprint=small_supplement.panel_fingerprint(small_supplement_panel))
         if preserve_validation is not None:
             identity.update(preserve_distance_panel_sha256=_digest(args.preserve_distance_panel),
                 preserve_distance_baseline_sha256=_digest(args.preserve_distance_baseline))
@@ -222,6 +261,8 @@ class EnemyRendererTraining:
             'small_data_root':None,'parent_adam_checkpoint':None}
         optional_defaults.update(preserve_distance_panel=None,preserve_distance_baseline=None)
         optional_defaults['frozen_sr_checkpoint']=None
+        optional_defaults['small_enemy_rebalance']=False
+        optional_defaults.update(far_wall_supervision=False,native_phase_parent=None)
         configuration={key:str(value.resolve()) if isinstance(value,Path) else value for key,value in vars(args).items()
             if key not in optional_defaults or value!=optional_defaults[key]}
         config_path=self.root/'experiment_config.json'
@@ -236,7 +277,7 @@ class EnemyRendererTraining:
                 if (ledger.get('previous_budget')!=old['steps'] or ledger.get('new_budget')!=args.steps
                         or ledger.get('start_step')!=old['steps']
                         or ledger.get('source_checkpoint_sha256')!=_digest(self.root/'checkpoints/renderer_enemy_last.pt')
-                        or ledger.get('phase_plan_sha256')!=_digest(self.root/'distance_phase_plan.json')):
+                        or ledger.get('phase_plan_sha256')!=_digest(self.root/_phase_plan_filename(args))):
                     raise ValueError('Distance extension checkpoint/boundary identity changed')
         atomic_json(config_path,configuration)
         atomic_json(self.root/'source_identity.json',identity)
@@ -252,6 +293,7 @@ class EnemyRendererTraining:
         step,best,streak,enemy_streak=0,None,0,0
         new_phase=False
         phase_start=0
+        phase=None
         if checkpoint.exists():
             saved=torch.load(checkpoint,map_location='cpu',weights_only=False)
             if (saved['identity']!=identity or saved['frozen_fingerprint']!=frozen
@@ -264,17 +306,42 @@ class EnemyRendererTraining:
             step,best,streak=saved['step'],saved['best'],saved['streak']
             enemy_streak=saved.get('enemy_streak',0)
             train.restore_sampler(saved['sampler'])
+            if far_auxiliary is not None:far_auxiliary.restore_sampler(saved['far_wall_aux_sampler'])
             torch.set_rng_state(saved['rng_torch'].cpu());np.random.set_state(saved['rng_numpy']);random.setstate(saved['rng_python'])
             if device.type=='cuda':torch.cuda.set_rng_state_all([v.cpu() for v in saved['rng_cuda']])
             del saved;gc.collect()
             if distance_validation is not None:
-                phase_path=self.root/'distance_phase_plan.json'
+                phase_path=self.root/_phase_plan_filename(args)
                 if not phase_path.exists():raise ValueError('Distance resume requires its immutable phase plan')
                 phase=json.loads(phase_path.read_text(encoding='utf-8'))
-                if (phase['source_checkpoint_sha256']!=_digest(args.source_training_checkpoint)
-                        or phase['identity']!=identity):raise ValueError('Distance phase plan changed')
+                if (phase['identity']!=identity or (not getattr(args,'small_enemy_rebalance',False)
+                        and phase['source_checkpoint_sha256']!=_digest(args.source_training_checkpoint))):
+                    raise ValueError('Distance phase plan changed')
+                if getattr(args,'far_wall_supervision',False)and phase['source_checkpoint_sha256']!=_digest(args.native_phase_parent):
+                    raise ValueError('Native far-wall parent checkpoint changed')
                 phase_start=phase['start_step']
             if parent_adam is not None:phase_start=parent_adam['step']
+        elif getattr(args,'native_phase_parent',None):
+            from .renderer_native_phase import restore_renderer_native_parent
+            from .renderer_far_wall_protocol import far_wall_protocol
+            saved=torch.load(args.native_phase_parent,map_location='cpu',weights_only=False)
+            parent_sha256=_digest(args.native_phase_parent)
+            phase=restore_renderer_native_parent(saved,working,optimizer,train,identity,configuration,frozen,
+                parent_checkpoint_sha256=parent_sha256,far_wall_protocol=far_wall_protocol())
+            step=phase_start=phase['start_step'];new_phase=True
+            phase.update(status='initialized',source_checkpoint=str(args.native_phase_parent),
+                source_checkpoint_sha256=parent_sha256,identity=identity,
+                sampler_draws_at_adoption=train.draws,
+                initial_cumulative_renderer_steps=initial_renderer_steps,
+                initial_cumulative_base_steps=initial_base_steps,
+                far_wall_auxiliary_draws_at_start=0)
+            phase_path=self.root/'far_wall_phase_plan.json'
+            if phase_path.exists():
+                if json.loads(phase_path.read_text(encoding='utf-8'))!=phase:
+                    raise ValueError('Immutable far-wall phase initialization changed')
+            else:atomic_json(phase_path,phase)
+            self.publish(far_wall_phase=phase,current=step,global_training_step=step)
+            del saved;gc.collect()
         elif parent_adam is not None:
             if not small_mode:raise ValueError('Parent Adam adoption requires the explicit tiny Source protocol')
             from .small_enemy_renderer_init import restore_small_renderer_parent
@@ -307,6 +374,27 @@ class EnemyRendererTraining:
             else:atomic_json(phase_path,phase)
             self.publish(distance_phase=phase,current=step,global_training_step=step)
             del saved;gc.collect()
+        elif getattr(args,'small_enemy_rebalance',False):
+            from .renderer_small_enemy_protocol import small_enemy_protocol
+            phase={'status':'initialized','start_step':0,'identity':identity,'protocol':small_enemy_protocol(),
+                'parent_mix_counts':dict(train.parent.mix_counts),
+                'selected_renderer_sha256':identity['renderer_sha256'],
+                'initial_cumulative_renderer_steps':initial_renderer_steps,
+                'initial_cumulative_base_steps':initial_base_steps,
+                'optimizer_initialization':'fresh_AdamW_explicit_new_phase',
+                'optimizer_state_entries_at_start':len(optimizer.state),
+                'inherited_optimizer_or_sampler':False,'selected_renderer_tensors_loaded_strictly':True,
+                'frozen_current_feature_world':identity['frozen_feature_snapshot'],
+                'codec_sha256':codec_identity,'automatic_active_promotion':False}
+            if phase['optimizer_state_entries_at_start']:
+                raise AssertionError('Fresh native-area phase unexpectedly inherited Adam state')
+            phase_path=self.root/'small_enemy_phase_plan.json'
+            if phase_path.exists():
+                if json.loads(phase_path.read_text(encoding='utf-8'))!=phase:
+                    raise ValueError('Immutable native-area phase initialization changed')
+            else:atomic_json(phase_path,phase)
+            self.publish(small_enemy_phase=phase,current=0,global_training_step=0)
+            new_phase=True
         def save():
             _save(checkpoint,{'base':working.base_student.state_dict(),'flow':working.flow_renderer.state_dict(),
                 'optimizer':optimizer.state_dict(),'step':step,'best':best,'streak':streak,
@@ -314,9 +402,10 @@ class EnemyRendererTraining:
                 'configuration':configuration,'identity':identity,'frozen_fingerprint':frozen,
                 'sampler':train.sampler_state(),'rng_torch':torch.get_rng_state(),
                 'rng_numpy':np.random.get_state(),'rng_python':random.getstate(),
-                'rng_cuda':torch.cuda.get_rng_state_all() if device.type=='cuda' else []})
+                'rng_cuda':torch.cuda.get_rng_state_all() if device.type=='cuda' else [],
+                **({'far_wall_aux_sampler':far_auxiliary.sampler_state()}if far_auxiliary is not None else {})})
             if distance_validation is not None:
-                audit={'protocol':'visible_source_distance_v1','global_step':step,'start_step':phase_start,
+                audit={'protocol':getattr(train,'protocol','visible_source_distance_v1'),'global_step':step,'start_step':phase_start,
                     'phase_updates':step-phase_start,'parent_draws_preserved':train.parent_draws,
                     'new_phase_draws':train.phase_draws,'quota_draws':dict(train.distance_counts),
                     'actual_source_distance_draws':dict(train.actual_distance_counts),
@@ -324,6 +413,14 @@ class EnemyRendererTraining:
                         for key,count in train.parent.mix_counts.items()},
                     'visible_definition':'Source HP>0,alive,exact NPC pixel mask nonempty',
                     'source_pixels_resized_for_sampling':False,'validation_used_for_updates':False}
+                if getattr(args,'small_enemy_rebalance',False):
+                    audit.update(actual_native_area_draws=dict(train.actual_area_counts),
+                        hard_definition='Source-native area and visible distance; no validation mining')
+                if getattr(args,'far_wall_supervision',False):
+                    audit.update(loss_protocol=self.state['loss_protocol'],
+                        sampler_draws_at_adoption=phase['sampler_draws_at_adoption'],
+                        new_phase_draws_since_adoption=train.draws-phase['sampler_draws_at_adoption'])
+                    audit.update(far_wall_auxiliary_sampler=far_auxiliary.sampler_state())
                 atomic_json(self.root/'source_sampling_audit.json',audit)
         def verify_frozen():
             if (frozen_fingerprint(working)!=frozen or _hash_tensors(working.flow_renderer.codec.state_dict())!=codec_identity
@@ -335,7 +432,37 @@ class EnemyRendererTraining:
                 'codec_all_parameters_buffers_bitexact':True,'codec_optimizer_excluded':True,'codec_sha256':codec_identity})
         def evaluate_full(at,reference=None):
             report,arrays=evaluate_enemy_renderer(working,validation,panel,step=at,batch_size=args.validation_batch,
-                baseline=reference,require_base_preservation=getattr(args,'require_base_preservation',False),base_anchor=base_anchor)
+                baseline=reference,require_base_preservation=getattr(args,'require_base_preservation',False),base_anchor=base_anchor,
+                small_enemy_rebalance=getattr(args,'small_enemy_rebalance',False))
+            if getattr(args,'far_wall_supervision',False):
+                from .renderer_wall_depth import depth_banded_wall_report
+                from .renderer_far_wall_protocol import far_wall_preservation_assessment
+                report['depth_banded_wall_validation']=depth_banded_wall_report(arrays)
+                if reference is not None:
+                    gate=far_wall_preservation_assessment(report['depth_banded_wall_validation'],
+                        reference['depth_banded_wall_validation'])
+                    report['far_wall_preservation']=gate
+                    if not gate['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons']+=gate['failure_reasons']
+            if getattr(args,'small_enemy_rebalance',False):
+                from .renderer_small_enemy_protocol import native_area_report,native_area_assessment
+                from .renderer_wall_supervision import wall_preservation_assessment
+                report['native_area_validation']=native_area_report(arrays)
+                if reference is not None:
+                    gate=native_area_assessment(report['native_area_validation'],reference['native_area_validation'])
+                    report['native_area_improvement']=gate
+                    if not gate['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons']+=gate['failure_reasons']
+                    wall_gate=wall_preservation_assessment(report['source_wall_validation'],reference['source_wall_validation'])
+                    report['source_wall_preservation']=wall_gate
+                    if not wall_gate['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons']+=wall_gate['failure_reasons']
+                cohorts=report['native_area_validation']
+                report['selection_score']=sum(cohorts[head][area].get('foreground_mae',1.) or 0.
+                    for head in ('base','rf1') for area in ('tiny_1_16','small_17_64'))
             if frozen_sr_asset is not None:report['frozen_sr_asset']=frozen_sr_asset
             if small_mode:
                 from .small_enemy_validation import small_enemy_cohorts,relative_small_enemy_gate
@@ -354,7 +481,9 @@ class EnemyRendererTraining:
                 extra,extra_arrays=evaluate_enemy_renderer(working,hp0_validation,hp0_panel,step=at,
                     batch_size=args.validation_batch,baseline=(reference or {}).get('terminal_supplement'),
                     require_base_preservation=getattr(args,'require_base_preservation',False),preservation_cohorts=('hp0',),
-                    base_anchor=(base_anchor or {}).get('terminal_supplement'))
+                    base_anchor=(base_anchor or {}).get('terminal_supplement'),
+                    small_enemy_rebalance=getattr(args,'far_wall_supervision',False),
+                    far_wall_supervision=getattr(args,'far_wall_supervision',False))
                 report['terminal_supplement']=extra
                 report['terminal_supplement_fingerprint']=identity['hp0_panel_fingerprint']
                 if reference is None:
@@ -365,6 +494,38 @@ class EnemyRendererTraining:
                     if reference is not None and not extra['base_preservation']['passed']:
                         report['experimental_selection']['validated_improvement']=False
                         report['experimental_selection']['failure_reasons'].append('hp0_base_preservation_release_gate')
+                del extra_arrays
+            if small_supplement is not None:
+                extra,extra_arrays=evaluate_enemy_renderer(working,small_supplement,small_supplement_panel,
+                    step=at,batch_size=args.validation_batch,small_enemy_rebalance=True,
+                    far_wall_supervision=getattr(args,'far_wall_supervision',False))
+                report['native_area_guard_validation']=extra
+                report['native_area_guard_fingerprint']=identity['native_area_guard_fingerprint']
+                if getattr(args,'far_wall_supervision',False):
+                    from .renderer_far_wall_protocol import far_wall_report_score
+                    report['selection_score']+=far_wall_report_score(extra['depth_banded_wall_validation'])
+                if reference is not None:
+                    gate=native_area_assessment(extra['native_area_validation'],
+                        reference['native_area_guard_validation']['native_area_validation'])
+                    report['native_area_guard_improvement']=gate
+                    if not gate['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons']+=gate['failure_reasons']
+                    wall_gate=wall_preservation_assessment(extra['source_wall_validation'],
+                        reference['native_area_guard_validation']['source_wall_validation'])
+                    report['native_area_guard_wall_preservation']=wall_gate
+                    if not wall_gate['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons']+=wall_gate['failure_reasons']
+                    if getattr(args,'far_wall_supervision',False):
+                        far_gate=far_wall_preservation_assessment(extra['depth_banded_wall_validation'],
+                            reference['native_area_guard_validation']['depth_banded_wall_validation'])
+                        report['native_area_guard_far_wall_preservation']=far_gate
+                        if not far_gate['passed']:
+                            report['experimental_selection']['validated_improvement']=False
+                            report['experimental_selection']['failure_reasons']+=far_gate['failure_reasons']
+                atomic_json(self.root/'native_area_validation'/f'step_{at:06d}.json',extra)
+                preview_saver(extra_arrays,self.root/'preview_small_enemy.png',at)
                 del extra_arrays
             if preserve_validation is not None:
                 from .small_enemy_validation import distance_preservation_gate
@@ -381,8 +542,12 @@ class EnemyRendererTraining:
                 del guard_arrays
             if distance_validation is not None:
                 extra,extra_arrays=evaluate_enemy_renderer(working,distance_validation,
-                    list(range(len(distance_validation.rows))),step=at,batch_size=args.validation_batch)
+                    list(range(len(distance_validation.rows))),step=at,batch_size=args.validation_batch,
+                    small_enemy_rebalance=getattr(args,'small_enemy_rebalance',False),
+                    far_wall_supervision=getattr(args,'far_wall_supervision',False))
                 report['distance_validation']=extra
+                if getattr(args,'small_enemy_rebalance',False):
+                    extra['native_area_validation']=native_area_report(extra_arrays)
                 if reference is not None:
                     from .renderer_distance_training import distance_candidate_assessment
                     comparison=distance_candidate_assessment(extra,reference['distance_validation'])
@@ -390,6 +555,13 @@ class EnemyRendererTraining:
                     if not comparison['passed']:
                         report['experimental_selection']['validated_improvement']=False
                         report['experimental_selection']['failure_reasons'].append('distance_bands_not_all_improved')
+                    if getattr(args,'far_wall_supervision',False):
+                        far_gate=far_wall_preservation_assessment(extra['depth_banded_wall_validation'],
+                            reference['distance_validation']['depth_banded_wall_validation'])
+                        report['distance_far_wall_preservation']=far_gate
+                        if not far_gate['passed']:
+                            report['experimental_selection']['validated_improvement']=False
+                            report['experimental_selection']['failure_reasons']+=far_gate['failure_reasons']
                 atomic_json(self.root/'distance_validation'/f'step_{at:06d}.json',extra)
                 if at==phase_start:
                     np.savez_compressed(self.root/'distance_baseline_images.npz',
@@ -397,6 +569,9 @@ class EnemyRendererTraining:
                 del extra_arrays
             report['release_passed']=bool(report['base_preservation']['passed']
                 and (hp0_validation is None or report['terminal_supplement']['base_preservation']['passed']))
+            if getattr(args,'far_wall_supervision',False)and reference is not None:
+                report['release_passed']=bool(report['release_passed']and report['far_wall_preservation']['passed']
+                    and report['native_area_guard_far_wall_preservation']['passed']and report['distance_far_wall_preservation']['passed'])
             return report,arrays
         if baseline_path.exists():
             baseline_saved=torch.load(baseline_path,map_location='cpu',weights_only=False)
@@ -408,7 +583,7 @@ class EnemyRendererTraining:
             baseline,arrays=evaluate_full(step)
             verify_frozen()
             _save(baseline_path,{'identity':identity,'report':baseline,'arrays':arrays})
-            atomic_json(self.root/'validation_initial.json',baseline);save_enemy_preview(arrays,self.root/'preview.png',step)
+            atomic_json(self.root/'validation_initial.json',baseline);preview_saver(arrays,self.root/'preview.png',step)
             self.publish(validation_initial=baseline,validation=baseline)
         if new_phase:
             verify_frozen();save()
@@ -416,6 +591,10 @@ class EnemyRendererTraining:
         for category in (('tiny','near','corpse','navigation')if small_mode else('large','partial','corpse','empty_navigation')):
             matches=[i for i in panel if validation.rows[i]['category']==category]
             if matches:preview_ids.append(matches[0])
+        if getattr(args,'small_enemy_rebalance',False):
+            from .renderer_small_enemy_protocol import native_preview_positions
+            labels=validation.batch(len(small_supplement_panel),indices=small_supplement_panel)
+            preview_ids=[small_supplement_panel[i] for i in native_preview_positions(labels['object_mask'],labels['state'])]
         first_step=step+1
         until_enemy=getattr(args,'until_enemy_quality',False)
         while (until_enemy or step<args.steps) and (True if small_mode else enemy_streak<2 if until_enemy else streak<2):
@@ -432,7 +611,23 @@ class EnemyRendererTraining:
                 base_only=base_only,latent_weight=getattr(args,'source_latent_weight',0.),
                 detach_base=not getattr(args,'couple_base_flow',False),
                 base_regression_weight=getattr(args,'base_regression_weight',0.),
-                object_crop_weight=getattr(args,'object_crop_weight',0.))
+                object_crop_weight=getattr(args,'object_crop_weight',0.),
+                small_enemy_rebalance=getattr(args,'small_enemy_rebalance',False),
+                far_wall_supervision=getattr(args,'far_wall_supervision',False))
+            if far_auxiliary is not None:
+                from .renderer_enemy_objectives import far_wall_refinement_loss
+                auxiliary=far_wall_protocol()['auxiliary']
+                auxiliary_batch=far_auxiliary.batch(auxiliary['batch_size'])
+                auxiliary_loss,auxiliary_metrics=far_wall_refinement_loss(working,auxiliary_batch,
+                    detach_base=not getattr(args,'couple_base_flow',False))
+                metrics['main_train_loss']=float(loss.detach())
+                loss=loss+auxiliary['far_only_weight']*auxiliary_loss
+                metrics.update(auxiliary_metrics,train_loss=float(loss.detach()),
+                    far_wall_aux_weight=auxiliary['far_only_weight'],
+                    far_wall_aux_weighted_loss=auxiliary['far_only_weight']*float(auxiliary_loss.detach()),
+                    far_wall_aux_draws=far_auxiliary.draws)
+                if getattr(args,'record_sample_indices',False):
+                    metrics['far_wall_aux_source_batch_indices']=auxiliary_batch['row_index'].tolist()
             if getattr(args,'record_sample_indices',False):
                 metrics['source_batch_indices']=batch['row_index'].tolist()
                 metrics['source_sampler_draws']=train.draws
@@ -472,19 +667,23 @@ class EnemyRendererTraining:
                          'source_quality_passed':report['passed'],
                          'experimental_selection':report['experimental_selection'],
                          'automatic_active_promotion':False})
-                save_enemy_preview(arrays,self.root/'preview.png',step)
+                preview_saver(arrays,self.root/'preview.png',step)
             elif step%args.preview_every==0:
                 _,arrays=evaluate_enemy_renderer(working,validation,preview_ids,step=step,batch_size=args.validation_batch)
-                save_enemy_preview(arrays,self.root/'preview.png',step)
+                preview_saver(arrays,self.root/'preview.png',step)
             if step%args.preview_every==0 or report is not None:
                 atomic_json(self.root/'preview.json',{'step':step,'every':args.preview_every,'kind':'Source_enemy_GT_query',
                     'source_held_out':True,'renderer_only':True,'world_rollout':False,'codec_frozen':True,
-                    'feature_policy':'static_zero128_or_dynamic_frozen_past_prior','source_quality_gate_evaluated':report is not None})
+                    'feature_policy':'static_zero128_or_dynamic_frozen_past_prior','source_quality_gate_evaluated':report is not None,
+                    **({'loss_protocol':self.state['loss_protocol'],'columns':'tiny/small/far/empty native Source',
+                        'native_area_guard_fingerprint':identity['native_area_guard_fingerprint']}
+                       if getattr(args,'small_enemy_rebalance',False) else {})})
             record={'step':step,'global_training_step':step,'stage':'renderer_enemy_refinement','timestamp':now(),
                 'loss_protocol':self.state['loss_protocol'],**metrics}
             if report is not None:record['source_validation']=report
             with (self.root/'metrics.jsonl').open('a',encoding='utf-8') as stream:stream.write(json.dumps(record,allow_nan=False)+'\n')
-            self.publish(status='running',stage_label='Base TRAIN16 overfit warmup; held-out data untouched' if base_only else
+            self.publish(status='running',stage_label='Native Source small/far NPC and walls; RSSM/codec/SR frozen'
+                if getattr(args,'small_enemy_rebalance',False) else 'Base TRAIN16 overfit warmup; held-out data untouched' if base_only else
                 'Joint Source combat / appearance / detailed navigation; codec and RSSM frozen' if getattr(args,'combat_data_root',None) else 'Joint NPC-large curriculum with frozen codec',
                 current=step,global_training_step=step,
                 progress=None if until_enemy else (step-phase_start)/max(args.steps-phase_start,1),loss=metrics['train_loss'],
@@ -493,8 +692,10 @@ class EnemyRendererTraining:
                 sampler_pool_counts=getattr(train,'mix_counts',None),sampler_cohort_counts=getattr(train,'cohort_counts',None),
                 distance_sampler_counts=getattr(train,'distance_counts',None),
                 actual_distance_sample_counts=getattr(train,'actual_distance_counts',None),
+                actual_native_area_sample_counts=getattr(train,'actual_area_counts',None),
                 phase_start_step=phase_start,phase_updates=step-phase_start,
-                component_phase='base_large_train_overfit' if base_only else 'joint_large_enemy',
+                component_phase='joint_native_objects_and_walls' if getattr(args,'small_enemy_rebalance',False)
+                    else 'base_large_train_overfit' if base_only else 'joint_large_enemy',
                 base_warmup_steps=getattr(args,'base_warmup_steps',0),warmup_frames=len(warmup_panel),
                 warmup_draws=min(step,getattr(args,'base_warmup_steps',0))*args.batch,
                 enemy_target_streak=enemy_streak,enemy_target_required_passes=2,
@@ -520,7 +721,7 @@ class EnemyRendererTraining:
             provenance={'kind':'one_enemy_Source_GT_renderer_refinement','source_identity':identity,
                 'feature_policies':['static_zero128','dynamic_frozen_past_prior'],'codec_frozen':True,
                 'dynamics_frozen':True,'automatic_active_promotion':False})
-        atomic_json(self.root/'validation_selected.json',report);save_enemy_preview(arrays,self.root/'preview.png',selected['step'])
+        atomic_json(self.root/'validation_selected.json',report);preview_saver(arrays,self.root/'preview.png',selected['step'])
         self.publish(status='completed',current=step,selected_step=selected['step'],validation=report,
             renderer_export=exported,source_quality_passed=report['passed'],experimental_candidate_validated=True,
             release_passed=report.get('release_passed'),active_renderer_changed=False,gameplay_qualified=False)
@@ -545,6 +746,12 @@ def main(argv=None):
     parser.add_argument('--base-anchor-checkpoint',type=Path,help='Preserve the original frozen-parent Base reference across an explicit codec revision')
     parser.add_argument('--until-enemy-quality',action='store_true')
     parser.add_argument('--distance-balance',action='store_true',help='75% equal live visible Source distance bands +25% parent replay')
+    parser.add_argument('--small-enemy-rebalance',action='store_true',
+        help='New v5 fresh phase: native tiny/small/far/replay quotas, independent NPC/BG means and native crops')
+    parser.add_argument('--far-wall-supervision',action='store_true',
+        help='Explicit v6: independently normalized Source far-depth/corner/thin-face losses')
+    parser.add_argument('--native-phase-parent',type=Path,
+        help='Completed native-area v5 full checkpoint; preserve weights, Adam, sampler, RNG and update clock')
     parser.add_argument('--distance-panel',type=Path,help='Immutable independent Source VAL192 near/mid/far panel')
     parser.add_argument('--source-training-checkpoint',type=Path,help='Explicit distance phase inherits completed Base/RF Adam/RNG/clocks')
     parser.add_argument('--object-crop-weight',type=float,default=0.,help='Native Source foreground crop SSIM weight; no target resize')
@@ -567,6 +774,11 @@ def main(argv=None):
         parser.error('Combat and appearance data roots must be supplied together')
     if bool(args.preserve_distance_panel)!=bool(args.preserve_distance_baseline):
         parser.error('Historical distance preservation requires both immutable panel and baseline')
+    if args.small_enemy_rebalance and (not args.distance_balance or args.small_data_root
+            or args.source_training_checkpoint or args.parent_adam_checkpoint or args.base_warmup_steps):
+        parser.error('Native-area v5 requires distance-balance and a fresh selected-renderer phase; no old Adam/warmup')
+    if bool(args.native_phase_parent)!=bool(args.far_wall_supervision)or(args.far_wall_supervision and not args.small_enemy_rebalance):
+        parser.error('Far-wall v6 requires native-area v5 and an explicit completed --native-phase-parent')
     if min(args.steps,args.batch,args.validation_frames,args.validation_batch,args.validate_every,args.preview_every,args.save_every,args.threads)<=0:
         parser.error('Positive renderer budgets and batch sizes required')
     if min(args.lr,args.base_lr)<=0 or min(args.ssim_weight,args.edge_weight,args.contrast_weight,args.source_latent_weight,args.base_regression_weight,args.object_crop_weight)<0:

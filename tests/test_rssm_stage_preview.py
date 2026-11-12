@@ -94,13 +94,13 @@ class StagePreviewTests(unittest.TestCase):
             trainer.args = SimpleNamespace(preview_assets_plan='pinned', renderer_checkpoint='old.pt', sr='old_sr.pt')
             trainer.preview_model = PreviewClient(); trainer.long_val = PreviewData()
             trainer.short_val = SimpleNamespace(batch=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('Wrong short data')))
-            trainer._preview_renderer_checkpoint = 'updated_renderer6600.pt'; trainer._preview_sr_checkpoint = 'updated_sr.pt'
+            trainer._preview_renderer_checkpoint = 'updated_renderer6000.pt'; trainer._preview_sr_checkpoint = 'updated_sr.pt'
             trainer.sr = nn.Identity(); trainer.sr_metadata = {'training_steps': 38100}
             trainer.state = {'global_training_step': 5089, 'rssm_training': {'phase': 'combat', 'combat_completed': 16,
                 'loss_gated_curriculum': {'current_horizon': 16, 'stage_index': 0, 'sha256': 'gate', 'last_training_horizon': 16}}}
             published, saved = [], []
             trainer.publish = lambda: published.append(True)
-            pinned = {'renderer_refinement_updates': 6600, 'sr_training_steps': 38100}
+            pinned = {'renderer_refinement_updates': 6000, 'renderer_training_steps':22200,'sr_training_steps': 38100}
             def save(preview, *args, **kwargs):
                 saved.append(preview)
                 return preview['metadata']
@@ -120,11 +120,12 @@ class StagePreviewTests(unittest.TestCase):
             self.assertEqual(saved[1]['metadata']['display_offsets'], [1, 11, 22, 32])
             self.assertEqual(saved[1]['metadata']['context'], 2)
             self.assertEqual(saved[1]['metadata']['preview_assets'], pinned)
-            self.assertEqual(saved[1]['metadata']['renderer_checkpoint'], 'updated_renderer6600.pt')
+            self.assertEqual(saved[1]['metadata']['renderer_checkpoint'], 'updated_renderer6000.pt')
             self.assertEqual(saved[1]['metadata']['sr_checkpoint'], 'updated_sr.pt')
             self.assertEqual(saved[1]['generated'].shape[0], 4)
             self.assertEqual(saved[1]['source'].shape[0], 4)
             self.assertIn('H32', saved[1]['metadata']['caption'])
+            self.assertIn('NPR 22200 (phase 6000)',saved[1]['metadata']['caption'])
             self.assertEqual(len(trainer.preview_model.calls), 48)
             self.assertEqual(len(published), 2)
             self.assertTrue(torch.equal(torch.get_rng_state(), rng))

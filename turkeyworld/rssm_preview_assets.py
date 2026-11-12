@@ -82,25 +82,50 @@ def resolve_preview_assets_plan(initial_path, revision_path=None, saved_revision
         if saved_revision is not None:
             raise ValueError('Resume requires the saved explicit preview-assets revision plan')
         return initial, initial, None
-    path = Path(revision_path).resolve()
-    raw = json.loads(path.read_text(encoding='utf-8'))
-    if (not isinstance(raw, dict) or type(raw.get('version')) is not int or raw.get('version') != 1
-            or raw.get('kind') != 'preview_assets_revision_v1'
-            or raw.get('initial_plan_sha256') != initial['plan_sha256']):
-        raise ValueError('Preview-assets revision changed its initial immutable plan')
-    selected_path = Path(raw.get('selected_plan', ''))
-    expected = raw.get('selected_plan_sha256')
-    if (not selected_path.is_absolute() or not selected_path.is_file() or not isinstance(expected, str)
-            or re.fullmatch(r'[0-9a-f]{64}', expected) is None or file_sha256(selected_path) != expected):
-        raise ValueError('Selected preview-assets plan SHA/path changed')
-    selected = read_preview_assets_plan(selected_path)
-    record = {'kind': 'preview_assets_revision_v1', 'revision_plan_path': str(path),
-        'revision_sha256': file_sha256(path), 'initial_plan_path': initial['plan_path'],
-        'initial_plan_sha256': initial['plan_sha256'], 'selected_plan_path': selected['plan_path'],
-        'selected_plan_sha256': selected['plan_sha256'], 'preview_only': True,
-        'training_assets_changed': False, 'game_assets_changed': False}
-    if saved_revision is not None and any(saved_revision.get(key) != value for key, value in record.items()):
-        raise ValueError('Saved preview-assets revision identity changed on resume')
+    def resolve_revision(path, ancestors=()):
+        path=Path(path).resolve()
+        if path in ancestors or len(ancestors)>=32:
+            raise ValueError('Preview-assets revision chain has a cycle or excessive depth')
+        if not path.is_file():raise ValueError('Previous preview-assets revision SHA/path changed')
+        data=path.read_bytes();raw=json.loads(data.decode('utf-8'))
+        if (not isinstance(raw,dict)or type(raw.get('version'))is not int
+                or (raw.get('version'),raw.get('kind'))not in
+                    ((1,'preview_assets_revision_v1'),(2,'preview_assets_revision_v2'))
+                or raw.get('initial_plan_sha256')!=initial['plan_sha256']):
+            raise ValueError('Preview-assets revision changed its initial immutable plan')
+        parent=None
+        if raw['version']==2:
+            previous=Path(raw.get('previous_revision_plan',''))
+            previous_sha=raw.get('previous_revision_sha256')
+            if (not previous.is_absolute()or not previous.is_file()or not isinstance(previous_sha,str)
+                    or re.fullmatch(r'[0-9a-f]{64}',previous_sha)is None):
+                raise ValueError('Previous preview-assets revision SHA/path changed')
+            _,parent,_=resolve_revision(previous,ancestors+(path,))
+            if parent['revision_sha256']!=previous_sha:
+                raise ValueError('Previous preview-assets revision SHA/path changed')
+        selected_path=Path(raw.get('selected_plan',''));expected=raw.get('selected_plan_sha256')
+        if (not selected_path.is_absolute()or not selected_path.is_file()or not isinstance(expected,str)
+                or re.fullmatch(r'[0-9a-f]{64}',expected)is None or file_sha256(selected_path)!=expected):
+            raise ValueError('Selected preview-assets plan SHA/path changed')
+        selected=read_preview_assets_plan(selected_path)
+        record={'kind':raw['kind'],'revision_plan_path':str(path),
+            'revision_sha256':hashlib.sha256(data).hexdigest(),'initial_plan_path':initial['plan_path'],
+            'initial_plan_sha256':initial['plan_sha256'],'selected_plan_path':selected['plan_path'],
+            'selected_plan_sha256':selected['plan_sha256'],'preview_only':True,
+            'training_assets_changed':False,'game_assets_changed':False}
+        if parent is not None:
+            record.update(previous_revision_plan_path=parent['revision_plan_path'],
+                previous_revision_sha256=parent['revision_sha256'],
+                previous_selected_plan_sha256=parent['selected_plan_sha256'])
+        return selected,record,parent
+
+    selected,record,parent=resolve_revision(revision_path)
+    if parent is None:
+        # Preserve the original v1 transition/resume contract exactly.
+        if saved_revision is not None and any(saved_revision.get(key)!=value for key,value in record.items()):
+            raise ValueError('Saved preview-assets revision identity changed on resume')
+    elif saved_revision!=record and saved_revision!=parent:
+        raise ValueError('Preview-assets v2 requires the exact saved revision or its immediate parent')
     return initial, selected, record
 
 

@@ -197,5 +197,101 @@ class RSSMPreviewAssetsTests(unittest.TestCase):
         with self.assertRaises(ValueError):resolve_preview_assets_plan(self.path,path,{**record,'revision_sha256':'different'})
         self.assertEqual(_hash_tensors(self.source.state_dict()),source_before)
 
+    def chained_revision(self,parent_path,*,name='latest',phase=6000,total=22200):
+        parent=json.loads(parent_path.read_text())
+        old_plan=json.loads(Path(parent['selected_plan']).read_text())
+        payload=torch.load(old_plan['renderer']['checkpoint'],weights_only=False)
+        payload['model']['output.weight'].add_(.002)
+        payload['training_steps']=total;payload['metrics']['refinement_updates']=phase
+        payload['base_student_bundle']['training_steps']=total-400
+        renderer=self.root/(name+'_renderer.pt');torch.save(payload,renderer)
+        selected=copy.deepcopy(self.raw);selected['renderer'].update(checkpoint=str(renderer),
+            file_sha256=file_sha256(renderer),refinement_updates=phase)
+        selected_path=self.root/(name+'_assets.json');selected_path.write_text(json.dumps(selected))
+        revision={'version':2,'kind':'preview_assets_revision_v2','initial_plan_sha256':file_sha256(self.path),
+            'previous_revision_plan':str(parent_path),'previous_revision_sha256':file_sha256(parent_path),
+            'selected_plan':str(selected_path),'selected_plan_sha256':file_sha256(selected_path)}
+        path=self.root/(name+'_revision.json');path.write_text(json.dumps(revision))
+        return path,revision,selected_path
+
+    def test_v2_only_direct_parent_activation_or_exact_resume_and_no_ancestor_skipping(self):
+        old_path,_,_=self.revision();_,_,old=resolve_preview_assets_plan(self.path,old_path)
+        path,_,_=self.chained_revision(old_path)
+        _,_,current=resolve_preview_assets_plan(self.path,path,old)
+        self.assertEqual(current['kind'],'preview_assets_revision_v2')
+        self.assertEqual(current['previous_revision_sha256'],old['revision_sha256'])
+        self.assertEqual(resolve_preview_assets_plan(self.path,path,current)[2],current)
+        for invalid in (None,{**old,'revision_sha256':'f'*64}):
+            with self.assertRaisesRegex(ValueError,'immediate parent'):resolve_preview_assets_plan(self.path,path,invalid)
+        future_path,_,_=self.chained_revision(path,name='future',phase=6100,total=22300)
+        with self.assertRaisesRegex(ValueError,'immediate parent'):resolve_preview_assets_plan(self.path,future_path,old)
+        _,_,future=resolve_preview_assets_plan(self.path,future_path,current)
+        self.assertEqual(resolve_preview_assets_plan(self.path,future_path,future)[2],future)
+
+    def test_v2_full_chain_rejects_tampered_ancestor_assets_missing_parent_cycles_and_wrong_roots(self):
+        old_path,_,old_assets=self.revision();_,_,old=resolve_preview_assets_plan(self.path,old_path)
+        path,raw,_=self.chained_revision(old_path)
+        old_bytes=old_path.read_bytes();old_asset_bytes=old_assets.read_bytes()
+        changed=json.loads(old_bytes);changed['note']='ancestor changed';old_path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError,'SHA'):resolve_preview_assets_plan(self.path,path,old)
+        old_path.write_bytes(old_bytes)
+        changed=json.loads(old_asset_bytes);changed['note']='ancestor asset changed';old_assets.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError,'SHA'):resolve_preview_assets_plan(self.path,path,old)
+        old_assets.write_bytes(old_asset_bytes);old_path.unlink()
+        with self.assertRaisesRegex(ValueError,'SHA/path'):resolve_preview_assets_plan(self.path,path,old)
+        old_path.write_bytes(old_bytes)
+        for key,value,pattern in [('previous_revision_plan',str(path),'cycle'),
+            ('previous_revision_plan','relative.json','SHA/path'),('previous_revision_sha256','f'*64,'SHA'),
+            ('initial_plan_sha256','0'*64,'initial'),('version',True,'initial')]:
+            path.write_text(json.dumps({**raw,key:value}))
+            with self.assertRaisesRegex(ValueError,pattern):resolve_preview_assets_plan(self.path,path,old)
+        path.write_text(json.dumps(raw));resolve_preview_assets_plan(self.path,path,old)
+
+    def test_v2_worker_hot_and_cold_cache_preserve_training_adam_rng_curriculum_and_revision_history(self):
+        old_path,_,_=self.revision()
+        trainer=RSSMTraining.__new__(RSSMTraining)
+        trainer.args=SimpleNamespace(preview_assets_plan=self.path,preview_assets_revision_plan=old_path,
+            renderer_checkpoint='original.pt',sr='original_sr.pt')
+        trainer.device=torch.device('cpu');trainer.preview_model=None
+        trainer.state={'global_training_step':5330,'rssm_training':{'gate':{'current_horizon':128,'streak':0},
+            'sampler':{'draws':1234}},'training_protocol':'unchanged'}
+        optimizer=torch.optim.Adam(self.source.vjepa_backend.core.parameters(),lr=.001)
+        self.source.vjepa_backend.core(torch.ones(1,20)).square().mean().backward();optimizer.step()
+        adam=copy.deepcopy(optimizer.state_dict());weights=_hash_tensors(self.source.state_dict())
+        ids=[id(p)for p in self.source.parameters()];training=copy.deepcopy(trainer.state['rssm_training'])
+        real=prepare_preview_assets
+        def prepare(model,plan,device):return real(model,plan,device,clone_factory=lambda config:copy.deepcopy(model))
+        initial_bytes=self.path.read_bytes();old_bytes=old_path.read_bytes()
+        with patch('turkeyworld.rssm_preview_assets.prepare_preview_assets',side_effect=prepare):
+            trainer.initialize_preview_assets(self.source);old_client=trainer.preview_model
+            path,_,_=self.chained_revision(old_path)
+            trainer.args.preview_assets_revision_plan=path
+            rng=torch.get_rng_state().clone();updated=trainer.initialize_preview_assets(self.source)
+            self.assertEqual(updated['renderer_training_steps'],22200)
+            self.assertEqual(updated['renderer_refinement_updates'],6000)
+            self.assertEqual(updated['base_training_steps'],21800)
+            self.assertFalse(updated['renderer_source_quality_passed']);self.assertFalse(updated['gameplay_qualified'])
+            self.assertIsNot(old_client,trainer.preview_model)
+            self.assertEqual(len(trainer.state['preview_assets_history']),3)
+            self.assertEqual(len(trainer.state['preview_assets_revision_history']),2)
+            self.assertEqual(trainer.state['rssm_training'],training)
+            self.assertEqual(_hash_tensors(self.source.state_dict()),weights)
+            self.assertEqual([id(p)for p in self.source.parameters()],ids)
+            self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+            for key,row in adam['state'].items():
+                for name,value in row.items():torch.testing.assert_close(value,optimizer.state_dict()['state'][key][name],rtol=0,atol=0)
+            self.assertEqual(adam['param_groups'],optimizer.state_dict()['param_groups'])
+            self.assertEqual(trainer.args.renderer_checkpoint,'original.pt');self.assertEqual(trainer.args.sr,'original_sr.pt')
+            self.assertEqual(self.path.read_bytes(),initial_bytes);self.assertEqual(old_path.read_bytes(),old_bytes)
+            restored=RSSMTraining.__new__(RSSMTraining);restored.args=copy.copy(trainer.args)
+            restored.device=torch.device('cpu');restored.preview_model=None;restored.state=copy.deepcopy(trainer.state)
+            restored.initialize_preview_assets(self.source)
+            self.assertEqual(len(restored.state['preview_assets_history']),3)
+            self.assertEqual(len(restored.state['preview_assets_revision_history']),2)
+            current=restored.preview_model;state=copy.deepcopy(restored.state)
+            restored.args.preview_assets_revision_plan=old_path
+            with self.assertRaises(ValueError):restored.initialize_preview_assets(self.source)
+            self.assertIs(restored.preview_model,current);self.assertEqual(restored.state,state)
+
 
 if __name__=='__main__':unittest.main()

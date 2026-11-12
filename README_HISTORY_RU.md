@@ -1836,6 +1836,142 @@ None, optimizer commits0, приватный gate остался0/10. H450 бы�
 [GPU-проба](training_runs/rssm_loss_gated_drift_20261112/loss_gated_probe.json),
 [audit первой последовательной серии](training_runs/rssm_loss_gated_drift_20261112/first_loss_gated_streak_verification.json).
 
+## H54. Обучение студента рендера на маленьких врагах и стенах
+
+Запущен `training_runs/renderer_objects_walls_20261112` параллельно с прежним
+обучением RSSM по loss-gated расписанию. Студент Base/RF1 начинает с выбранного
+renderer 6600: его позднее продолжение 8000 оказалось хуже. В новой фазе новый
+Adam рендера, бюджет 2000 обновлений, batch 16, валидация каждые 100 и preview каждые 10.
+Источник признаков — неизменяемый snapshot RSSM 5152; compact VQGAN 997539 (E7)
+и SR 38100 также заморожены. Основной RSSM продолжает своё pure-XY расписание.
+Обучение: **http://127.0.0.1:8777/**. Сравнения Source/codec/Base/RF на одинаковых
+позах: **http://127.0.0.1:8780/**.
+
+В существующем parent-корпусе уже есть 146386 TRAIN и 31277 независимых VAL строк.
+Живые видимые NPC представлены 16988/2840 примерами площадью 1–16 pixels и
+21719/2320 примерами площадью 17–64 pixels в TRAIN/VAL. Добирать данные не пришлось.
+Sampler выделяет по 25% на tiny NPC, small NPC, far NPC и исходный replay.
+Ошибки foreground/background нормируются отдельно. Native NPC crops добавляют
+L 1 с весом 0.25 и ошибку границ с весом 0.1; wall-boundary и wall-edge имеют веса 0.2
+и 0.1. Точная DDA-геометрия Source даёт метки стен с исключением NPC и оружия.
+Source targets и маски используются только как loss labels; они не становятся
+условиями будущего изображения или входами инференса. Исходные main VAL 256
+и distance VAL 192 сохранены; добавлена непересекающаяся VAL 256:64 tiny,64 small,
+64 far и 64 empty кадра.
+
+Пройдены 75 CPU-тестов и реальный batch 16 GPU backward с конечными градиентами.
+Сохранённый checkpoint локального шага 90 прошёл проверку фактического SGD:
+Base и RF изменились; все 317 состояний Adam принадлежат этим компонентам;
+128 тензоров codec и непараметрические тензоры Flow побитно совпадают с E7.
+RSSM и SR pins сохранены. Первая полная held-out валидация на 100 обновлениях
+показывает ограниченное улучшение:
+
+| Проверка | До обучения | Обновление 100 |
+| --- | ---: | ---: |
+| Main VAL 256 RF MAE |0.0355328|0.0341181|
+| Main VAL 256 RF SSIM |0.744158|0.746047|
+| Fixed 8 Source-pose RF NPC error |0.150260|0.143220|
+| Fixed 8 Source-pose RF wall-boundary error |0.0999496|0.0979165|
+| Fixed 8 Source-pose Base wall-boundary error |0.105151|0.0970501|
+
+На этих восьми выбранных запросах ошибка RF NPC уменьшилась на 4.69%, а ошибка
+границ стен RF — на 2.03%. Это не означает прохождения общей проверки качества.
+Codec не изменился: его соответствующие исходные ошибки NPC/стен равны
+0.092925/0.0381032. Это эмпирические ориентиры реконструкции, а не математические
+пределы качества. Native-NPC и HP 0/Base guards ещё не пройдены; release и
+experimental selection остаются false. Обучение продолжается до 2000 обновлений.
+Новые assets игры не подменены; эти проверки изображений по настоящим состояниям
+не подтверждают качество автономной игры.
+
+Артефакты: [команда](training_runs/renderer_objects_walls_20261112/launch_command.json),
+[покрытие данных](training_runs/renderer_objects_walls_20261112/inputs/parent_native_area_inventory.json),
+[GPU backward](training_runs/renderer_objects_walls_20261112/gpu_backward_probe.json),
+[проверка SGD/freeze](training_runs/renderer_objects_walls_20261112/first_native_area_renderer_update_verification.json),
+[исходная валидация](training_runs/renderer_objects_walls_20261112/validation_initial.json),
+[валидация 100](training_runs/renderer_objects_walls_20261112/validation/step_000100.json).
+
+## H55. Дальние стены и продолжение с сохранённым Adam
+
+V 5 control завершил шаг 2000. Отдельный pixel-residual pilot завершил 500 обновлений,
+но не выбран: control оказался лучше на полных native Source проверках и тех же
+восьми NPC/wall запросах. До этого pilot две попытки CUDA migration завершились
+ошибкой до SGD и не изменили веса. Migration исправлена: сравнение использует
+одинаковые model modes и gradient flags; фактическая CUDA-проверка сохранения
+выходов после этого прошла. Pixel-архитектура остаётся проверенным экспериментом,
+а активное продолжение берёт веса control.
+
+Выбранный полный checkpoint control на 2000 стал началом
+`training_runs/renderer_far_geometry_20261112` с целевым счётчиком рендера 6000.
+Продолжение полное: после загрузки подтверждено точное совпадение Base/RF весов,
+всех 317 состояний Adam, moments/options, MAIN PCG с 32000 draws и всех четырёх RNG.
+Следующее обновление оптимизатора —2001. RSSM 5152, compact codec E7 и SR 38100
+заморожены; основное обучение RSSM продолжается независимо. Проверенный работающий
+v 6 worker показан на **http://127.0.0.1:8777/**; диагностика остаётся на
+**http://127.0.0.1:8780/**. Валидация каждые 100, preview каждые 10.
+
+Дальняя грань стены может занимать один-два native 32 пикселя и теряться в средней
+ошибке больших близких стен. Новые loss-only Source DDA метки делят стены на
+диапазоны глубины 5–8,8–12 и≥12 клеток с отдельной нормировкой по присутствующим
+изображениям и регионам. В каждой присутствующей полосе boundary L1 имеет вес 0.2,
+а ошибки edge, corner, thin-face и thin-height — по 0.1. Thin-face — сегмент стены
+в одной плоскости/материале шириной 1–2 колонки камеры на глубине≥5; thin-height —
+проекция высотой≤2 native pixels. NPC и оружие исключены. Полученные DDA-полосы,
+маски и target RGB служат метками обучения и не добавляют oracle в условия
+рендера или runtime. Существующие map/state conditions сохранены;
+реконструкция codec остаётся эмпирическим ориентиром.
+
+MAIN batch 16 сохраняет все v 5 NPC/replay квоты и существующие objectives.
+Отдельный auxiliary batch из четырёх кадров даёт только far-wall losses с весом 0.25,
+поэтому исходная смесь не превращается в единый равномерный batch 20 loss.
+Независимый новый sampler выбирает из фиксированных 2048 TRAIN-only кандидатов:
+271 кадр с глубиной≥12,481 оставшийся thin-face и 255 оставшихся depth≥8 кадров.
+Эти непересекающиеся группы получают равные квоты. Построение пула и auxiliary
+чтение не изменяют полный MAIN sampler; auxiliary RNG/счётчики восстанавливаются
+отдельно. Не потребовались подбор по VAL, подбор по изображениям модели,
+DDA-скан всего корпуса или новый сбор Source. Прежние held-out панели и все
+NPC/empty/HP0/Base preservation проверки сохранены.
+
+Совместный набор прошёл 97 CPU-тестов. Реальный CUDA MAIN 16+aux 4 backward прошёл
+с конечными градиентами Base/RF и combined loss 0.613047; веса/buffers модели
+сохранены при нуле шагов оптимизатора. Пиковая allocated memory —0.614 GiB.
+Это подтверждает работоспособность обучения, но не исправление дальних полигонов.
+
+Первая плановая валидация на 2100 использует тот же fingerprint main 256, что
+baseline 2000. Она показывает компромисс, а не общее прохождение проверки:
+
+| Main held-out панель, RF1 | Baseline 2000 | Обновление 2100 |
+| --- | ---: | ---: |
+| Full-image MAE |0.0331371|0.0338718|
+| Full-image SSIM |0.755794|0.745421|
+| NPC foreground MAE |0.0948809|0.0967419|
+| Depth≥12 boundary L1 |0.169387|0.130909|
+| Depth≥12 thin-face L1 (5 кадров) |0.101501|0.0733054|
+| Depth≥12 thin-height L1 (14 кадров) |0.0766423|0.0648545|
+
+Ошибки дальних стен на этой панели уменьшились, но full-image/NPC качество
+ухудшилось. Другие native-area guards ещё показывают регрессии тонких стен,
+а NPC/HP0/Base проверки не пройдены. Experimental selection и Source/gameplay
+release остаются false; результаты не дают оснований подменять assets игры
+или заявлять об общем исправлении.
+Поддержка дальних стен на этой панели — всего 35 видимых native pixels.
+Сбалансированное сравнение доступно также в диагностике и
+[JSON-отчёте](http://127.0.0.1:8780/far_geometry_first100.json).
+
+Независимая проверка фактического SGD прошла для source 2000→saved 2090:
+все 317 Adam clocks достигли 2090, MAIN получил 33440 draws (по 8360 на четверть),
+отдельный auxiliary sampler —360 draws (по 120 на группу). Оба PCG независимо
+воспроизведены побитно. Все 128 тензоров E7 codec, Flow buffers, RSSM 5152, SR
+и 2344 Source-файла остались неизменны; новые параметры модели не добавлялись.
+
+Артефакты: [команда](training_runs/renderer_far_geometry_20261112/launch_command.json),
+[план/проверка полного продолжения](training_runs/renderer_far_geometry_20261112/far_wall_phase_plan.json),
+[независимая проверка фактического SGD](training_runs/renderer_far_geometry_20261112/first_far_geometry_update_verification.json),
+[реальный CUDA backward](training_runs/renderer_far_geometry_20261112/gpu_backward_probe.json),
+[исходная валидация](training_runs/renderer_far_geometry_20261112/validation_initial.json),
+[валидация 2100](training_runs/renderer_far_geometry_20261112/validation/step_002100.json),
+[фиксированное покрытие глубины Source](training_runs/renderer_objects_walls_20261112/diagnostics/wall_depth_inventory_256.json),
+[фактический smoke auxiliary-пула](training_runs/renderer_objects_walls_20261112/diagnostics/far_wall_pool_smoke.json).
+
 ## Изменения целей, batch и единиц данных
 
 | Что менялось | Последовательность из чата / итог |

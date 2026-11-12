@@ -6,6 +6,7 @@ archived teacher. Renderer, map, VQGAN, Base and appearance assets stay frozen.
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import nullcontext
 from dataclasses import asdict
 import gc
@@ -130,7 +131,11 @@ class RSSMTraining:
         existing_plan = getattr(self, '_preview_assets_plan_sha', None)
         explicit_activation = (revision is not None and saved_revision is None
             and existing_plan == initial['plan_sha256'])
-        if existing_plan is not None and existing_plan != plan['plan_sha256'] and not explicit_activation:
+        explicit_descendant = (revision is not None and saved_revision is not None
+            and revision.get('kind')=='preview_assets_revision_v2'
+            and revision.get('previous_revision_sha256')==saved_revision.get('revision_sha256')
+            and existing_plan==revision.get('previous_selected_plan_sha256'))
+        if existing_plan is not None and existing_plan != plan['plan_sha256'] and not(explicit_activation or explicit_descendant):
             raise ValueError('Immutable preview-assets plan changed during this worker')
         key = preview_assets_cache_key(plan, model.config)
         if self.preview_model is None or getattr(self, '_preview_assets_key', None) != key:
@@ -151,6 +156,11 @@ class RSSMTraining:
             if not any(item['plan_sha256'] == asset_plan['plan_sha256'] for item in history):
                 history.append({key: asset_plan[key] for key in ('plan_path', 'plan_sha256', 'renderer', 'sr')})
         if revision is not None:
+            if revision.get('kind')=='preview_assets_revision_v2':
+                revisions=self.state.setdefault('preview_assets_revision_history',[])
+                for item in (saved_revision,revision):
+                    if item is not None and not any(old['revision_sha256']==item['revision_sha256']for old in revisions):
+                        revisions.append(copy.deepcopy(item))
             self.state['preview_assets_revision'] = revision
             self.state['preview_assets']['revision'] = revision
         return self.state['preview_assets']
@@ -199,6 +209,8 @@ class RSSMTraining:
         batch = stage_preview_batch(data, spec)
         generated, source = generate_stage_preview(client, batch, spec)
         offset_label = ', '.join(str(offset) for offset in offsets)
+        renderer_label=('NPR '+str(pinned.get('renderer_training_steps',pinned['renderer_refinement_updates']))
+            +' (phase '+str(pinned['renderer_refinement_updates'])+')')if pinned else ''
         def rgb(value):
             return value.detach().float().clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         preview = {'context': rgb(batch['context_frames'][0]),
@@ -216,10 +228,10 @@ class RSSMTraining:
                 'preview_assets': pinned,
                 'generated_at': now(), 'source_held_out': True, 'split': 'val',
                 'future_source_feedback': False, 'generated_finite': bool(torch.isfinite(generated).all()),
-                'caption': 'RSSM: собственная траектория H'+str(horizon)+'; показаны offsets '+offset_label+'; замороженный нейрорендер, один Euler шаг'+(' · updated NPR '+str(pinned['renderer_refinement_updates'])+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
+                'caption': 'RSSM: собственная траектория H'+str(horizon)+'; показаны offsets '+offset_label+'; замороженный нейрорендер, один Euler шаг'+(' · '+renderer_label+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
                 'row_labels': {'context': 'CONTEXT: '+str(context)+' observed frame(s) | RSSM',
                     'source': 'SOURCE: target-only offsets '+offset_label,
-                    'generated': 'RSSM MODEL: free H'+str(horizon)+' | offsets '+offset_label+' | frozen renderer'+(' | updated NPR '+str(pinned['renderer_refinement_updates'])+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
+                    'generated': 'RSSM MODEL: free H'+str(horizon)+' | offsets '+offset_label+' | frozen renderer'+(' | '+renderer_label+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
         self.state['prediction_preview'] = save_autoregressive_preview(preview,
             self.root/'preview.png', step=self.state['global_training_step'], every=10,
             sr_model=self.sr, sr_metadata=self.sr_metadata)
