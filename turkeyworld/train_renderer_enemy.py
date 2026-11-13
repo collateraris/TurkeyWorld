@@ -24,8 +24,75 @@ from .training_pipeline import atomic_json,now
 
 
 def _phase_plan_filename(args):
+    if getattr(args,'private_geometry_supervision',False):return 'private_geometry_phase_plan.json'
+    if getattr(args,'geometry_wall_supervision',False):return 'geometry_wall_phase_plan.json'
     if getattr(args,'far_wall_supervision',False):return 'far_wall_phase_plan.json'
     return 'small_enemy_phase_plan.json'if getattr(args,'small_enemy_rebalance',False)else 'distance_phase_plan.json'
+
+
+def _add_geometry_auxiliary_loss(model, loss, metrics, data, *, detach_base=True, record_indices=False,
+                                 opacity_depth_weight=0.):
+    """An additive private B8 query; the original main/far objective is retained."""
+    if data is None:return loss,metrics
+    from .renderer_geometry_objectives import geometry_wall_protocol,geometry_refinement_loss
+    auxiliary=geometry_wall_protocol()['auxiliary']
+    batch=data.batch(auxiliary['batch_size'])
+    value,extra=geometry_refinement_loss(model,batch,detach_base=detach_base,
+        **({'opacity_depth_weight':opacity_depth_weight}if opacity_depth_weight else {}))
+    previous=float(loss.detach());loss=loss+auxiliary['weight']*value
+    metrics.update(extra,v6_train_loss=previous,train_loss=float(loss.detach()),
+        geometry_wall_aux_loss=float(value.detach()),geometry_wall_aux_examples=auxiliary['batch_size'],
+        geometry_wall_aux_weight=auxiliary['weight'],
+        geometry_wall_aux_weighted_loss=auxiliary['weight']*float(value.detach()),
+        geometry_wall_aux_draws=data.draws)
+    if record_indices:metrics['geometry_wall_aux_source_batch_indices']=batch['row_index'].tolist()
+    return loss,metrics
+
+
+def _private_geometry_depth_weight(step,phase_start):
+    from .renderer_opacity_phase import opacity_geometry_protocol
+    protocol=opacity_geometry_protocol()
+    warmup=protocol['depth_weight_warmup_updates']
+    if type(warmup)is not int or warmup<1 or type(step)is not int or type(phase_start)is not int or step<phase_start:
+        raise ValueError('Private geometry requires the pinned positive depth warmup and optimizer phase clock')
+    return protocol['opacity_depth_weight']*min((step-phase_start)/warmup,1.)
+
+
+def _renderer_optimizer(model,args):
+    """Retain ordered Base/RF groups; private geometry owns its fresh third group."""
+    private=getattr(model.flow_renderer,'geometry_opacity',None)
+    active=getattr(args,'private_geometry_supervision',False)
+    if (private is not None)!=active:
+        raise ValueError('Private geometry parameters require the explicit v8 phase')
+    groups=[{'params':model.base_student.parameters(),'lr':args.base_lr},
+            {'params':[p for n,p in model.flow_renderer.named_parameters()
+                if p.requires_grad and not n.startswith('geometry_opacity.')],'lr':args.lr}]
+    if active:
+        from .renderer_opacity_phase import opacity_geometry_protocol
+        groups.append({'params':private.parameters(),'lr':opacity_geometry_protocol()['private_optimizer_lr']})
+    return torch.optim.AdamW(groups,weight_decay=.01)
+
+
+def _export_private_analysis(source,working,directory,*,step,report,initial_renderer_steps,initial_base_steps,identity):
+    """Export explicit unqualified analysis weights without perturbing SGD RNG."""
+    device=next(working.parameters()).device
+    devices=[device.index if device.index is not None else torch.cuda.current_device()]if device.type=='cuda'else []
+    np_state,py_state=np.random.get_state(),random.getstate()
+    try:
+        with torch.random.fork_rng(devices=devices):
+            result=export_refined_bundle(source,working,directory,updates=step,report=report,
+                initial_renderer_steps=initial_renderer_steps,initial_base_steps=initial_base_steps,
+                provenance={'kind':'unqualified_private_geometry_analysis','source_identity':identity,
+                    'codec_frozen':True,'dynamics_frozen':True,'automatic_active_promotion':False,
+                    'release_qualified':False,'gameplay_qualified':False})
+    finally:
+        np.random.set_state(np_state);random.setstate(py_state)
+    receipt={'step':step,'renderer_checkpoint':str(Path(directory)/'renderer_student.pt'),
+        'base_checkpoint':str(Path(directory)/'base_student.pt'),'training_steps':result['training_steps'],
+        'private_geometry_enabled':True,'experimental_analysis_only':True,
+        'release_qualified':False,'gameplay_qualified':False,'automatic_active_promotion':False}
+    atomic_json(Path(directory)/'export.json',receipt)
+    return receipt
 
 
 class EnemyRendererTraining:
@@ -68,6 +135,16 @@ class EnemyRendererTraining:
             protocol=far_wall_protocol()
             self.state.update(loss_protocol=protocol['name'],far_wall_protocol=protocol,
                 optimizer_initialization='preserve_full_native_parent_AdamW_RNG_sampler')
+        if getattr(args,'geometry_wall_supervision',False):
+            from .renderer_geometry_objectives import geometry_wall_protocol
+            protocol=geometry_wall_protocol()
+            self.state.update(loss_protocol=protocol['name'],geometry_wall_protocol=protocol,
+                optimizer_initialization='preserve_full_v6_AdamW_RNG_main_far_samplers')
+        if getattr(args,'private_geometry_supervision',False):
+            from .renderer_opacity_phase import opacity_geometry_protocol
+            protocol=opacity_geometry_protocol()
+            self.state.update(loss_protocol=protocol['name'],private_geometry_protocol=protocol,
+                optimizer_initialization='preserve_old_Base_RF_Adam_add_four_private_geometry_tensors')
         if getattr(args,'until_enemy_quality',False):
             self.state.update(total=None,training_until_enemy_quality=True,eta_seconds=None,
                 scope='Experimental NPC-appearance target; not full Source/gameplay qualification')
@@ -103,13 +180,14 @@ class EnemyRendererTraining:
             from .base_student import enable_base_pixel_residual
             original_base=working.base_student
             working.base_student=enable_base_pixel_residual(original_base)
+        if getattr(args,'private_geometry_supervision',False):
+            from .renderer_geometry_opacity import enable_geometry_opacity
+            self.publish(private_geometry_initialization=enable_geometry_opacity(working))
         working.float().to(device)
         policy=configure_refinement(working)
         if policy['base_trainable']>1000000 or policy['flow_trainable']>7000000 or policy['codec_parameters']>1000000:
             raise ValueError('User compact renderer parameter budgets changed')
-        optimizer=torch.optim.AdamW([
-            {'params':working.base_student.parameters(),'lr':args.base_lr},
-            {'params':[p for p in working.flow_renderer.parameters() if p.requires_grad],'lr':args.lr}],weight_decay=.01)
+        optimizer=_renderer_optimizer(working,args)
         frozen=frozen_fingerprint(working)
         codec_identity=_hash_tensors(working.flow_renderer.codec.state_dict())
         codec_ids={id(p) for p in working.flow_renderer.codec.parameters()}
@@ -130,7 +208,10 @@ class EnemyRendererTraining:
         self.publish(stage_label='Indexing genuine one-enemy Source frames',
             source_world_step=source_step,model_parameters=policy,solver_steps=1,
             renderer_training={'active':True,'base_active':True,'codec_frozen':True,'codec_all_buffers_frozen':True,
-                'rssm_frozen':True,'map_frozen':True,'geometry_frozen':True,'sr_frozen':True,'gan_active':False,
+                'rssm_frozen':True,'map_frozen':True,'geometry_frozen':not getattr(args,'private_geometry_supervision',False),
+                'sr_frozen':True,'gan_active':False,
+                **({'original_shared_geometry_frozen':True,'private_geometry_active':True}
+                   if getattr(args,'private_geometry_supervision',False)else {}),
                 'flow_base_detached':not getattr(args,'couple_base_flow',False)})
         focus_weights=({'large':.45,'partial':.15,'distant':.05,'corpse':.05,'medium':.05,
             'empty_navigation':.125,'empty_hidden':.125} if getattr(args,'large_focus',False) else None)
@@ -186,6 +267,16 @@ class EnemyRendererTraining:
             from .renderer_far_wall_protocol import far_wall_protocol
             auxiliary=far_wall_protocol()['auxiliary']
             far_auxiliary=FarWallFrames(train,candidate_count=auxiliary['candidate_count'],seed=auxiliary['seed'])
+        geometry_auxiliary=geometry_panel=geometry_panel_receipt=None
+        if getattr(args,'geometry_wall_supervision',False):
+            from .renderer_geometry_data import GeometryWallFrames,build_geometry_panel
+            from .renderer_geometry_objectives import geometry_wall_protocol
+            protocol=geometry_wall_protocol()
+            auxiliary=protocol['auxiliary'];guard=protocol['validation']
+            geometry_auxiliary=GeometryWallFrames(train,candidate_count=auxiliary['candidate_count'],seed=auxiliary['seed'])
+            geometry_panel,geometry_panel_receipt=build_geometry_panel(validation,
+                candidate_count=guard['candidate_count'],frames=guard['frames'],seed=guard['seed'])
+            atomic_json(self.root/'geometry_wall_panel.json',geometry_panel_receipt)
         hp0_validation=hp0_panel=None
         if getattr(args,'hp0_validation',False):
             if not getattr(args,'combat_data_root',None):raise ValueError('Supplemental HP0 needs the explicit combat Source corpus')
@@ -232,6 +323,14 @@ class EnemyRendererTraining:
             from .renderer_far_wall_protocol import far_wall_protocol
             identity['far_wall_protocol']=far_wall_protocol()
             identity['far_wall_aux_pool']=far_auxiliary.identity
+        if geometry_auxiliary is not None:
+            identity.update(geometry_wall_protocol=geometry_wall_protocol(),
+                geometry_wall_aux_pool=geometry_auxiliary.identity,geometry_wall_panel=geometry_panel,
+                geometry_wall_receipt=geometry_panel_receipt,
+                geometry_wall_fingerprint=validation.panel_fingerprint(geometry_panel))
+        if getattr(args,'private_geometry_supervision',False):
+            from .renderer_opacity_phase import opacity_geometry_protocol
+            identity['private_geometry_protocol']=opacity_geometry_protocol()
         if hp0_validation is not None:
             identity.update(hp0_validation=hp0_validation.identity,hp0_panel=hp0_panel,
                 hp0_panel_fingerprint=hp0_validation.panel_fingerprint(hp0_panel))
@@ -262,7 +361,9 @@ class EnemyRendererTraining:
         optional_defaults.update(preserve_distance_panel=None,preserve_distance_baseline=None)
         optional_defaults['frozen_sr_checkpoint']=None
         optional_defaults['small_enemy_rebalance']=False
-        optional_defaults.update(far_wall_supervision=False,native_phase_parent=None)
+        optional_defaults.update(far_wall_supervision=False,native_phase_parent=None,
+            geometry_wall_supervision=False,geometry_phase_parent=None,
+            private_geometry_supervision=False,private_geometry_parent=None)
         configuration={key:str(value.resolve()) if isinstance(value,Path) else value for key,value in vars(args).items()
             if key not in optional_defaults or value!=optional_defaults[key]}
         config_path=self.root/'experiment_config.json'
@@ -291,6 +392,8 @@ class EnemyRendererTraining:
         best_path=self.root/'checkpoints/renderer_enemy_best.pt'
         baseline_path=self.root/'parent_renderer_baseline.pt'
         step,best,streak,enemy_streak=0,None,0,0
+        geometry_best=None
+        geometry_best_path=self.root/'checkpoints/geometry_best.pt'
         new_phase=False
         phase_start=0
         phase=None
@@ -305,8 +408,10 @@ class EnemyRendererTraining:
             optimizer.load_state_dict(saved['optimizer'])
             step,best,streak=saved['step'],saved['best'],saved['streak']
             enemy_streak=saved.get('enemy_streak',0)
+            geometry_best=saved.get('geometry_best')
             train.restore_sampler(saved['sampler'])
             if far_auxiliary is not None:far_auxiliary.restore_sampler(saved['far_wall_aux_sampler'])
+            if geometry_auxiliary is not None:geometry_auxiliary.restore_sampler(saved['geometry_wall_aux_sampler'])
             torch.set_rng_state(saved['rng_torch'].cpu());np.random.set_state(saved['rng_numpy']);random.setstate(saved['rng_python'])
             if device.type=='cuda':torch.cuda.set_rng_state_all([v.cpu() for v in saved['rng_cuda']])
             del saved;gc.collect()
@@ -317,10 +422,52 @@ class EnemyRendererTraining:
                 if (phase['identity']!=identity or (not getattr(args,'small_enemy_rebalance',False)
                         and phase['source_checkpoint_sha256']!=_digest(args.source_training_checkpoint))):
                     raise ValueError('Distance phase plan changed')
-                if getattr(args,'far_wall_supervision',False)and phase['source_checkpoint_sha256']!=_digest(args.native_phase_parent):
+                parent_path=(args.private_geometry_parent if getattr(args,'private_geometry_supervision',False)
+                    else args.geometry_phase_parent if geometry_auxiliary is not None else args.native_phase_parent)
+                if getattr(args,'far_wall_supervision',False)and phase['source_checkpoint_sha256']!=_digest(parent_path):
                     raise ValueError('Native far-wall parent checkpoint changed')
                 phase_start=phase['start_step']
+                if geometry_auxiliary is not None:self.publish(geometry_phase=phase,
+                    **({'private_geometry_phase':phase}if getattr(args,'private_geometry_supervision',False)else {}))
             if parent_adam is not None:phase_start=parent_adam['step']
+        elif getattr(args,'private_geometry_parent',None):
+            from .renderer_opacity_phase import restore_renderer_opacity_parent,opacity_geometry_protocol
+            saved=torch.load(args.private_geometry_parent,map_location='cpu',weights_only=False)
+            phase=restore_renderer_opacity_parent(saved,working,optimizer,train,far_auxiliary,geometry_auxiliary,
+                identity,configuration,frozen,parent_checkpoint_sha256=_digest(args.private_geometry_parent),
+                protocol=opacity_geometry_protocol())
+            step=phase_start=phase['start_step'];new_phase=True
+            phase.update(status='initialized',source_checkpoint=str(args.private_geometry_parent),
+                source_checkpoint_sha256=_digest(args.private_geometry_parent),identity=identity,
+                initial_cumulative_renderer_steps=initial_renderer_steps,initial_cumulative_base_steps=initial_base_steps,
+                phase_budget=args.steps-step,sampler_draws_at_adoption=train.draws)
+            phase_path=self.root/'private_geometry_phase_plan.json'
+            if phase_path.exists():
+                if json.loads(phase_path.read_text(encoding='utf-8'))!=phase:
+                    raise ValueError('Immutable private geometry phase changed')
+            else:atomic_json(phase_path,phase)
+            self.publish(private_geometry_phase=phase,geometry_phase=phase,current=step,global_training_step=step)
+            del saved;gc.collect()
+        elif getattr(args,'geometry_phase_parent',None):
+            from .renderer_geometry_phase import restore_renderer_geometry_parent
+            saved=torch.load(args.geometry_phase_parent,map_location='cpu',weights_only=False)
+            phase=restore_renderer_geometry_parent(saved,working,optimizer,train,far_auxiliary,identity,configuration,frozen,
+                parent_checkpoint_sha256=_digest(args.geometry_phase_parent),geometry_protocol=geometry_wall_protocol())
+            if geometry_auxiliary.draws!=0:
+                raise AssertionError('New geometry auxiliary must start with its own fresh private sampler')
+            step=phase_start=phase['start_step'];new_phase=True
+            phase.update(status='initialized',source_checkpoint=str(args.geometry_phase_parent),
+                source_checkpoint_sha256=_digest(args.geometry_phase_parent),identity=identity,
+                initial_cumulative_renderer_steps=initial_renderer_steps,
+                initial_cumulative_base_steps=initial_base_steps,phase_budget=args.steps-step,
+                sampler_draws_at_adoption=train.draws,geometry_wall_auxiliary_draws_at_start=0)
+            phase_path=self.root/'geometry_wall_phase_plan.json'
+            if phase_path.exists():
+                if json.loads(phase_path.read_text(encoding='utf-8'))!=phase:
+                    raise ValueError('Immutable geometry phase initialization changed')
+            else:atomic_json(phase_path,phase)
+            self.publish(geometry_phase=phase,current=step,global_training_step=step)
+            del saved;gc.collect()
         elif getattr(args,'native_phase_parent',None):
             from .renderer_native_phase import restore_renderer_native_parent
             from .renderer_far_wall_protocol import far_wall_protocol
@@ -399,11 +546,13 @@ class EnemyRendererTraining:
             _save(checkpoint,{'base':working.base_student.state_dict(),'flow':working.flow_renderer.state_dict(),
                 'optimizer':optimizer.state_dict(),'step':step,'best':best,'streak':streak,
                 'enemy_streak':enemy_streak,
+                **({'geometry_best':geometry_best}if geometry_auxiliary is not None else {}),
                 'configuration':configuration,'identity':identity,'frozen_fingerprint':frozen,
                 'sampler':train.sampler_state(),'rng_torch':torch.get_rng_state(),
                 'rng_numpy':np.random.get_state(),'rng_python':random.getstate(),
                 'rng_cuda':torch.cuda.get_rng_state_all() if device.type=='cuda' else [],
-                **({'far_wall_aux_sampler':far_auxiliary.sampler_state()}if far_auxiliary is not None else {})})
+                **({'far_wall_aux_sampler':far_auxiliary.sampler_state()}if far_auxiliary is not None else {}),
+                **({'geometry_wall_aux_sampler':geometry_auxiliary.sampler_state()}if geometry_auxiliary is not None else {})})
             if distance_validation is not None:
                 audit={'protocol':getattr(train,'protocol','visible_source_distance_v1'),'global_step':step,'start_step':phase_start,
                     'phase_updates':step-phase_start,'parent_draws_preserved':train.parent_draws,
@@ -421,6 +570,10 @@ class EnemyRendererTraining:
                         sampler_draws_at_adoption=phase['sampler_draws_at_adoption'],
                         new_phase_draws_since_adoption=train.draws-phase['sampler_draws_at_adoption'])
                     audit.update(far_wall_auxiliary_sampler=far_auxiliary.sampler_state())
+                if geometry_auxiliary is not None:
+                    audit.update(geometry_wall_auxiliary_sampler=geometry_auxiliary.sampler_state(),
+                        main_sampler_cumulative_draws=train.draws,
+                        new_phase_draws=train.draws-phase['sampler_draws_at_adoption'])
                 atomic_json(self.root/'source_sampling_audit.json',audit)
         def verify_frozen():
             if (frozen_fingerprint(working)!=frozen or _hash_tensors(working.flow_renderer.codec.state_dict())!=codec_identity
@@ -445,6 +598,34 @@ class EnemyRendererTraining:
                     if not gate['passed']:
                         report['experimental_selection']['validated_improvement']=False
                         report['experimental_selection']['failure_reasons']+=gate['failure_reasons']
+            if geometry_auxiliary is not None:
+                from .renderer_geometry_objectives import (geometry_wall_report,geometry_preservation_assessment,
+                    geometry_report_score)
+                report['geometry_wall_validation']=geometry_wall_report(arrays)
+                if getattr(args,'private_geometry_supervision',False):
+                    from .renderer_opacity_objectives import opacity_depth_report
+                    report['private_geometry_protocol']=opacity_geometry_protocol()
+                    report['opacity_depth_validation']=opacity_depth_report(working,validation,geometry_panel,
+                        batch_size=args.validation_batch)
+                _,geometry_arrays=evaluate_enemy_renderer(working,validation,geometry_panel,step=at,
+                    batch_size=args.validation_batch,small_enemy_rebalance=True)
+                measured=geometry_wall_report(geometry_arrays)
+                report['geometry_wall_guard_validation']=measured
+                report['geometry_wall_guard']={'step':at,'frames':len(geometry_panel),
+                    'panel_fingerprint':identity['geometry_wall_fingerprint'],'source_held_out':True,
+                    'renderer_only':True,'world_rollout':False}
+                if reference is not None:
+                    checks={'main':geometry_preservation_assessment(report['geometry_wall_validation'],
+                                reference['geometry_wall_validation']),
+                            'balanced_guard':geometry_preservation_assessment(measured,
+                                reference['geometry_wall_guard_validation'])}
+                    report['geometry_wall_preservation']={'passed':all(v['passed']for v in checks.values()),'panels':checks}
+                    if not report['geometry_wall_preservation']['passed']:
+                        report['experimental_selection']['validated_improvement']=False
+                        report['experimental_selection']['failure_reasons'].append('all_depth_geometry_preservation')
+                atomic_json(self.root/'geometry_wall_validation'/f'step_{at:06d}.json',
+                    {**report['geometry_wall_guard'],'loss_protocol':self.state['loss_protocol'],'validation':measured})
+                del geometry_arrays
             if getattr(args,'small_enemy_rebalance',False):
                 from .renderer_small_enemy_protocol import native_area_report,native_area_assessment
                 from .renderer_wall_supervision import wall_preservation_assessment
@@ -572,7 +753,26 @@ class EnemyRendererTraining:
             if getattr(args,'far_wall_supervision',False)and reference is not None:
                 report['release_passed']=bool(report['release_passed']and report['far_wall_preservation']['passed']
                     and report['native_area_guard_far_wall_preservation']['passed']and report['distance_far_wall_preservation']['passed'])
+            if geometry_auxiliary is not None:
+                report['selection_score']+=geometry_report_score(report['geometry_wall_guard_validation'])
+                if reference is not None:
+                    from .renderer_geometry_phase import geometry_candidate_assessment
+                    report['geometry_candidate']=geometry_candidate_assessment(report,reference)
+                    report['release_passed']=bool(report['release_passed']and report['geometry_wall_preservation']['passed'])
             return report,arrays
+        def refresh_geometry_preview(at,*,full_validation=False):
+            from .renderer_geometry_phase import geometry_preview_arrays,save_geometry_preview
+            ids=geometry_panel_receipt['preview_indices']
+            samples=geometry_preview_arrays(working,validation,ids)
+            metadata=save_geometry_preview(samples,self.root/'preview_geometry.png',at,
+                panel=ids,receipt=geometry_panel_receipt,mirror=self.root/'preview.png',every=args.preview_every,
+                source_quality_gate_evaluated=full_validation)
+            atomic_json(self.root/'preview.json',metadata)
+            if getattr(args,'private_geometry_supervision',False):
+                metadata.update(loss_protocol=self.state['loss_protocol'],private_geometry_enabled=True)
+                atomic_json(self.root/'preview.json',metadata)
+            self.publish(prediction_preview=metadata)
+            return metadata
         if baseline_path.exists():
             baseline_saved=torch.load(baseline_path,map_location='cpu',weights_only=False)
             if baseline_saved['identity']!=identity:raise ValueError('Immutable parent baseline changed')
@@ -585,6 +785,7 @@ class EnemyRendererTraining:
             _save(baseline_path,{'identity':identity,'report':baseline,'arrays':arrays})
             atomic_json(self.root/'validation_initial.json',baseline);preview_saver(arrays,self.root/'preview.png',step)
             self.publish(validation_initial=baseline,validation=baseline)
+        if geometry_auxiliary is not None:refresh_geometry_preview(step)
         if new_phase:
             verify_frozen();save()
         preview_ids=[]
@@ -628,6 +829,11 @@ class EnemyRendererTraining:
                     far_wall_aux_draws=far_auxiliary.draws)
                 if getattr(args,'record_sample_indices',False):
                     metrics['far_wall_aux_source_batch_indices']=auxiliary_batch['row_index'].tolist()
+            loss,metrics=_add_geometry_auxiliary_loss(working,loss,metrics,geometry_auxiliary,
+                detach_base=not getattr(args,'couple_base_flow',False),
+                record_indices=getattr(args,'record_sample_indices',False),
+                opacity_depth_weight=_private_geometry_depth_weight(step,phase_start)
+                    if getattr(args,'private_geometry_supervision',False)else 0.)
             if getattr(args,'record_sample_indices',False):
                 metrics['source_batch_indices']=batch['row_index'].tolist()
                 metrics['source_sampler_draws']=train.draws
@@ -641,11 +847,29 @@ class EnemyRendererTraining:
                     gradient_norm=(base_norm**2+flow_norm**2)**.5,gradient_clipping='separate_base_rf')
             else:metrics['gradient_norm']=float(clip_finite_grad_norm_(working.named_parameters(),context=f'Enemy renderer update{step}'))
             optimizer.step()
+            if getattr(args,'private_geometry_supervision',False):
+                metrics.update(private_geometry_updates=step-phase_start,private_geometry_parameter_count=6241,
+                    private_geometry_optimizer_lr=optimizer.param_groups[2]['lr'],
+                    opacity_depth_weight=_private_geometry_depth_weight(step,phase_start),
+                    loss_protocol=opacity_geometry_protocol()['name'])
             if step==first_step:verify_frozen()
             report=None
             if step%args.validate_every==0 or step==args.steps or step==getattr(args,'base_warmup_steps',0):
                 report,arrays=evaluate_full(step,baseline)
                 verify_frozen();report['frozen_components_bitexact']=True
+                if getattr(args,'private_geometry_supervision',False):
+                    analysis=_export_private_analysis(source,working,self.root/'analysis_exports'/f'step_{step:06d}',
+                        step=step,report=report,initial_renderer_steps=initial_renderer_steps,
+                        initial_base_steps=initial_base_steps,identity=identity)
+                    self.publish(private_geometry_analysis_export=analysis)
+                if geometry_auxiliary is not None and report['geometry_candidate']['passed']:
+                    candidate=report['geometry_candidate']
+                    if geometry_best is None or candidate['score']<geometry_best['score']:
+                        geometry_best={'step':step,'score':candidate['score']}
+                        _save(geometry_best_path,{'base':working.base_student.state_dict(),
+                            'flow':working.flow_renderer.state_dict(),**geometry_best,'identity':identity,
+                            'frozen_fingerprint':frozen,'geometry_candidate':candidate,
+                            'automatic_active_promotion':False,'gameplay_qualified':False,'release_passed':False})
                 eligible=report['experimental_selection']['validated_improvement']
                 target_met=eligible and all(report[name]['visible_enemy']['foreground_mae']<=.08
                     and report[name]['visible_enemy']['closer_to_source_than_without_npc_rate']>=.75 for name in ('base','rf1'))
@@ -672,12 +896,15 @@ class EnemyRendererTraining:
                 _,arrays=evaluate_enemy_renderer(working,validation,preview_ids,step=step,batch_size=args.validation_batch)
                 preview_saver(arrays,self.root/'preview.png',step)
             if step%args.preview_every==0 or report is not None:
-                atomic_json(self.root/'preview.json',{'step':step,'every':args.preview_every,'kind':'Source_enemy_GT_query',
+                preview_metadata={'step':step,'every':args.preview_every,'kind':'Source_enemy_GT_query',
                     'source_held_out':True,'renderer_only':True,'world_rollout':False,'codec_frozen':True,
                     'feature_policy':'static_zero128_or_dynamic_frozen_past_prior','source_quality_gate_evaluated':report is not None,
                     **({'loss_protocol':self.state['loss_protocol'],'columns':'tiny/small/far/empty native Source',
                         'native_area_guard_fingerprint':identity['native_area_guard_fingerprint']}
-                       if getattr(args,'small_enemy_rebalance',False) else {})})
+                       if getattr(args,'small_enemy_rebalance',False) else {})}
+                if geometry_auxiliary is not None:
+                    preview_metadata=refresh_geometry_preview(step,full_validation=report is not None)
+                else:atomic_json(self.root/'preview.json',preview_metadata)
             record={'step':step,'global_training_step':step,'stage':'renderer_enemy_refinement','timestamp':now(),
                 'loss_protocol':self.state['loss_protocol'],**metrics}
             if report is not None:record['source_validation']=report
@@ -688,12 +915,14 @@ class EnemyRendererTraining:
                 current=step,global_training_step=step,
                 progress=None if until_enemy else (step-phase_start)/max(args.steps-phase_start,1),loss=metrics['train_loss'],
                 latest_metrics=metrics,validation=report or self.state.get('validation'),selected_best=best,
+                geometry_best=geometry_best,
                 sampler_draws=train.draws,sampler_case_counts=train.case_counts,
                 sampler_pool_counts=getattr(train,'mix_counts',None),sampler_cohort_counts=getattr(train,'cohort_counts',None),
                 distance_sampler_counts=getattr(train,'distance_counts',None),
                 actual_distance_sample_counts=getattr(train,'actual_distance_counts',None),
                 actual_native_area_sample_counts=getattr(train,'actual_area_counts',None),
                 phase_start_step=phase_start,phase_updates=step-phase_start,
+                geometry_wall_sampler_counts=geometry_auxiliary.sampler_state()if geometry_auxiliary is not None else None,
                 component_phase='joint_native_objects_and_walls' if getattr(args,'small_enemy_rebalance',False)
                     else 'base_large_train_overfit' if base_only else 'joint_large_enemy',
                 base_warmup_steps=getattr(args,'base_warmup_steps',0),warmup_frames=len(warmup_panel),
@@ -709,7 +938,8 @@ class EnemyRendererTraining:
             self.publish(status='completed',current=step,experimental_candidate_validated=False,
                 source_quality_passed=False,message='Training completed; no candidate passed NPC-improvement and empty-regression guards',
                 analysis_checkpoint=str(checkpoint),release_passed=False,
-                active_renderer_changed=False);return
+                active_renderer_changed=False,geometry_best=geometry_best,
+                geometry_candidate_validated=geometry_best is not None);return
         selected=torch.load(best_path,map_location='cpu',weights_only=False)
         working.base_student.load_state_dict(selected['base'],strict=True);working.flow_renderer.load_state_dict(selected['flow'],strict=True)
         report,arrays=evaluate_full(selected['step'],baseline)
@@ -722,6 +952,7 @@ class EnemyRendererTraining:
                 'feature_policies':['static_zero128','dynamic_frozen_past_prior'],'codec_frozen':True,
                 'dynamics_frozen':True,'automatic_active_promotion':False})
         atomic_json(self.root/'validation_selected.json',report);preview_saver(arrays,self.root/'preview.png',selected['step'])
+        if geometry_auxiliary is not None:refresh_geometry_preview(selected['step'],full_validation=True)
         self.publish(status='completed',current=step,selected_step=selected['step'],validation=report,
             renderer_export=exported,source_quality_passed=report['passed'],experimental_candidate_validated=True,
             release_passed=report.get('release_passed'),active_renderer_changed=False,gameplay_qualified=False)
@@ -752,6 +983,14 @@ def main(argv=None):
         help='Explicit v6: independently normalized Source far-depth/corner/thin-face losses')
     parser.add_argument('--native-phase-parent',type=Path,
         help='Completed native-area v5 full checkpoint; preserve weights, Adam, sampler, RNG and update clock')
+    parser.add_argument('--geometry-wall-supervision',action='store_true',
+        help='Explicit v7: balanced near/mid/far/thin Source wall geometry auxiliary')
+    parser.add_argument('--geometry-phase-parent',type=Path,
+        help='Completed v6 full checkpoint; preserve all weights/Adam/RNG/main and far-wall samplers')
+    parser.add_argument('--private-geometry-supervision',action='store_true',
+        help='Explicit v8: renderer-owned opacity and Source depth supervision; shared geometry frozen')
+    parser.add_argument('--private-geometry-parent',type=Path,
+        help='Completed v7 full checkpoint; preserve original Adam/RNG/samplers and add four private tensors')
     parser.add_argument('--distance-panel',type=Path,help='Immutable independent Source VAL192 near/mid/far panel')
     parser.add_argument('--source-training-checkpoint',type=Path,help='Explicit distance phase inherits completed Base/RF Adam/RNG/clocks')
     parser.add_argument('--object-crop-weight',type=float,default=0.,help='Native Source foreground crop SSIM weight; no target resize')
@@ -779,6 +1018,10 @@ def main(argv=None):
         parser.error('Native-area v5 requires distance-balance and a fresh selected-renderer phase; no old Adam/warmup')
     if bool(args.native_phase_parent)!=bool(args.far_wall_supervision)or(args.far_wall_supervision and not args.small_enemy_rebalance):
         parser.error('Far-wall v6 requires native-area v5 and an explicit completed --native-phase-parent')
+    if bool(args.geometry_phase_parent)!=bool(args.geometry_wall_supervision)or(args.geometry_wall_supervision and not args.far_wall_supervision):
+        parser.error('Geometry v7 requires far-wall v6 plus an explicit completed --geometry-phase-parent')
+    if bool(args.private_geometry_parent)!=bool(args.private_geometry_supervision)or(args.private_geometry_supervision and not args.geometry_wall_supervision):
+        parser.error('Private geometry v8 requires geometry v7 and a completed --private-geometry-parent')
     if min(args.steps,args.batch,args.validation_frames,args.validation_batch,args.validate_every,args.preview_every,args.save_every,args.threads)<=0:
         parser.error('Positive renderer budgets and batch sizes required')
     if min(args.lr,args.base_lr)<=0 or min(args.ssim_weight,args.edge_weight,args.contrast_weight,args.source_latent_weight,args.base_regression_weight,args.object_crop_weight)<0:

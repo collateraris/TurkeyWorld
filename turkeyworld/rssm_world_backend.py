@@ -123,27 +123,64 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                 embed_dim=config.enemy_rssm_embed_dim, action_dim=config.enemy_rssm_action_dim,
                 blocks=config.enemy_rssm_blocks, unimix=config.enemy_rssm_unimix),
                 width=width, observation_dim=config.rssm_embed_dim)
+        if getattr(config, 'rssm_fusion_moe_enabled', False):
+            from .rssm_fusion_moe import RSSMFusionMoE, RSSMFusionMoEConfig
+            self.fusion_moe = RSSMFusionMoE(RSSMFusionMoEConfig(
+                width=config.rssm_fusion_moe_width, depth=config.rssm_fusion_moe_depth,
+                heads=config.rssm_fusion_moe_heads, expert_hidden=config.rssm_fusion_moe_expert_hidden,
+                experts=config.rssm_fusion_moe_experts, top_k=config.rssm_fusion_moe_top_k,
+                role_bias=config.rssm_fusion_moe_role_bias),
+                player_memory_dim=self.core.memory_size, enemy_memory_dim=self.enemy_rssm.memory_size,
+                map_width=width, spatial_width=width)
+        # Registration is append-only, after the pretrained P/E and MoE.
+        if getattr(config, 'combat_rssm_enabled', False):
+            from .combat_rssm import CombatRSSM, CombatRSSMConfig
+            self.combat_rssm = CombatRSSM(CombatRSSMConfig(
+                deter_dim=config.combat_rssm_deter_dim, hidden_dim=config.combat_rssm_hidden_dim,
+                stoch=config.combat_rssm_stoch, classes=config.combat_rssm_classes,
+                embed_dim=config.combat_rssm_embed_dim, action_dim=config.combat_rssm_action_dim,
+                blocks=config.combat_rssm_blocks, unimix=config.combat_rssm_unimix),
+                width=width, observation_dim=config.rssm_embed_dim,
+                fusion_width=config.rssm_fusion_moe_width)
 
     @property
     def memory_size(self):
-        return self.core.memory_size+(self.enemy_rssm.memory_size if hasattr(self, 'enemy_rssm') else 0)
+        return (self.core.memory_size
+            +(self.enemy_rssm.memory_size if hasattr(self, 'enemy_rssm') else 0)
+            +(self.combat_rssm.memory_size if hasattr(self, 'combat_rssm') else 0))
 
     def split_memory(self, memory):
-        if not hasattr(self, 'enemy_rssm'):
-            return memory, None
-        if memory.ndim != 2 or memory.shape[-1] != self.memory_size:
-            raise ValueError('Dual RSSM memory must concatenate the player and enemy recurrent states')
-        return memory[:, :self.core.memory_size].float(), memory[:, self.core.memory_size:].float()
+        """Legacy two-way view; appended Combat memory never enters Enemy h/z."""
+        player, enemy, _ = self.split_all_memory(memory)
+        return player, enemy
 
-    def _pack_memory(self, player, enemy):
-        memory = self.core.pack(player).float()
-        return torch.cat([memory, enemy['memory'].float()], -1) if enemy is not None else memory
+    def split_all_memory(self, memory):
+        if not hasattr(self, 'enemy_rssm'):
+            return memory, None, None
+        if memory.ndim != 2 or memory.shape[-1] != self.memory_size:
+            raise ValueError('RSSM memory must concatenate the complete player/enemy/optional Combat states')
+        player_end = self.core.memory_size
+        enemy_end = player_end+self.enemy_rssm.memory_size
+        return (memory[:, :player_end].float(), memory[:, player_end:enemy_end].float(),
+            memory[:, enemy_end:].float() if hasattr(self, 'combat_rssm') else None)
+
+    def _pack_memory(self, player, enemy, combat=None):
+        parts = [self.core.pack(player).float()]
+        if enemy is not None:
+            parts.append(enemy['memory'].float())
+        if hasattr(self, 'combat_rssm'):
+            if combat is None:
+                raise ValueError('Persistent Combat state cannot be omitted from packed RSSM memory')
+            parts.append(combat['memory'].float())
+        return torch.cat(parts, -1) if len(parts)>1 else parts[0]
 
     def initial_memory(self, batch, device=None, dtype=None):
+        parts = [self.core.pack(self.core.initial(batch, device=device)).float()]
         if hasattr(self, 'enemy_rssm'):
-            return torch.cat([self.core.pack(self.core.initial(batch, device=device)).float(),
-                self.enemy_rssm.initial(batch, device=device)], -1)
-        return self.core.pack(self.core.initial(batch, device=device)).float()
+            parts.append(self.enemy_rssm.initial(batch, device=device))
+        if hasattr(self, 'combat_rssm'):
+            parts.append(self.combat_rssm.initial(batch, device=device))
+        return torch.cat(parts, -1) if len(parts)>1 else parts[0]
 
     def _conditioned_action(self, state, action, map_features):
         spatial = self.spatial_tokens(state, map_features)
@@ -165,6 +202,7 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
         memory = self.core.initial(rgb.shape[0], device=rgb.device)
         action = state.new_zeros(state.shape[0], 4)
         enemy = None
+        combat = None
         for index in range(rgb.shape[1]):
             controls, spatial = self._conditioned_action(state[:, index], action, map_features)
             embed = self.obs_encoder(rgb[:, index])
@@ -178,7 +216,17 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                     prior = self.enemy_rssm.prior(enemy['memory'], state[:, index], action,
                         state[:, index, :2], context, spatial, sample=self.core.training)
                     enemy = self.enemy_rssm.posterior(prior, embed.detach(), sample=self.core.training)
-        return self._pack_memory(memory, enemy)
+            if hasattr(self, 'combat_rssm'):
+                contexts = {'player_context': self._pooled(memory), 'enemy_context': enemy['pooled'],
+                    'sample': self.core.training}
+                if combat is None:
+                    combat = self.combat_rssm.observe_initial(embed.detach(), state[:, index],
+                        context, spatial, **contexts)
+                else:
+                    prior = self.combat_rssm.prior(combat['memory'], state[:, index], action,
+                        state[:, index, :2], context, spatial, **contexts)
+                    combat = self.combat_rssm.posterior(prior, embed.detach(), sample=self.core.training)
+        return self._pack_memory(memory, enemy, combat)
 
     def _pooled(self, latent):
         features = self.core.features(latent)
@@ -192,7 +240,8 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
         return self.feature_head(pooled.to(self.feature_head.weight.dtype))
 
     def _readout(self, state, action, map_features, latent, spatial, projection, *, reconstruct=False,
-                 enemy_memory=None, enemy_result=None, enemy_conditioned_player_xy=None, sample=None):
+                 enemy_memory=None, enemy_result=None, enemy_conditioned_player_xy=None, sample=None,
+                 fusion=None, combat_memory=None, combat_result=None):
         from .spatial_entities import entity_motion_basis, world_to_local, local_to_world
         from .structured_state import structured_transition, player_command_delta
         pooled = self._pooled(latent)
@@ -208,6 +257,8 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
         controls = torch.cat([action[:, :3].float().clamp(-1, 1), action[:, 3:4].float().clamp(0, 1)], -1)
         inputs = torch.cat([pooled.float(), spatial[:, 0].float(), controls, command], -1)
         logits = self.player_pass_head(inputs.to(self.player_pass_head[0].weight.dtype)).float()
+        if fusion is not None:
+            logits = logits+fusion['player_pass_residual'].float()
         fraction = logits.sigmoid()
         player_delta = command*fraction
         if hasattr(self, 'enemy_rssm'):
@@ -219,7 +270,17 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                 enemy_result = self.enemy_rssm.prior(enemy_memory, state, action,
                     enemy_conditioned_player_xy, self._map_context(map_features, state), spatial,
                     sample=self.core.training if sample is None else sample)
-            motion = torch.cat([motion[:, :2], enemy_result['motion'].float()], -1)
+            enemy_motion = enemy_result['motion'].float()
+            if fusion is not None:
+                enemy_motion = enemy_motion+fusion['enemy_motion_residual'].float()
+            motion = torch.cat([motion[:, :2], enemy_motion], -1)
+        if hasattr(self, 'combat_rssm') and combat_result is None:
+            if combat_memory is None:
+                raise ValueError('Combat RSSM requires its persistent previous memory')
+            combat_result = self.combat_rssm.prior(combat_memory, state, action,
+                enemy_conditioned_player_xy, self._map_context(map_features, state), spatial,
+                player_context=pooled, enemy_context=enemy_result['pooled'],
+                sample=self.core.training if sample is None else sample)
         entities = state[:, GLOBAL_DIM:-2].reshape(-1, ENTITY_SLOTS, ENTITY_DIM)
         candidate_entities = torch.cat([entities[:, :, :2]+.1*motion[:, 2:].reshape(-1, ENTITY_SLOTS, 2),
             entities[:, :, 2:]], -1)
@@ -229,10 +290,32 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
         targets, attacks = self.combat_logits(state, pooled, spatial)
         if enemy_result is not None:
             attacks = enemy_result['attack_logits'].float()
+        if fusion is not None:
+            targets = targets+fusion['interaction_target_residual'].float()
+            attacks = attacks+fusion['interaction_attack_residual'].float()
+        if combat_result is not None:
+            targets = targets+combat_result['target_residual'].float()
+            attacks = attacks+combat_result['attack_residual'].float()
         spawn = {}
         if self.config.endless:
             from .spawn import decode_spawn_positions
             heads = self.spawn_outputs(state, pooled, spatial, map_features)
+            if fusion is not None or combat_result is not None:
+                tile_residual = (fusion['interaction_spawn_tile_residual'].float()
+                    if fusion is not None else torch.zeros_like(heads['spawn_logits']))
+                if combat_result is not None:
+                    tile_residual = tile_residual+combat_result['spawn_tile_residual'].float()
+                if 'spawn_fallback_logits' in heads:
+                    from .anchor_spawn import hierarchical_spawn_logits
+                    anchor_residual = (fusion['interaction_spawn_anchor_residual'].float()
+                        if fusion is not None else torch.zeros_like(heads['spawn_anchor_residual']))
+                    if combat_result is not None:
+                        anchor_residual = anchor_residual+combat_result['spawn_anchor_residual'].float()
+                    heads = hierarchical_spawn_logits(heads['spawn_fallback_logits']+tile_residual,
+                        heads['spawn_anchor_residual']+anchor_residual,
+                        state, self.renderer._spawn_walkable, 1/self.config.simulation_hz)
+                else:
+                    heads = {**heads, 'spawn_logits': heads['spawn_logits']+tile_residual}
             positions, valid = decode_spawn_positions(heads['spawn_logits'], state,
                 self.renderer._spawn_walkable, 1/self.config.simulation_hz)
             spawn = {**heads, 'spawn_positions': positions, 'spawn_valid': valid}
@@ -241,7 +324,7 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
             respawn_enabled=not self.config.navigation_only,
             spawn_positions=spawn.get('spawn_positions'), spawn_valid=spawn.get('spawn_valid'))
         result.update(spawn)
-        result.update(memory=self._pack_memory(latent, enemy_result),
+        result.update(memory=self._pack_memory(latent, enemy_result, combat_result),
             features=self.feature_head(pooled.to(self.feature_head.weight.dtype)),
             rssm_readout=pooled.float(), rssm_h=latent['deter'], rssm_z=latent['stoch'],
             rssm_prior_logits=latent['logits'],
@@ -259,47 +342,73 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                 enemy_rssm_h=enemy_result['rssm_state']['deter'],
                 enemy_rssm_z=enemy_result['rssm_state']['stoch'],
                 enemy_rssm_prior_logits=enemy_result['prior_logits'],
-                enemy_rssm_motion=enemy_result['motion'].float(), enemy_rssm_attack_logits=attacks,
+                enemy_rssm_motion=enemy_motion, enemy_rssm_attack_logits=attacks,
                 enemy_rssm_conditioned_player_xy=enemy_conditioned_player_xy.detach())
             if 'posterior_logits' in enemy_result:
                 result['enemy_rssm_posterior_logits'] = enemy_result['posterior_logits']
+        if combat_result is not None:
+            result.update(combat_rssm_latent=combat_result,
+                combat_rssm_memory=combat_result['memory'].float(),
+                combat_rssm_readout=combat_result['pooled'].float(),
+                combat_rssm_h=combat_result['rssm_state']['deter'],
+                combat_rssm_z=combat_result['rssm_state']['stoch'],
+                combat_rssm_prior_logits=combat_result['prior_logits'])
+            if 'posterior_logits' in combat_result:
+                result['combat_rssm_posterior_logits'] = combat_result['posterior_logits']
         if reconstruct:
             result['rssm_reconstruction'] = self.observation_decoder(
                 pooled.to(self.observation_decoder[0].weight.dtype)).reshape(-1, 3,
                     self.config.image_size, self.config.image_size)
+        if fusion is not None:
+            result.update(rssm_fusion_moe=fusion,
+                rssm_fusion_moe_router_role_loss=fusion['router_role_loss'],
+                rssm_fusion_moe_router_balance_loss=fusion['router_balance_loss'])
         return result
+
+    def _previous_memory_fusion(self, player_memory, enemy_memory, state, action, map_features, spatial,
+                                combat_memory=None):
+        if not hasattr(self, 'fusion_moe'):
+            return None
+        if enemy_memory is None:
+            raise ValueError('Shared RSSM fusion requires both persistent previous memories')
+        extra = ({'combat_context': self.combat_rssm.fusion_context(combat_memory)}
+            if hasattr(self, 'combat_rssm') else {})
+        return self.fusion_moe(player_memory, enemy_memory, state, action,
+            self._map_context(map_features, state), spatial, **extra)
 
     def transition(self, state, action, map_features, memory, projection):
         state = state.float()
         if memory is None:
             memory = self.initial_memory(len(state), device=state.device)
-        enemy_memory = None
-        if hasattr(self, 'enemy_rssm'):
-            memory, enemy_memory = self.split_memory(memory)
+        memory, enemy_memory, combat_memory = self.split_all_memory(memory)
         conditioned_action, spatial = self._conditioned_action(state, action, map_features)
+        fusion = self._previous_memory_fusion(memory, enemy_memory, state, action, map_features, spatial,
+            combat_memory)
         prior = self.core.imagine_step(self.core.unpack(memory), conditioned_action)
         return self._readout(state, action, map_features, prior, spatial, projection,
-            enemy_memory=enemy_memory)
+            enemy_memory=enemy_memory, fusion=fusion, combat_memory=combat_memory)
 
     def observe_step(self, state, action, map_features, memory, rgb, *, sample=None):
         """Auxiliary observed stream; prior_result never depends on next RGB."""
         from .models import project_state
         state = state.float()
-        enemy_memory = None
-        if hasattr(self, 'enemy_rssm'):
-            memory, enemy_memory = self.split_memory(memory)
+        memory, enemy_memory, combat_memory = self.split_all_memory(memory)
         conditioned_action, spatial = self._conditioned_action(state, action, map_features)
+        fusion = self._previous_memory_fusion(memory, enemy_memory, state, action, map_features, spatial,
+            combat_memory)
         prior = self.core.imagine_step(self.core.unpack(memory), conditioned_action, sample=sample)
         prior_result = self._readout(state, action, map_features, prior, spatial, project_state,
-            enemy_memory=enemy_memory, sample=sample)
+            enemy_memory=enemy_memory, sample=sample, fusion=fusion, combat_memory=combat_memory)
         embed = self.obs_encoder(rgb)
         posterior = self.core.posterior(prior, embed, sample=sample)
         enemy_posterior = (self.enemy_rssm.posterior(prior_result['enemy_rssm_latent'], embed.detach(),
             sample=self.core.training if sample is None else sample) if hasattr(self, 'enemy_rssm') else None)
+        combat_posterior = (self.combat_rssm.posterior(prior_result['combat_rssm_latent'], embed.detach(),
+            sample=self.core.training if sample is None else sample) if hasattr(self, 'combat_rssm') else None)
         result = self._readout(state, action, map_features, posterior, spatial, project_state, reconstruct=True,
             enemy_result=enemy_posterior,
             enemy_conditioned_player_xy=(prior_result['enemy_rssm_conditioned_player_xy']
-                if enemy_posterior is not None else None))
+                if enemy_posterior is not None else None), fusion=fusion, combat_result=combat_posterior)
         result.update(prior_result=prior_result, rssm_prior_logits=prior['logits'],
             rssm_posterior_logits=posterior['logits'])
         return result

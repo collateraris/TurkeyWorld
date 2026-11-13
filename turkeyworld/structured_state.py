@@ -13,6 +13,8 @@ import math
 import torch
 from torch.nn import functional as F
 
+from .simulation_clock import advance_normalized_timer, normalized_timer_ready
+
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
 ENTITY_SLOTS = 1
@@ -152,6 +154,9 @@ def structured_transition(previous, candidate, action, target_logits,
     old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     proposed = candidate[:, GLOBAL_DIM:-2].reshape_as(old)
     original_alive = (old[:, :, 5] >= 0.5) & (old[:, :, 4] > 0)
+    death_limit_seconds = RESPAWN_DELAY if endless else DEATH_DURATION
+    advanced_death = advance_normalized_timer(old[:, :, 8], duration=DEATH_DURATION,
+        dt=dt, increasing=True, maximum=death_limit_seconds)
     respawn = torch.zeros_like(original_alive)
     if endless and respawn_enabled and spawn_positions is not None:
         if spawn_positions.shape != (batch, ENTITY_SLOTS, 2):
@@ -159,7 +164,8 @@ def structured_transition(previous, candidate, action, target_logits,
         if spawn_valid is None or spawn_valid.shape != (batch, ENTITY_SLOTS):
             raise ValueError("spawn_valid must have shape [B,1]")
         respawn = (~original_alive & spawn_valid.bool()
-                   & (old[:, :, 8] * DEATH_DURATION + dt >= RESPAWN_DELAY - 1e-6)
+                   & normalized_timer_ready(old[:, :, 8], duration=DEATH_DURATION,
+                       dt=dt, increasing=True, deadline=RESPAWN_DELAY)
                    & (previous[:, 4:5] > 0))
         fresh = torch.cat([spawn_positions.to(dtype=dtype).clamp(0, 1),
                            torch.zeros_like(old[:, :, 2:4]),
@@ -258,7 +264,7 @@ def structured_transition(previous, candidate, action, target_logits,
     hurt = torch.where(hard_hit_weights > 0, torch.ones_like(hurt), hurt)
     death_limit = RESPAWN_DELAY / DEATH_DURATION if endless else 1.0
     death = torch.where(~old_alive,
-                        (old[:, :, 8].clamp(0, death_limit) + dt / DEATH_DURATION).clamp_max(death_limit),
+                        advanced_death,
                         old[:, :, 8].clamp(0, death_limit))
     death = torch.where(newly_dead, torch.zeros_like(death), death)
     phase = torch.where(npc_moving, torch.remainder(old[:, :, 9] + 2.6 * dt, 1), old[:, :, 9])

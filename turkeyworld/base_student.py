@@ -141,7 +141,7 @@ def _source_config(config):
         values['architecture'] = 'spatial_explicit_world'
         values = {key: value for key, value in values.items()
                   if not key.startswith(('vjepa_', 'rssm_'))}
-    return {key: value for key, value in values.items() if not key.startswith(('flow_', 'enemy_rssm_'))
+    return {key: value for key, value in values.items() if not key.startswith(('flow_', 'enemy_rssm_', 'combat_rssm_'))
             and key not in {'renderer_mode', 'renderer_codec', 'renderer_codec_config', 'player_motion_mode'}}
 
 
@@ -155,7 +155,8 @@ def base_condition_identity(teacher):
     return {'base_map_geometry_sha256': _hash_tensors(base), 'appearance_sha256': _hash_tensors(appearance)}
 
 
-def export_base_student(teacher, head, path, *, training_steps, metrics=None, provenance=None):
+def export_base_student(teacher, head, path, *, training_steps, metrics=None, provenance=None,
+                        geometry_opacity_binding=None):
     from .training_pipeline import replace_file
     if not isinstance(training_steps, int) or isinstance(training_steps, bool) or training_steps < 1:
         raise ValueError('A Base bundle needs positive completed training steps')
@@ -171,6 +172,14 @@ def export_base_student(teacher, head, path, *, training_steps, metrics=None, pr
         'quality_status': 'Distilled Base head; gameplay accuracy is not qualified'}
     if head.config.pixel_residual:
         payload['pixel_residual'] = pixel_residual_metadata(head)
+    if geometry_opacity_binding is None:
+        from .renderer_geometry_opacity import geometry_opacity_metadata
+        geometry_opacity_binding = geometry_opacity_metadata(teacher.flow_renderer, teacher)
+    if geometry_opacity_binding is not None:
+        from copy import deepcopy
+        from .renderer_geometry_opacity import validate_geometry_opacity_source
+        validate_geometry_opacity_source(geometry_opacity_binding, teacher)
+        payload['geometry_opacity_binding'] = deepcopy(geometry_opacity_binding)
     if payload['head_parameters'] > 1_000_000:
         raise ValueError('Base head exceeds the requested parameter budget')
     output = Path(path)
@@ -197,6 +206,9 @@ def prepare_base_student(teacher, path_or_payload):
     if (_source_config(payload['source_teacher_config']) != _source_config(teacher.config)
             or payload.get('conditioning_identity') != base_condition_identity(teacher)):
         raise ValueError('Base bundle source map/geometry/appearance or backbone configuration mismatch')
+    if payload.get('geometry_opacity_binding') is not None:
+        from .renderer_geometry_opacity import validate_geometry_opacity_source
+        validate_geometry_opacity_source(payload['geometry_opacity_binding'], teacher)
     state = payload.get('model')
     if (not isinstance(state, dict) or not all(isinstance(value, torch.Tensor)
             and bool(torch.isfinite(value).all()) for value in state.values())
@@ -219,6 +231,11 @@ def prepare_base_student(teacher, path_or_payload):
 
 def load_base_student(teacher, path_or_payload):
     head, metadata, payload = prepare_base_student(teacher, path_or_payload)
+    binding = payload.get('geometry_opacity_binding')
+    if binding is not None:
+        from .renderer_geometry_opacity import geometry_opacity_metadata
+        if binding != geometry_opacity_metadata(teacher.flow_renderer, teacher):
+            raise ValueError('Standalone compact Base requires its matching private renderer opacity')
     teacher.base_student = head
     teacher.base_student_metadata = metadata
     teacher.base_student_bundle = payload

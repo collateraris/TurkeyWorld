@@ -157,7 +157,8 @@ def prepare_preview_assets(model, plan, device, *, clone_factory=None):
     with preserve_preview_rng(device):
         client = factory(model.config)
         client.load_state_dict(model.state_dict(), strict=True)
-        for name in ('rssm_migration', 'dual_rssm_migration', 'enemy_rssm_resize'):
+        for name in ('rssm_migration', 'dual_rssm_migration', 'enemy_rssm_resize','rssm_fusion_migration',
+                     'combat_rssm_migration'):
             if hasattr(model, name):
                 setattr(client, name, copy.deepcopy(getattr(model, name)))
         renderer = load_renderer_student(client, plan['renderer']['checkpoint'],

@@ -130,7 +130,7 @@ class NeuralRuntime:
         # image must match that environment, rather than hiding an enemy after
         # it has already entered the initial RSSM memory.
         initial_profile = getattr(args, 'initial_navigation_only', None)
-        self.checkpoint_navigation_only = bool(self.model.config.navigation_only)
+        self.checkpoint_navigation_only = bool(getattr(self.model.config, 'navigation_only', False))
         if initial_profile is not None:
             if not isinstance(initial_profile, bool):
                 raise TypeError('Initial navigation profile must be a boolean')
@@ -216,18 +216,68 @@ class NeuralRuntime:
         self.state = self.initial_state.clone()
         self.memory = self.initial_memory.clone()
 
-    def _resize(self, rgb):
+    def _enemy_decoder_sr(self):
+        config = getattr(self.sr, 'config', None)
+        return isinstance(config, dict) and config.get('architecture') in ('enemy_decoder_edsr', 'atlas_enemy_edsr')
+
+    def _atlas_enemy_metadata(self):
+        config = getattr(self.sr, 'config', {})
+        if config.get('architecture') != 'atlas_enemy_edsr':
+            return {}
+        return dict(architecture='atlas_enemy_edsr', fixed_atlas=True,
+            appearance_scope='enemy_layer', background_source='learned_parent_SR',
+            appearance_source='fixed_embedded_RGBA_atlas',
+            appearance_inputs=['embedded_atlas_RGBA'],
+            learned_geometry_phase_occlusion_inputs=['NPR_RGB32'],
+            learned_full_bbox=True, full_bbox_is_unclipped=True,
+            learned_animation_phase=True, learned_occlusion_mask=True,
+            learned_binary_visibility=True, enemy_RGB_pixel_appearance_is_learned=False,
+            Source_future_inputs=False, Source_engine_queries_during_SR=False,
+            **{key: config.get(key) for key in ('atlas_asset_sha256', 'atlas_pixels_sha256',
+                'atlas_buffer_shape', 'atlas_frame_sizes', 'atlas_layout', 'atlas_sampling',
+                'atlas_phase_selection', 'atlas_visibility')})
+
+    def _resize(self, rgb, predicted_state=None):
         self.upscale_stages = []
+        guided = self._enemy_decoder_sr()
+        atlas = guided and self.sr.config.get('architecture') == 'atlas_enemy_edsr'
+        visual_first = guided and (atlas or bool(self.sr.config.get('enemy_decoder_visual_first')))
+        hypothesis = None
+        if guided and predicted_state is not None:
+            if (not torch.is_tensor(predicted_state) or predicted_state.shape != (len(rgb), STATE_DIM)
+                    or not predicted_state.is_floating_point() or predicted_state.device != rgb.device):
+                raise ValueError('Enemy-decoder SR requires current predicted state[B,20] on the RGB device')
+            if not bool(torch.isfinite(predicted_state).all()):
+                raise FloatingPointError('Nonfinite current predicted SR hypothesis')
+            # Preserve FP32 own-state values even when image/network weights
+            # use FP16. The decoder owns its conditioning dtype conversion.
+            own = predicted_state.detach()
+            hypothesis = torch.cat([own, torch.ones_like(own[:, :1])], -1)
+        if guided:
+            self._sr_hypothesis_source = ('current_world_step_prediction' if hypothesis is not None
+                                          else 'none_independent_RGB' if visual_first else 'none_RGB_only_fallback')
+        def learned_sr(image):
+            return self.sr(image, hypothesis=hypothesis) if guided else self.sr(image)
+        def sr_stage(values):
+            if guided:
+                values.update(enemy_decoder=True, hypothesis_source=self._sr_hypothesis_source,
+                    hypothesis_from_Source=False, learned_neural_confirmation=True)
+                if visual_first:
+                    values.update(visual_first=True, RSSM_hint_optional=True,
+                                  confident_RGB_cannot_be_vetoed_by_RSSM=True)
+                if atlas:
+                    values.update(self._atlas_enemy_metadata())
+            return values
         if getattr(self.args, "two_stage_upscale", False):
             native = self.model.config.image_size
             if native not in (32, 64) or rgb.shape[-2:] != (native, native) or self.sr is None:
                 raise ValueError("Two-stage playback requires native32/64 RGB and a trained neural x4 SR model")
-            rgb = self.sr(rgb)
+            rgb = learned_sr(rgb)
             middle, final = native*4, native*16
             if rgb.shape[-2:] != (middle, middle):
                 raise ValueError("Neural SR must produce exactly x4 native resolution")
-            self.upscale_stages.append({"method": "neural_x4", "input_resolution": [native, native],
-                                        "output_resolution": [middle, middle], "scale": 4})
+            self.upscale_stages.append(sr_stage({"method": "neural_x4", "input_resolution": [native, native],
+                                        "output_resolution": [middle, middle], "scale": 4}))
             rgb = F.interpolate(rgb, size=(final, final), mode="bilinear", align_corners=False)
             self.upscale_stages.append({"method": "bilinear", "input_resolution": [middle, middle],
                                         "output_resolution": [final, final], "scale": 4,
@@ -235,9 +285,9 @@ class NeuralRuntime:
             return rgb
         if self.sr is not None:
             native = list(rgb.shape[-2:])
-            rgb = self.sr(rgb)
-            self.upscale_stages.append({"method": "neural_x4", "input_resolution": native,
-                                        "output_resolution": list(rgb.shape[-2:]), "scale": 4})
+            rgb = learned_sr(rgb)
+            self.upscale_stages.append(sr_stage({"method": "neural_x4", "input_resolution": native,
+                                        "output_resolution": list(rgb.shape[-2:]), "scale": 4}))
         if rgb.shape[-2:] != (self.args.display_size, self.args.display_size):
             mode = "bilinear" if self.args.smooth else "nearest"
             options = {"align_corners": False} if mode == "bilinear" else {}
@@ -256,7 +306,7 @@ class NeuralRuntime:
                                  map_features=self.map_features)
         self.synchronize()
         model_end = time.perf_counter()
-        output = self._resize(result["rgb"])
+        output = self._resize(result["rgb"], predicted_state=result['state'])
         self.synchronize()
         upscale_end = time.perf_counter()
         if not bool(torch.isfinite(result["state"]).all()) or not bool(torch.isfinite(output).all()):
@@ -325,7 +375,7 @@ class NeuralRuntime:
             "world_architecture": self.world_architecture,
             "world_training_steps": training_steps,
             "checkpoint_navigation_only": self.checkpoint_navigation_only,
-            "runtime_navigation_only": bool(self.model.config.navigation_only),
+            "runtime_navigation_only": bool(getattr(self.model.config, 'navigation_only', False)),
             "initial_environment_override": getattr(self.args, 'initial_navigation_only', None),
             "world_quality_status": self.world_metadata.get("quality_status", "Unverified checkpoint"),
             "untrained_world_checkpoint": training_steps == 0,
@@ -365,6 +415,19 @@ class NeuralRuntime:
             "gameplay_correctness_evaluated": False,
             "note": "Predicted state and events are model outputs, not verified game facts. Timing applies only to the device reported above; no RTX 4090 result is implied.",
         }
+        if self._enemy_decoder_sr():
+            report['sr_enemy_decoder'] = dict(architecture=self.sr.config['architecture'],
+                hypothesis_source=getattr(self, '_sr_hypothesis_source', 'not_run'),
+                hypothesis_dimensions=STATE_DIM+1, current_predicted_state_plus_validity=True,
+                hypothesis_from_Source=False, hypothesis_corrects_world_state=False,
+                learned_neural_confirmation=True, gameplay_correctness_evaluated=False)
+            if self.sr.config.get('architecture') == 'atlas_enemy_edsr':
+                report['sr_enemy_decoder'].update(visual_first=True, RSSM_hint_optional=True,
+                    confident_RGB_cannot_be_vetoed_by_RSSM=True, **self._atlas_enemy_metadata())
+            elif self.sr.config.get('enemy_decoder_visual_first'):
+                report['sr_enemy_decoder'].update(visual_first=True, RSSM_hint_optional=True,
+                    confident_RGB_cannot_be_vetoed_by_RSSM=True,
+                    visual_geometry_and_appearance_inputs=['NPR_RGB32'])
         if self.world_architecture == 'dreamer_rssm':
             report['rssm'] = {'packed_memory_shape': list(self.memory.shape),
                               'memory_precision': str(self.memory.dtype),
@@ -376,6 +439,12 @@ class NeuralRuntime:
                 report['rssm']['separate_enemy_memory']={'player_packed_size':self.model.core.memory_size,
                     'enemy_packed_size':enemy.memory_size,'own_enemy_h_z':True,
                     'shared_combat_bookkeeping':True,'renderer_features_from_player_memory':True}
+            if getattr(self.model.config,'combat_rssm_enabled',False):
+                combat=self.model.vjepa_backend.combat_rssm
+                report['rssm']['separate_combat_memory']={
+                    'combat_packed_size':combat.memory_size,'own_combat_h_z':True,
+                    'updated_every_tick':True,'previous_memory_conditions_shared_moe':True,
+                    'independent_combat_xy_or_hp':False}
         return report
 
 

@@ -10,6 +10,7 @@ from .engine import GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, STATE_DIM
 from collections import Counter
 import math
 import numpy as np
+from .simulation_clock import advance_timer_seconds
 
 EVENT_NAMES = ("shot", "hit", "kill", "player_hit")
 PLAYER_RADIUS, NPC_RADIUS = .20, .25
@@ -133,7 +134,8 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
         floor_centers = np.argwhere(tilemap == 0)[:, ::-1].astype(float) + .5
         for i in range(ENTITY_SLOTS):
             ready = (not original_alive[i] and previous[4] > .0005
-                     and original_old[i, 8]*.6+dt >= 3.-1e-5)
+                     and advance_timer_seconds(float(original_old[i, 8])*.6,
+                         duration=.6, dt=dt, increasing=True, maximum=3.) >= 3.-1e-8)
             if revived[i]:
                 center = np.floor(npc1[i])+.5
                 legal = True
@@ -291,7 +293,9 @@ def check_transition(tilemap, previous, current, action, events, dt=1/30, *, end
     if bool(kill) != bool(died.any()) or np.count_nonzero(died) > 1 or (kill and not hit):
         fail("kill_event", "Kill event must agree with one HP-zero/alive transition")
     if endless:
-        expected_death = np.where(~alive0, np.minimum(5., old[:, 8]+dt/.6), old[:, 8])
+        advanced_death = np.array([advance_timer_seconds(float(value)*.6,
+            duration=.6, dt=dt, increasing=True, maximum=3.)/.6 for value in old[:, 8]])
+        expected_death = np.where(~alive0, advanced_death, old[:, 8])
         expected_death[died] = 0.
         if np.any(np.abs(new[:, 8]-expected_death) > .002):
             fail("npc_death_timer", "Death timers must advance continuously and reset only on a kill or legal respawn")

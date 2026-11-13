@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .spawn import BEHAVIOR_VERSION, SPAWN_TICK_HZ, deterministic_spawn_tile
+from .simulation_clock import advance_timer_seconds
 
 GLOBAL_DIM = 8
 ENTITY_DIM = 10
@@ -309,6 +310,9 @@ class Game:
         p = self.player
         events = {name: False for name in EVENT_NAMES}
         events.update(hit_id=-1, killed_id=-1, player_damage=0.0, attacker_ids=[])
+        # The serialized interface is float32. Decode its near-lattice timer
+        # phase only when advancing a tick; the supplied state is never
+        # rounded or replaced by set_state_vector()/conditional Source labels.
         self.time += dt
         p["cooldown"] = max(0.0, p["cooldown"] - dt)
         p["shot_flash"] = max(0.0, p["shot_flash"] - dt)
@@ -316,8 +320,9 @@ class Game:
             e["hurt_timer"] = max(0.0, e["hurt_timer"] - dt)
             e["attack_cooldown"] = max(0.0, e["attack_cooldown"] - dt)
             if not e["alive"]:
-                e["death_timer"] = min(self.RESPAWN_DELAY if self.endless else self.DEATH_DURATION,
-                                       e["death_timer"] + dt)
+                e["death_timer"] = advance_timer_seconds(float(e["death_timer"]), duration=self.DEATH_DURATION,
+                    dt=float(dt), increasing=True,
+                    maximum=self.RESPAWN_DELAY if self.endless else self.DEATH_DURATION)
                 e["vx"] = e["vy"] = 0.0
         if p["hp"] <= 0:
             self.last_events = events

@@ -56,7 +56,7 @@ def _backbone_config(config, *, codec_replacement=False):
         values = {key: value for key, value in values.items()
                   if not key.startswith(('vjepa_', 'rssm_'))}
     return {key: value for key, value in values.items()
-            if not key.startswith(('flow_', 'enemy_rssm_')) and key not in {'renderer_mode', 'player_motion_mode'}
+            if not key.startswith(('flow_', 'enemy_rssm_', 'combat_rssm_')) and key not in {'renderer_mode', 'player_motion_mode'}
             and not (codec_replacement and key == 'renderer_codec_config')}
 
 
@@ -94,6 +94,8 @@ def validate_renderer_source_lineage(teacher, source_config):
     teacher's trained image assets through configuration normalization alone.
     """
     source = _world_config(source_config)
+    validate_combat_renderer_lineage(teacher, source)
+    validate_fusion_renderer_lineage(teacher, source)
     validate_dual_renderer_lineage(teacher, source)
     if source['architecture'] == teacher.config.architecture:
         return
@@ -111,6 +113,84 @@ def validate_renderer_source_lineage(teacher, source_config):
     if (not isinstance(identity, dict) or any(identity.get(key) != current[key]
             for key in ('base_map_sha256', 'appearance_sha256'))):
         raise ValueError('RSSM migration renderer lineage does not match the copied frozen assets')
+
+
+def validate_fusion_renderer_lineage(teacher, source_config):
+    """Require the explicit append-only MoE proof, not broad RSSM filtering.
+
+    Existing image weights may follow the unchanged dual-RSSM render assets.
+    The dynamics-only fusion settings are excluded from backbone comparison,
+    so this separate check must reject an unproven fusion-enabled checkpoint.
+    """
+    source, target = _world_config(source_config), _world_config(teacher.config)
+    source_fields = {k: v for k, v in source.items() if k.startswith('rssm_fusion_moe_')}
+    target_fields = {k: v for k, v in target.items() if k.startswith('rssm_fusion_moe_')}
+    if not target['rssm_fusion_moe_enabled']:
+        if source['rssm_fusion_moe_enabled']:
+            raise ValueError('Renderer fusion lineage cannot silently disable the migrated architecture')
+        return
+    report = getattr(teacher, 'rssm_fusion_migration', None)
+    if (not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('kind') != 'append_shared_fusion_moe'
+            or report.get('old_model_tensors_bitexact') is not True
+            or report.get('frozen_render_assets_bitexact') is not True
+            or report.get('zero_residual_initialization') is not True
+            or not isinstance(report.get('source_config'), dict)
+            or not isinstance(report.get('target_config'), dict)
+            or not hasattr(teacher.vjepa_backend, 'fusion_moe')):
+        raise ValueError('Renderer reuse requires explicit shared fusion MoE migration lineage')
+    previous, migrated = _world_config(report['source_config']), _world_config(report['target_config'])
+    changed = sorted(k for k in previous if previous[k] != migrated[k])
+    expected_names = ['vjepa_backend.fusion_moe.'+name for name, _ in teacher.vjepa_backend.fusion_moe.named_parameters()]
+    if (previous['rssm_fusion_moe_enabled'] or not migrated['rssm_fusion_moe_enabled']
+            or not previous['enemy_rssm_enabled'] or previous['architecture'] != 'dreamer_rssm'
+            or any(not k.startswith('rssm_fusion_moe_') for k in changed)
+            or report.get('allowed_config_changes') != changed
+            or {k: v for k, v in migrated.items() if k.startswith('rssm_fusion_moe_')} != target_fields
+            or source['rssm_fusion_moe_enabled'] and source_fields != target_fields
+            or report.get('added_parameter_names') != expected_names
+            or report.get('added_parameter_count') != sum(p.numel() for p in teacher.vjepa_backend.fusion_moe.parameters())
+            or report.get('combined_memory_size') != (teacher.vjepa_backend.core.memory_size
+                +teacher.vjepa_backend.enemy_rssm.memory_size)
+            or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
+        raise ValueError('Shared fusion MoE lineage changed architecture, memory, or frozen renderer assets')
+
+
+def validate_combat_renderer_lineage(teacher, source_config):
+    """Only a verified append may reuse image assets with persistent Combat memory."""
+    source, target = _world_config(source_config), _world_config(teacher.config)
+    fields = lambda config: {k: v for k, v in config.items() if k.startswith('combat_rssm_')}
+    if not target['combat_rssm_enabled']:
+        if source['combat_rssm_enabled']:
+            raise ValueError('Renderer Combat lineage cannot disable the appended persistent memory')
+        return
+    report = getattr(teacher, 'combat_rssm_migration', None)
+    if (not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('kind') != 'append_persistent_combat_rssm'
+            or report.get('old_model_tensors_bitexact') is not True
+            or report.get('frozen_render_assets_bitexact') is not True
+            or report.get('zero_residual_initialization') is not True
+            or not isinstance(report.get('source_config'), dict)
+            or not isinstance(report.get('target_config'), dict)
+            or not hasattr(teacher.vjepa_backend, 'combat_rssm')):
+        raise ValueError('Renderer reuse requires explicit persistent Combat RSSM migration lineage')
+    previous, migrated = _world_config(report['source_config']), _world_config(report['target_config'])
+    changed = sorted(k for k in previous if previous[k] != migrated[k])
+    backend = teacher.vjepa_backend
+    expected_names = ['vjepa_backend.combat_rssm.'+name for name, _ in backend.combat_rssm.named_parameters()]
+    old_memory = backend.core.memory_size+backend.enemy_rssm.memory_size
+    if (previous['combat_rssm_enabled'] or not migrated['combat_rssm_enabled']
+            or not previous['rssm_fusion_moe_enabled'] or previous['architecture'] != 'dreamer_rssm'
+            or any(not k.startswith('combat_rssm_') for k in changed)
+            or report.get('allowed_config_changes') != changed
+            or fields(migrated) != fields(target)
+            or source['combat_rssm_enabled'] and fields(source) != fields(target)
+            or report.get('added_parameter_names') != expected_names
+            or report.get('added_parameter_count') != sum(p.numel() for p in backend.combat_rssm.parameters())
+            or report.get('source_memory_size') != old_memory
+            or report.get('combined_memory_size') != backend.memory_size
+            or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
+        raise ValueError('Persistent Combat RSSM lineage changed architecture, memory, or frozen renderer assets')
 
 
 def _enemy_config(config):
@@ -260,7 +340,7 @@ def renderer_student_config(teacher, *, kind='rectified', steps=4, width=256,
         flow_adapter_heads=0)
 
 
-def _construct(config, source, *, share_codec, codec=None):
+def _construct(config, source, *, share_codec, codec=None, geometry_opacity_source=None):
     student = LatentFlowRenderer(kind=config.flow_kind or config.kind,
         image_size=config.image_size, mode=config.renderer_mode, steps=config.flow_steps,
         width=config.flow_width, depth=config.flow_depth, heads=config.flow_heads,
@@ -281,6 +361,12 @@ def _construct(config, source, *, share_codec, codec=None):
     for name in ('codec_loaded', 'latent_mean', 'latent_std', 'fixed_noise'):
         setattr(student, name, getattr(source, name).detach().clone())
     student._renderer_student_config = asdict(config)
+    if config.flow_geometry_opacity_enabled:
+        from .renderer_geometry_opacity import attach_geometry_opacity
+        if geometry_opacity_source is None:
+            raise ValueError('Private opacity reconstruction needs its unchanged shared geometry source')
+        attach_geometry_opacity(student, geometry_opacity_source,
+                                initial=getattr(source, 'geometry_opacity', None))
     return student
 
 
@@ -299,7 +385,12 @@ def build_renderer_student(teacher, *, kind='rectified', steps=4, seed=173,
         config = replace(config, renderer_codec_config=codec.get_config())
     with torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
-        student = _construct(config, source, share_codec=True, codec=codec)
+        geometry_source = None
+        if config.flow_geometry_opacity_enabled:
+            from .renderer_geometry_opacity import shared_camera_geometry
+            geometry_source = shared_camera_geometry(teacher).opacity_network
+        student = _construct(config, source, share_codec=True, codec=codec,
+                             geometry_opacity_source=geometry_source)
     if provenance is not None:
         student._renderer_codec_distillation = provenance
         student._renderer_allow_unqualified_codec = allow_unqualified_codec
@@ -329,6 +420,7 @@ def _student_config(student, teacher):
             or not _valid_solver_steps(student.steps) or student.steps != config.flow_steps
             or not bool(student.codec_loaded)
             or hasattr(student, 'residual_adapter')
+            or hasattr(student, 'geometry_opacity') != config.flow_geometry_opacity_enabled
             or _backbone_config(config, codec_replacement=replacement) !=
                _backbone_config(teacher.config, codec_replacement=replacement)):
         raise ValueError('Student renderer configuration changed its teacher backbone or one/four-step RF protocol')
@@ -352,6 +444,9 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
     identity = renderer_condition_identity(teacher)
     base_bundle = getattr(student, '_renderer_base_bundle', None)
     base_identity = getattr(student, '_renderer_base_identity', None)
+    from .renderer_geometry_opacity import geometry_opacity_metadata, validate_geometry_opacity_bundle
+    opacity_metadata = geometry_opacity_metadata(student, teacher)
+    validate_geometry_opacity_bundle(student, teacher, opacity_metadata, base_bundle)
     if base_bundle is not None:
         from .base_student import prepare_base_student
         head, _, _ = prepare_base_student(teacher, base_bundle)
@@ -382,6 +477,8 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
         'training_steps': training_steps, 'metrics': metrics or {},
         'solver': 'euler', 'solver_steps': student.steps,
         'quality_status': 'Distilled renderer; gameplay accuracy is not qualified'}
+    if opacity_metadata is not None:
+        payload['geometry_opacity_override'] = opacity_metadata
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name+f'.{os.getpid()}.tmp')
@@ -422,13 +519,21 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     renderer_config = dict(payload['config'])
     live_config = asdict(teacher.config)
     renderer_config.update({key: value for key, value in live_config.items()
-        if key.startswith(('rssm_', 'vjepa_', 'enemy_rssm_')) or key in {'architecture', 'player_motion_mode'}})
+        if key.startswith(('rssm_', 'vjepa_', 'enemy_rssm_', 'combat_rssm_')) or key in {'architecture', 'player_motion_mode'}})
     config = WorldModelConfig(**renderer_config)
     if (not _valid_solver_steps(config.flow_steps)
             or payload['solver_steps'] != config.flow_steps):
         raise ValueError('Renderer bundle solver metadata differs from its configured sampler')
     provenance = payload.get('codec_distillation')
     base_bundle = payload.get('base_student_bundle')
+    opacity_metadata = payload.get('geometry_opacity_override')
+    if config.flow_geometry_opacity_enabled:
+        from .renderer_geometry_opacity import validate_geometry_opacity_source
+        validate_geometry_opacity_source(opacity_metadata, teacher)
+        if not isinstance(base_bundle, dict) or base_bundle.get('geometry_opacity_binding') != opacity_metadata:
+            raise ValueError('Renderer private opacity and compact Base binding differ')
+    elif opacity_metadata is not None or (base_bundle or {}).get('geometry_opacity_binding') is not None:
+        raise ValueError('Renderer private opacity metadata requires its explicit configuration flag')
     pending_base = None
     if base_bundle is not None:
         from .base_student import prepare_base_student
@@ -445,7 +550,12 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     with torch.random.fork_rng(devices=[]):
         # Build a private codec first: strict-load failures cannot touch teacher.
         codec = VQGAN(config.renderer_codec_config).eval().requires_grad_(False) if provenance is not None else None
-        student = _construct(config, _require_teacher(teacher), share_codec=False, codec=codec)
+        geometry_source = None
+        if config.flow_geometry_opacity_enabled:
+            from .renderer_geometry_opacity import shared_camera_geometry
+            geometry_source = shared_camera_geometry(teacher).opacity_network
+        student = _construct(config, _require_teacher(teacher), share_codec=False, codec=codec,
+                             geometry_opacity_source=geometry_source)
     if provenance is not None:
         if not isinstance(provenance, dict):
             raise ValueError('Compact codec replacement needs explicit distillation provenance')
@@ -457,6 +567,8 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
             and bool(torch.isfinite(value).all()) for value in state.values())):
         raise ValueError('Renderer bundle must contain finite tensor weights')
     student.load_state_dict(state, strict=True)
+    from .renderer_geometry_opacity import validate_geometry_opacity_bundle
+    validate_geometry_opacity_bundle(student, teacher, opacity_metadata, base_bundle)
     student._check_codec()
     if provenance is not None:
         _validate_compact_codec(teacher, student.codec, provenance,

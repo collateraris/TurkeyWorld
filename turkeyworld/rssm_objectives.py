@@ -57,7 +57,9 @@ def _valid_result(result, expected_shape, where):
             or not torch.is_tensor(result['memory']) or tuple(result['memory'].shape) != expected_shape):
         raise ValueError(f'Invalid RSSM state/packed memory shape at {where}')
     for key in ('state', 'memory', 'rssm_prior_logits', 'rssm_posterior_logits', 'rssm_readout', 'features', 'rssm_reconstruction',
-                'enemy_rssm_prior_logits','enemy_rssm_posterior_logits','enemy_rssm_h','enemy_rssm_z'):
+                'enemy_rssm_prior_logits','enemy_rssm_posterior_logits','enemy_rssm_h','enemy_rssm_z',
+                'combat_rssm_prior_logits','combat_rssm_posterior_logits','combat_rssm_h','combat_rssm_z',
+                'combat_rssm_memory','combat_rssm_readout'):
         if key in result and not bool(torch.isfinite(result[key]).all()):
             raise FloatingPointError(f'Nonfinite RSSM {key} at {where}')
 

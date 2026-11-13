@@ -14,6 +14,7 @@ import torch
 
 from .spawn import SPAWN_ANCHORS
 from .structured_state import DEATH_DURATION, MAP_EXTENT, RESPAWN_DELAY
+from .simulation_clock import normalized_timer_ready
 
 
 def anchor_tile_indices(device=None):
@@ -70,7 +71,8 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
     centers = torch.stack([xx, yy], -1).reshape(256, 2)
     old = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
-    ready = (~alive & (old[:, :, 8]*DEATH_DURATION+dt >= RESPAWN_DELAY-1e-6)
+    ready = (~alive & normalized_timer_ready(old[:, :, 8], duration=DEATH_DURATION,
+             dt=dt, increasing=True, deadline=RESPAWN_DELAY)
              & (state[:, 4:5] > 0))
     positions = old[:, :, :2].clone()
     base_allowed = walkable.to(device=state.device, dtype=torch.bool).flatten(1)

@@ -8,9 +8,9 @@ TurkeyWorld contains a first-person reference game and an experimental neural
 world model. The active configuration has **one persistent enemy**,
 a **20-value state** and **two participant conditions: player + NPC**. All
 conditions and losses use that one enemy. The active dynamics run is now
-**two DreamerV3-style RSSMs**, the retained player model plus an independent compact
-enemy model, in `training_runs/rssm_loss_gated_drift_20261112`, continued at5112
-with microbatch64×accumulation4=effective256 and coordinate-drift training; the earlier
+**three DreamerV3-style RSSMs + a shared sparse Transformer MoE** for player,
+enemy and combat, in `training_runs/rssm_moe_nav15_enemy25_cap20_20261113`, continued from5800
+with microbatch64×accumulation4=effective256 and simultaneous three-task training; the earlier
 JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
 trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
@@ -62,38 +62,132 @@ playback is a separate command below.
 
 ## Current RSSM dynamics run
 
-The active run is `training_runs/rssm_loss_gated_drift_20261112`, monitored at
-**http://127.0.0.1:8765/**. It retains the complete5112 model, all165 Adam states,
-RNG and actor/component EMA. Batch remains64×4=256; historical128/256 ledgers remain.
-The current temporary `--drift-only-plan` trains Player/NPC XY positions only:
-main own-state trajectories and late XY branches, with fixed1:1 actor weights.
-KL/floor, reconstruction, memory agreement, velocity/heading, wall/pass-BCE,
-combat and spawn objectives are disabled. Their43 dedicated tensors and Adam
-moments are frozen; all165 Adam states are retained. EMA does not normalize
-this loss and its numerical values stay frozen. Initial observed frames still
-initialize memory without a separate reconstruction/posterior objective. See
-[H52](README_HISTORY_EN.md#h52-temporary-xy-drift-only-training).
+The current phase is `training_runs/rssm_moe_nav15_enemy25_cap20_20261113`, monitored at
+**http://127.0.0.1:8765/**. Three persistent RSSM memories contain2032 player,
+1600 enemy and1600 combat values:5232 total, updated every tick. The shared
+two-block Transformer has three sparse top-2 experts (3,118,099 parameters).
+The added combat branch has **20,007,020 parameters**, including a zero-initialized
+adapter into the existing combat query. Its four zero residuals refine target,
+attack and hierarchical spawn logits. Coordinates, HP and events retain one
+shared structured transition; the combat branch does not create another state.
 
-The mandatory `--loss-gated-curriculum-plan` now selects the main training H:
+Adding combat memory at5437 preserved all1386 existing tensors,229 Adam states/groups,
+serialized RNG and the current MoE horizon/streak. Only the new combat group
+starts without moments. Both16-step argmax and stochastic GPU rollouts preserve
+the old outputs, old3632-memory prefix and RNG exactly before the first update.
+The earlier two-RSSM and pure-XY phases remain history.
 
-`16 → 32 → 64 → 96 → 128 → 160 → 192 → 224 → 256 → 288 → 320 → 352 → 384 → 416 → 448 → 450`.
+The preceding continuation from5476 fixed death/respawn timing only. A shared30Hz phase
+advance recovers float32 representation error at the simulation step, preserving
+literal Source state decoding and its strict2e-7 canonical guard. Source, typed
+transition, spawn heads/decoder and invariant checks use the same death-clock
+rule. The full5476 checkpoint was copied bitexactly:1434 model tensors,277 Adam
+states, RNG and the existing H4/streak0 gate. Replay coverage on the same4096
+windows improved264→1043/1043 spawn labels, including all four offsets. Actual
+neural batches now log all-microbatch per-offset/anchor counts on the dashboard.
+Remaining invalid own geometry is reported rather than corrected by Source.
 
-Each stage requires **10 consecutive completed optimizer updates with train loss
-< 0.25** at the current H. The loss includes main and late XY terms and is the
-mean of all four 64-example microbatches; a microbatch is not a separate success.
-A loss **≥ 0.25** resets the streak. The tenth success advances exactly one stage,
-whose counter starts at zero. The final stage continues at H450. EMA values stay
-frozen and do not scale this raw coordinate objective. The dashboard shows H and
-**N/10**. Model weights, Adam, RNG and historical clocks are preserved from5112.
+Every64×4 update trains **Player + Enemy + Combat**. The fixed total is their
+sum plus0.01 router role CE and0.001 load balancing; no EMA scaling, KL floor,
+reconstruction objective or renderer training is used. Local navigation branches
+have weight0.1 and late own-memory branches weight0.25. Event-balanced TRAIN
+windows use the actual min(H,16) horizon. Source labels supervise the own state;
+future Source states/images never correct the autonomous rollout.
 
-The active gate supersedes the **500-update schedule** and **forced H450 every
-fifth update** described below. Those clocks/plans remain checkpoint history.
+MAIN now contains38 combat +16 pure NPC movement +10 no-enemy navigation per64;
+over four microbatches that is152/64/40 of256, or59.375%/25%/15.625%.
+Combat AUX64 and late-prefix8 per micro remain separate and do not enter these
+MAIN percentages. Navigation adds a weighted Player term; pure NPC movement adds
+an Enemy term. The NPC denominator excludes no-enemy rows. Actual committed
+counts and separate losses are shown on8765; see
+[H73](README_HISTORY_EN.md#h73-three-way-main-replay-and-twenty-updates-per-stage).
+
+The immutable `--moe-plan` selects31 stages:
+**4 → 8 → 16 → 32 → 48 → … → 432 → 448 → 450**.
+The current `--stage-budget-plan` advances a stage after **5 consecutive completed
+optimizer updates with strict TOTAL loss <0.5 OR20 completed updates at that stage**.
+Loss is averaged over four64-example microbatches; a value≥0.5 resets the streak.
+The preceding cap25 activation at5741, when H48 had45 completed updates, caused one boundary advance to
+H64/0 without SGD, preserving the389-update objective clock and prior stage history.
+The new policy's streak starts at0; historical losses are not reinterpreted under
+the new threshold. At5800, the new cap20 preserved H96/stage9 and objective448.
+Final H450 stops after20 updates with `completed_budget`, or
+earlier after its five-loss streak; neither establishes gameplay quality. The
+previous cap50 and `50+15*N` policies remain historical; the interim100 cap was never activated.
+The original objective/`--moe-plan` is unchanged; model tensors1434, all277 Adam
+states and serialized RNG were preserved. Previews every10 updates use the current H and pinned NPR22200 /
+Atlas SR106105/local5175; full450-transition held-out validation runs every250 updates.
+The SR-only display revision preserves the training boundary; see
+[H72](README_HISTORY_EN.md#h72-atlas-sr-in-dynamics-preview-and-separate-navigation-diagnosis).
+
+This phase supersedes the earlier pure-XY and forced-long schedules below.
+Its checkpoint is `checkpoints/rssm_world.pt`; stop safely with
+`rssm_moe_nav15_enemy25_cap20_20261113/stop_training`. Resume using the argv in
+`rssm_moe_nav15_enemy25_cap20_20261113/launch_command.json` after removing that marker.
+Keep the original `--moe-plan`, the new `--combat-memory-plan`, both migration
+proofs and Source corpus pins unchanged. Also retain `--respawn-timing-plan` and
+its pinned clock-source files, plus `--stage-budget-plan`, `--navigation-replay-plan`
+and `--enemy-motion-data-root`. Adding combat memory or correcting timing keeps the existing
+4→450 curriculum clock; it does not restart H4 or its consecutive-pass counter.
 There is no forced long optimizer update. The existing eight-prefix no-grad scout
 may still run to450 to select 16-step XY recovery branches; this is not an H450
 training update or a gate success. Full held-out450 validation remains separate,
 before SGD and every250 global updates. A training-stage pass does not establish
 15-second gameplay quality. See
 [H53](README_HISTORY_EN.md#h53-loss-gated-horizons-with-ten-consecutive-updates).
+The preceding cap25 policy and exact5741 restoration are recorded in
+[H67](README_HISTORY_EN.md#h67-twenty-five-updates-or-five-total-loss-passes-per-stage).
+The preceding cap50 activation remains in [H65](README_HISTORY_EN.md#h65-fifty-updates-per-stage-without-resetting-training).
+
+### Stopped hybrid-atlas SR archive
+
+The SR worker in `training_runs/sr_atlas_enemy_20261113/training` was stopped
+at update5175 by user request. **http://127.0.0.1:8779/** retains its stopped
+archive; three-way cap20 dynamics continues separately. Enemy pixels come from a
+fixed embedded atlas;70,195 trainable NN parameters predict the full unclipped
+sprite box, animation phase, occlusion and binary visibility. The learned parent
+SR supplies the background and is a frozen reference, not a matched NoGAN control.
+The phase preserves the stopped PatchGAN2900/cumulative100930 model's158 tensors,
+Adam, RNG and sampler; only49 RGB HP0 parameters in two new tensors are added.
+The total is1,967,873 parameters. Previews update every15, full validation every100.
+Training remains stopped; its exported106105 snapshot is used by the dynamics
+preview on8765 with an explicitly RGB-only SR call, and by the user-requested
+latest paired game below with the current predicted neural-state hint.
+
+Worker40076 passed the real three-step disposable GPU preflight and reached420
+updates in the archived live check. The actual page, served JavaScript and four-row
+PNG passed37 checks, including measured Train/Validation curves and1024 held-out
+images/138 cached temporal pairs. Initial-to-VAL100 bbox error improved10.217→6.708
+pixels and visibility IoU0.346→0.395, while phase accuracy fell27.22%→19.76%.
+Placement and occlusion remain imperfect. No quality pass or automatic game update
+is claimed. See [H70](README_HISTORY_EN.md#h70-fixed-atlas-enemy-appearance-with-learned-geometry-and-visibility).
+
+The preceding matched ROI PatchGAN / NoGAN worker was
+`training_runs/sr_patchgan_ab_20261113/training`. Both generators started from
+the complete restoration1830/cumulative98030 checkpoint:158 model tensors/Adam
+states per arm, RNG and403,440 sampler draws were preserved. Each generator has
+**1,967,824** parameters,300,456 trainable;102 parent tensors remain frozen.
+Only GAN training adds a separate206,889-parameter conditional ROI discriminator;
+the generator architecture and inference cost are unchanged.
+
+GAN and the trained NoGAN control receive identical actual inputs and equal
+generator update counts. Both retain RGB/alpha/geometry/edge reconstruction;
+Source RGB/masks remain targets only. The adversarial weight is0 for100 updates,
+then ramps over400 to at most0.01, further limited by the0.1 shared-readout gradient
+ratio. Both restoration blends are1. Four-row paired previews update every15;
+full validation every100 compares1024 held-out frames and138 verified adjacent
+cached one-step NPR pairs. These temporal pairs are not autonomous gameplay.
+
+The7.38-second GPU preflight verified source preservation, exact matched zero-weight
+updates and three disposable forced-weight steps. The live page at paired200 showed
+GAN/NoGAN/D steps200, effective weight0.00088504, and the earlier warmup VAL100.
+Warmup equality is not a GAN quality advantage. The first active VAL200 was mixed:
+GAN slightly increased ROI/image SSIM, while silhouette IoU and temporal foreground
+delta error were worse. No overall GAN advantage is established. Image/temporal metrics and support
+counts are shown separately from GAN/D losses. The open game is not automatically
+updated. See [H69](README_HISTORY_EN.md#h69-matched-roi-patchgan-and-nogan-control);
+the raw-RGBA restoration method and its initial results remain in
+[H68](README_HISTORY_EN.md#h68-raw-rgba-restoration-before-gradual-blending).
 
 The following schedule and replay details describe the preceding phases only.
 The preceding5014 phase enabled Player/Enemy RSSM memory agreement at1/4/8/16, separate
@@ -212,17 +306,30 @@ Each combat microbatch32 selects8 spawn,8 attack-negative,3 near-hit,3 mid-hit,
 3 far-hit,3 fired-miss and4 legacy windows. Target CE uses actual Source shots
 only, balances hit/miss means1:1 and gives present hit-distance groups equal
 mass. This is a new loss protocol, not a direct comparison with the old total.
-The existing model-preview panel now uses a separate frozen clone with the
-current RSSM weights, NPR6600 (RF cumulative16200) and SRbest18100
-(cumulative38100); training image assets remain unchanged. An explicit immutable
-preview revision retains the original6000 pin and history. Full Source and
-gameplay qualification remain false, and the open game keeps its own assets.
-See [H39](README_HISTORY_EN.md#h39-distance-supervision-effective128-and-updated-preview-assets).
+The first preview revision used NPR 6600 (RF cumulative 16200) and SRbest 18100
+(cumulative 38100). The current immutable v 2 descendant keeps the latest completed
+NPR: **22200 cumulative updates / phase 6000**, Base 21800, and uses stopped
+**Atlas SR106105 cumulative / local5175**. The preceding SR38100 plan remains history.
+It keeps the original preview pin and v 1 NPR 6600 revision in its verified chain.
+At **http://127.0.0.1:8765/**, a separate frozen clone renders the current RSSM
+rollout every 10 updates: five rows show context, Source reference, Base+RF1,
+Atlas SR and bilinear enlargement. Preview H matches the active curriculum H;
+an image from another H is hidden. Training image assets, loss-gated dynamics
+and the open game's snapshots remain unchanged. This display update does not
+establish Source/gameplay qualification.
+See [H39](README_HISTORY_EN.md#h39-distance-supervision-effective128-and-updated-preview-assets)
+and [H56](README_HISTORY_EN.md#h56-current-npr-in-the-rssm-preview-with-an-immutable-v2-chain).
+The same5797 boundary preserved all world weights,277 Adam states, RNG, samplers
+and H96 stage counters; actual page/PNG checks passed23/23. A separate no-enemy
+diagnosis found lower final XY error but more wall-interior steps, while the shown
+H96 image combines pose drift and NPR blur. These are separate failures;
+[H72](README_HISTORY_EN.md#h72-atlas-sr-in-dynamics-preview-and-separate-navigation-diagnosis)
+records the measured scopes and the offline pose counterfactual.
 
-Active student Base/RF1 continuation runs in
-`training_runs/renderer_far_geometry_20261112`. It preserves the full weights,
-317 Adam states, RNG and MAIN sampler from the completed v5 control at update 2000;
-the target renderer counter is 6000, with validation every 100 and preview every 10.
+The student Base/RF1 continuation completed in
+`training_runs/renderer_far_geometry_20261112`. It preserved the full weights,
+317 Adam states, RNG and MAIN sampler from the completed v 5 control at update 2000;
+and reached renderer counter 6000, with validation every 100 and preview every 10.
 RSSM 5152, compact VQGAN 997539 (E7) and SR 38100 remain frozen; live RSSM training
 continues separately. The original MAIN batch 16 keeps its NPC/replay quotas and
 losses. Four additional TRAIN-only far-wall frames contribute a separate far-only
@@ -235,10 +342,35 @@ control 2000 performed better. At 2100, distant-wall errors improved on the fixe
 main panel, while overall RF MAE/SSIM and NPC error worsened; preservation gates
 still fail. These early results do not establish repaired polygons or autonomous
 gameplay quality.
-Monitoring: **http://127.0.0.1:8777/** now serves the verified healthy v6 worker.
+Completed v 6 reports: **http://127.0.0.1:8777/**.
 Codec and same-pose diagnostics: **http://127.0.0.1:8780/**.
 See [H54](README_HISTORY_EN.md#h54-student-renderer-training-for-small-enemies-and-walls)
 and [H55](README_HISTORY_EN.md#h55-far-wall-strata-and-preserved-adam-continuation).
+
+Current wall-geometry training is worker46212 in
+`training_runs/renderer_private_geometry_20261113`,8000→10000, on
+**http://127.0.0.1:8781/**. A renderer-owned6241-parameter opacity copy receives
+Source-depth labels; original shared geometry/map/RSSM and E7/SR remain frozen.
+RF including this copy has6,998,433 parameters. Original317 Adam states and all
+three samplers were retained; four new tensors have fresh moments. Private LR
+is5e-5 and depth weight ramps0→1 over500 updates. The discarded depth-only pilot
+improved depth but damaged RGB, so its weights were not used. At joint VAL8100,
+depth improved2.0321→1.5726 tiles while RF SSIM fell0.75799→0.73225 and RGB MAE
+worsened. At VAL8200, depth reached1.2391 but RF SSIM0.72661/MAE0.038584 still
+regressed. Release gates remain false; no sharper-wall success is claimed.
+See [H74](README_HISTORY_EN.md#h74-private-renderer-opacity-and-joint-depth-rgb-calibration).
+
+The preceding renderer-only v7 wall repair completed8000 as worker12752 in
+`training_runs/renderer_wall_repair_20261113`: full v6 continuation6000→8000,
+unchanged Base/RF1 architecture and frozen RSSM/VQGAN/SR. It keeps MAIN16 and
+far-wall aux4×0.25, adding geometry aux8×1 for all five depth bands, corners,
+thin faces and paired cross-boundary contrast. Reports remain in the preserved
+run directory;8781 now serves v8. The first preview handler failed on all-empty wall cases;
+the fix resumes the durable weights/Adam/samplers, with temporary unsaved metrics
+archived. The live check passed34/34 at6191, VAL6100 and geometry preview6190.
+RF mean SSIM improved0.74364→0.75375 on the fixed main panel, while geometry
+preservation and release gates remain false. Walls are not claimed repaired.
+See [H71](README_HISTORY_EN.md#h71-all-depth-wall-geometry-refinement-with-sr-stopped).
 
 The original Base/RF phase completed **6000 local updates** in
 `training_runs/renderer_repair_corrected_20261111`, using fine-tuned and refrozen
@@ -256,10 +388,10 @@ distance-improvement gate on all three bands; the full Source/gameplay release
 remains false. Adam/RNG are preserved and crop remains off. Details and codec evidence:
 [H33](README_HISTORY_EN.md#h33-hp0-codec-controlled-rf-pilots-and-continued-renderer-training).
 
-A new ordered tiny-enemy run is monitored at **http://127.0.0.1:8776/**:
+The earlier ordered tiny-enemy run is recorded at **http://127.0.0.1:8776/**:
 `training_runs/small_enemy_pipeline_20261111`. Its order is compact codec → SR →
 Base/RF1, with a held-out relative gate before each handoff. Codec2000 completed
-and SR has started; renderer remains queued. Its4096 TRAIN/512 VAL examples include
+and SR2000 completed (cumulative40100); later renderer results are recorded below. Its4096 TRAIN/512 VAL examples include
 3072/384 living NPCs occupying1–16 native pixels, plus navigation, near enemies,
 corpses and HP0 guards, with true paired32/128 Source images. This pipeline does
 not replace game assets automatically or establish gameplay qualification.
@@ -280,17 +412,20 @@ The new immutable plan is `quality_revision_ssim091_mae2p5.json`; the page displ
 MAE on the0–255 scale. Gameplay weights are not replaced automatically.
 
 The latest user-requested paired game is the experimental session
-`training_runs/paired_compare_20261112T064826Z_latest_enemy20m`, using immutable
-world4944, tiny renderer selected8300/RF cumulative17900 (Euler1), compact
-codec11800 and SR selected2000/cumulative40100 snapshots.
-The actual FP32 launch is recorded in its
-[launch command](training_runs/paired_compare_20261112T064826Z_latest_enemy20m/launch.json).
-It opened in combat with autonomous, independent Source/neural trajectories;
-ready and the visible window were confirmed. The snapshot predates v6 training
-and is not updated automatically. The recorded trial later completed450 steps
-and closed; it was not reopened. In optional shared-camera diagnostics only
-the Source player's camera is used for display; own RSSM state/memory receive
-no Source correction.
+`training_runs/paired_latest_20261113_private_geometry`, also selected by
+`training_runs/latest_play_session.json`. Its immutable snapshots are dynamics5805,
+private-geometry NPR8480 (RF cumulative24680/Base24280, Euler1), frozen E7 codec
+and self-contained Atlas SR106105/local5175. The visible paired window opened
+with Source left/neural right, autonomous combat and display-size1024; the launch
+check observed93/450 updates with no stderr. Training on8765/8781 continues
+independently. These latest weights have no quality/gameplay pass and are not
+updated in the open game automatically. Strict profile rebinding and two GPU
+smoke steps in each of navigation/combat passed; see
+[export proof](training_runs/paired_latest_20261113_private_geometry/export_verification.json),
+[runtime smoke](training_runs/paired_latest_20261113_private_geometry/runtime_smoke_verification.json)
+and [H75](README_HISTORY_EN.md#h75-user-requested-latest-private-geometry-paired-game).
+Own RSSM state/memory receive no future Source correction. In optional
+shared-camera diagnostics, the Source camera affects display only.
 **T** switches navigation/combat, **Q/left** turn left, **E/right** turn right, **W/S/up/down** move,
 **A/D** strafe, **Space/left click** fire, **Tab** toggles autonomous/shared camera,
 **P** pauses, **R** resets the trial explicitly and **Esc** closes it. T preserves
@@ -298,7 +433,7 @@ player/time/h/z while explicitly initializing the one-NPC scene slot. This is a
 user-authorized experimental test, not a quality or15-second gameplay pass.
 These controls were verified in the new launch; [H37](README_HISTORY_EN.md#h37-user-requested-sr-stop-and-the-latest-paired-game)
 preserves the original launch and its former E toggle.
-The three450-step combat trials reproduced close damage but exposed missed or
+The earlier three450-step combat trials reproduced close damage but exposed missed or
 mistimed hits/respawns and NPC wall penetration; they did not qualify the game.
 [H38](README_HISTORY_EN.md#h38-t-for-combat-e-for-turning-and-combat-neural-game-validation)
 records the event denominators and counterexamples.
@@ -314,34 +449,52 @@ Dynamics, renderer and SR workers are independent. To resume one after a checkpo
 use that worker's saved command; do not launch a duplicate:
 
 ```powershell
-$rssmRun = 'training_runs/rssm_loss_gated_drift_20261112'
+$rssmRun = 'training_runs/rssm_moe_nav15_enemy25_cap20_20261113'
 New-Item -ItemType File -Path (Join-Path $rssmRun 'stop_training') -Force
 # Wait for this worker to exit before removing its marker and resuming.
 Remove-Item -LiteralPath (Join-Path $rssmRun 'stop_training')
 $rssmLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $rssmRun 'launch_command.json') | ConvertFrom-Json
 $rssmCommand = @($rssmLaunch.argv)
 & $twPython @($rssmCommand[1..($rssmCommand.Count - 1)])
+# SR is stopped by user request; use its saved command only when resuming is requested.
+$srRun = 'training_runs/sr_atlas_enemy_20261113/training'
+New-Item -ItemType File -Path (Join-Path $srRun 'stop_training') -Force
+# After this SR worker has exited:
+Remove-Item -LiteralPath (Join-Path $srRun 'stop_training')
+$srLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $srRun 'launch_command.json') | ConvertFrom-Json
+$srCommand = @($srLaunch.argv)
+& $twPython @($srCommand[1..($srCommand.Count - 1)])
 # Renderer continuation: only after its separate worker has stopped.
-$renderRun = 'training_runs/renderer_far_geometry_20261112'
+$renderRun = 'training_runs/renderer_private_geometry_20261113'
 Remove-Item -LiteralPath (Join-Path $renderRun 'stop_training') -ErrorAction SilentlyContinue
 $renderLaunch = Get-Content -Raw -Encoding utf8 (Join-Path $renderRun 'launch_command.json') | ConvertFrom-Json
 $renderCommand = @($renderLaunch.argv)
 & $twPython @($renderCommand[1..($renderCommand.Count - 1)])
 ```
 
-The combat command runs `turkeyworld.train_rssm_combat --updates 0 --batch 64 --accumulation-steps 4`;
-0 means unbounded training; the active gate selects H and the final H450 continues
-until a checkpointed stop is requested. The renderer command runs
-`turkeyworld.train_renderer_enemy --steps 6000 --batch 16`, with the saved
+The active dynamics command runs `turkeyworld.train_rssm_moe --updates 0` with64×4;
+0 adds no separate update budget; the stage policy still caps each H at20 and
+stops at final H450 completion. The renderer command runs
+`turkeyworld.train_renderer_enemy --steps 10000 --batch 16`, with the saved
 `--small-enemy-rebalance`, `--far-wall-supervision`, `--native-phase-parent`,
-data/asset pins and source-latent weight0.1. Resume its complete saved arguments
+`--geometry-wall-supervision`, `--geometry-phase-parent`, `--private-geometry-supervision`,
+`--private-geometry-parent`, data/asset pins and
+source-latent weight0.1. Resume its complete saved arguments
 to retain full Adam/RNG/MAIN history and the independent four-frame far-wall sampler.
-RSSM resume also requires the saved `--batch-revision-plan`, `--preview-assets-plan`
-`--preview-assets-revision-plan`, `--loss-balance-plan`, `--combat-only-plan`
-`--combat-v6-plan`, `--batch256-plan`, `--coordinate-curriculum-plan`,
-`--replay-curriculum-plan`, `--drift-only-plan` and the mandatory
-`--loss-gated-curriculum-plan`;
-do not substitute the old batch16 command. Their stop markers and counters are independent. The sections below preserve
+The renderer continues the completed v7 counter8000 toward10000, retaining all
+three existing Source samplers and adding four private-opacity Adam states;
+RSSM training continues separately.
+RSSM resume requires its exact saved `--moe-plan`, `--combat-memory-plan`,
+`--respawn-timing-plan`, `--stage-budget-plan` and preview/data pins. Earlier
+batch/XY/EMA plans remain history. Current atlas SR uses
+`turkeyworld.train_atlas_enemy_sr --updates 0` with the exact saved initial and
+frozen-reference checkpoint/data/hypothesis pins. Keep its full model, Adam,
+RNG, sampler and embedded asset state when resuming. The preceding matched SR used `turkeyworld.train_sr_patchgan`
+with `--updates 0` and its exact saved initial-checkpoint/data/hypothesis pins.
+The immutable plan retains batch8, preview15, validation100 and the GAN schedule.
+Its full checkpoint preserves both generator Adam states, discriminator/Adam,
+RNG, active sampler and shared batch ledger; do not resume from a model-only export.
+Their stop markers and counters are independent. The sections below preserve
 the earlier navigation-only initialization and revision history.
 
 The initial plan **200 distillation updates → 1,800 Source updates** completed
@@ -1323,7 +1476,10 @@ does not relabel those measurements or establish a new pass.
 | `rssm_b256_20261112` | Historical64×4=256 continuation from4981 through5014 |
 | `rssm_drift_curriculum_20261112` | History5014–5060: memory agreement, XY credit and16→450 curriculum |
 | `rssm_coordinate_replay_20261112` | History5060–5079:20% long updates and late own-prefix branches |
-| `rssm_loss_gated_drift_20261112` | Active from5112: pure XY;10 consecutive losses<0.25 per stage, no forced long updates |
+| `rssm_loss_gated_drift_20261112` | Historical pure-XY continuation5112→5352; stopped before the three-task MoE phase |
+| `rssm_moe_multitask_20261112` | Historical5352→5437: two RSSMs and three-task sparse MoE |
+| `rssm_combat20m_moe_20261112` | Historical5437→5476: third20,007,020-parameter combat RSSM |
+| `rssm_respawn_timing_20261112` | Active from5476: aligned death/respawn clock, recovered late spawn supervision; same weights/Adam/gate |
 | `rssm_drift_only_20261112` | History5079–5112: pure XY with the former short/450 replay schedule |
 | `rssm_components_v6_20261112` | Previous128 continuation4944→4981; component EMA and late-event supervision |
 | `rssm_enemy20m_combat_20261112` | Previous20M enemy continuation4482→4944; navigation validation retained |
@@ -1333,7 +1489,8 @@ does not relabel those measurements or establish a new pass.
 | `small_enemy_pipeline_20261111` | Ordered codec→SR→Base/RF; codec2000 complete, SR started, renderer queued |
 | `renderer_combat_navigation_20261111` | Parallel Base/RF1 on combat/appearance/navigation; same-Adam2000→6000, frozen codec |
 | `renderer_objects_walls_20261112` | Completed v5 student Base/RF1 control2000 from selected6600; source of v6 full continuation |
-| `renderer_far_geometry_20261112` | Active v6 Base/RF1, preserved full Adam2000→6000; MAIN16 + separate far-wall aux4, frozen RSSM5152/codec/SR |
+| `renderer_far_geometry_20261112` | Completed v6 Base/RF1, preserved full Adam2000→6000; current frozen preview NPR22200, MAIN16 + far-wall aux4 |
+| `renderer_wall_repair_20261113` | V7 wall/corner refinement6000→8000, unchanged Base/RF1; MAIN16 + far4 + geometry8, no automatic preview/game promotion |
 | `combat_source_20261111` | Immutable one-enemy combat and detailed-navigation Source corpus;1280 verified NPZ |
 | `rssm25m_contact_b_20261111` | Navigation trial B, resumed339 and archived at3873 for combat continuation |
 | `rssm25m_20261111` | Original RSSM initialization, frozen contact data and stopped pilot A archive 368 |

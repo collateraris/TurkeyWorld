@@ -6,11 +6,23 @@ import torch
 
 
 STAGE_HORIZONS = (16, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 450)
+MOE_STAGE_HORIZONS = (4,8,16,*range(32,449,16),450)
 
 
 def stage_preview_spec(state):
     """Read the active gate stage, never an inherited replay/next-H field."""
     training = state.get('rssm_training', {})
+    moe=training.get('moe_training')
+    if moe is not None:
+        if not isinstance(moe,dict)or type(moe.get('current_horizon'))is not int or moe['current_horizon']not in MOE_STAGE_HORIZONS:
+            raise ValueError('Current-stage MoE preview requires the exact active 31-stage horizon')
+        completed=moe.get('updates')
+        if type(completed)is not int or completed<0:
+            raise ValueError('Current-stage MoE preview requires a committed MoE update clock')
+        horizon=moe['current_horizon']
+        return {'gated':True,'moe':True,'horizon':horizon,'context':1+(completed//16)%2,
+            'display_offsets':np.rint(np.linspace(1,horizon,4)).astype(int).tolist(),
+            'stage_index':moe.get('stage_index'),'plan_sha256':moe.get('sha256')}
     gate = training.get('loss_gated_curriculum')
     if gate is None:
         return {'gated': False, 'horizon': 4, 'context': 1, 'display_offsets': [1, 2, 3, 4]}

@@ -294,4 +294,68 @@ class RSSMPreviewAssetsTests(unittest.TestCase):
             self.assertIs(restored.preview_model,current);self.assertEqual(restored.state,state)
 
 
+    def atlas_sr_only_revision(self):
+        from turkeyworld.atlas_enemy_sr import AtlasEnemyEDSRUpscaler
+        old_path, _, selected_path = self.revision()
+        _, previous_plan, previous = resolve_preview_assets_plan(self.path, old_path)
+        atlas = AtlasEnemyEDSRUpscaler(channels=4, blocks=1, semantic_channels=4,
+            semantic_blocks=1, enemy_decoder_channels=4)
+        checkpoint = self.root/'atlas_sr106105.pt'
+        torch.save(dict(stage='sr',config=atlas.config,model=atlas.state_dict(),training_steps=106105,
+            refinement_updates=5175,atlas_updates=5175,input_size=32,output_size=128,
+            source_quality_passed=False,atlas_hypothesis_source='none_RGB_only'),checkpoint)
+        selected = json.loads(selected_path.read_text())
+        selected['sr'] = dict(checkpoint=str(checkpoint),file_sha256=file_sha256(checkpoint),
+            selected_local_update=5175,architecture='atlas_enemy_edsr',training_steps=106105,
+            atlas_hypothesis_source='none_RGB_only',atlas_pixels_sha256=atlas.config['atlas_pixels_sha256'])
+        selected_path = self.root/'atlas_selected.json';selected_path.write_text(json.dumps(selected))
+        raw = dict(version=2,kind='preview_assets_revision_v2',initial_plan_sha256=file_sha256(self.path),
+            previous_revision_plan=str(old_path),previous_revision_sha256=file_sha256(old_path),
+            selected_plan=str(selected_path),selected_plan_sha256=file_sha256(selected_path))
+        path = self.root/'atlas_revision.json';path.write_text(json.dumps(raw))
+        return path, previous_plan, previous
+
+    def test_atlas_SR_only_descendant_keeps_exact_renderer_and_strict_selfcontained_CPU_clone(self):
+        path, old_plan, parent = self.atlas_sr_only_revision()
+        source_hash = _hash_tensors(self.source.state_dict())
+        _, plan, current = resolve_preview_assets_plan(self.path,path,parent)
+        self.assertEqual(plan['renderer'],old_plan['renderer'])
+        self.assertEqual(plan['sr']['atlas_hypothesis_source'],'none_RGB_only')
+        self.assertEqual(resolve_preview_assets_plan(self.path,path,current)[2],current)
+        with self.assertRaises(ValueError):resolve_preview_assets_plan(self.path,path,None)
+        rng = torch.get_rng_state().clone()
+        with (patch('turkeyworld.atlas_enemy_sr._load_native_atlas',side_effect=AssertionError('external atlas access')),
+              patch('turkeyworld.engine.Game.render',side_effect=AssertionError('Source render access'))):
+            client,sr,metadata,proof = self.prepare(plan)
+            with torch.inference_mode():image = sr(torch.zeros(1,3,32,32))
+        self.assertEqual(image.shape,(1,3,128,128));self.assertTrue(torch.isfinite(image).all())
+        self.assertEqual(metadata['atlas_updates'],5175)
+        self.assertEqual((proof['sr_refinement_updates'],proof['sr_training_steps']),(5175,106105))
+        self.assertEqual(proof['sr']['atlas_hypothesis_source'],'none_RGB_only')
+        self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+        self.assertEqual(source_hash,_hash_tensors(self.source.state_dict()))
+        self.assertIsNot(client,self.source)
+
+    def test_atlas_preview_saver_supplies_only_generated_RGB_and_no_Source_state_or_hint(self):
+        path, _, parent = self.atlas_sr_only_revision()
+        _, plan, _ = resolve_preview_assets_plan(self.path,path,parent)
+        _, sr, metadata, _ = self.prepare(plan)
+        generated = torch.full((4,3,32,32),.27)
+        seen=[]
+        hook=sr.register_forward_pre_hook(lambda module,args:seen.append(args))
+        preview=dict(context=np.zeros((1,32,32,3),np.uint8),source=np.full((4,32,32,3),255,np.uint8),
+            generated=np.zeros((4,32,32,3),np.uint8),generated_float=generated,
+            metadata={'step':5796,'kind':'rssm_free_autoregressive_future','generated_finite':True,'caption':'Atlas RGB-only preview',
+                      'atlas_hypothesis_source':'none_RGB_only'})
+        try:
+            with patch('turkeyworld.engine.Game.render',side_effect=AssertionError('Source render access')):
+                report=save_autoregressive_preview(preview,self.root/'atlas_preview.png',sr_model=sr,sr_metadata=metadata)
+        finally:hook.remove()
+        self.assertEqual(len(seen),1);self.assertEqual(len(seen[0]),1)
+        torch.testing.assert_close(seen[0][0],generated,rtol=0,atol=0)
+        self.assertEqual(report['atlas_hypothesis_source'],'none_RGB_only')
+        self.assertEqual(report['row_count'],5)
+        self.assertFalse(report['future_source_feedback']);self.assertFalse(report['sr_world_feedback'])
+
+
 if __name__=='__main__':unittest.main()

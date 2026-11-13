@@ -51,8 +51,15 @@ def enemy_conditions(model, batch):
         # The prior subset changes map/spawn caches to its batch shape. Restore
         # all rows before GT-pose geometry; no prior features are recomputed.
         map_features = model.encode_map(grid)
-        geometry = {name: value.detach() for name, value in
-                    model.vjepa_backend.geometry(state, map_features).items() if torch.is_tensor(value)}
+        private_opacity = getattr(model.flow_renderer, 'geometry_opacity', None)
+        if private_opacity is None:
+            geometry = {name: value.detach() for name, value in
+                        model.vjepa_backend.geometry(state, map_features).items() if torch.is_tensor(value)}
+    if private_opacity is not None:
+        # Map, dynamics and labels remain detached; only the renderer-owned MLP
+        # builds a graph through otherwise frozen camera/position projections.
+        geometry = {name:value for name,value in model.render_geometry(state.detach(),map_features.detach()).items()
+                    if torch.is_tensor(value)}
     target = batch['target'].detach().to(device=device, dtype=torch.float32)
     background = batch['background'].detach().to(device=device, dtype=torch.float32)
     mask = batch['object_mask'].detach().to(device=device, dtype=torch.float32)

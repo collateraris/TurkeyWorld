@@ -186,6 +186,10 @@ class RSSMTraining:
                 self.preview_model.dual_rssm_migration = model.dual_rssm_migration
             if hasattr(model, 'enemy_rssm_resize'):
                 self.preview_model.enemy_rssm_resize = model.enemy_rssm_resize
+            if hasattr(model,'rssm_fusion_migration'):
+                self.preview_model.rssm_fusion_migration=copy.deepcopy(model.rssm_fusion_migration)
+            if hasattr(model,'combat_rssm_migration'):
+                self.preview_model.combat_rssm_migration=copy.deepcopy(model.combat_rssm_migration)
             load_renderer_student(self.preview_model, renderer_checkpoint,
                 allow_unqualified_codec=True)
             self.preview_model.to(self.device).eval().requires_grad_(False)
@@ -219,8 +223,10 @@ class RSSMTraining:
                 'step': self.state['global_training_step'], 'every': 10, 'context': context, 'horizon': horizon,
                 'generated_rollout_transitions': horizon, 'display_offsets': offsets,
                 'displayed_future_frames': len(offsets), 'current_stage_preview': spec['gated'],
-                'loss_gated_curriculum_plan_sha256': spec.get('plan_sha256'),
-                'loss_gated_stage_index': spec.get('stage_index'),
+                'loss_gated_curriculum_plan_sha256': None if spec.get('moe') else spec.get('plan_sha256'),
+                **({'moe_training_plan_sha256':spec.get('plan_sha256'),
+                    'moe_training_stage_index':spec.get('stage_index')}if spec.get('moe')else {}),
+                'loss_gated_stage_index': None if spec.get('moe')else spec.get('stage_index'),
                 'kind': 'rssm_free_autoregressive_future', 'model_kind': 'RSSM',
                 'component_phase': self.state['rssm_training']['phase'],
                 'renderer_checkpoint': str(renderer_checkpoint),

@@ -95,7 +95,8 @@ class RSSMCombatTraining(RSSMTraining):
         names = getattr(self, '_optimizer_parameter_names', None)
         if names is None:
             names = [name for name, value in model.named_parameters() if value.requires_grad]
-        payload = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration','enemy_rssm_resize') if key in metadata}
+        payload = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration',
+            'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration') if key in metadata}
         payload.update(stage='world', state_schema=dict(STATE_SCHEMA), config=asdict(model.config),
             model=model.state_dict(), optimizer=optimizer.state_dict(), optimizer_parameter_names=names,
             training_steps=self.state['global_training_step'], global_training_step=self.state['global_training_step'],
@@ -444,6 +445,7 @@ class RSSMCombatTraining(RSSMTraining):
                 base_plan_sha256=self.plan_sha)
         model.rssm_migration = saved['rssm_migration']
         model.enemy_rssm_resize = saved.get('enemy_rssm_resize')
+        model.rssm_fusion_migration = saved.get('rssm_fusion_migration')
         model.to(self.device).float(); policy = configure_rssm_training(model)
         names = [name for name, value in model.named_parameters() if value.requires_grad]
         if names != saved['optimizer_parameter_names']: raise ValueError('Combat Adam parameter names changed')
@@ -537,7 +539,8 @@ class RSSMCombatTraining(RSSMTraining):
                 loss_gated_current_horizon=self.loss_gated_curriculum['current_horizon'],forced_long_replay=False)
         restore_name = f"resume_verification_g{saved['training_steps']}_{restore_tag}.json"
         atomic_json(self.root/restore_name, restore_proof)
-        metadata = {key: saved[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration','enemy_rssm_resize') if key in saved}
+        metadata = {key: saved[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration',
+            'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration') if key in saved}
         self._drift_optimizer, self._drift_metadata = optimizer, metadata
         self.state.update(status='running', model_parameters=saved['run_state'].get('model_parameters'),
             frozen_assets_fingerprint=frozen, keep_awake={'system_required': True, 'display_required': False})

@@ -1996,6 +1996,823 @@ Evidence: [launch](training_runs/renderer_far_geometry_20261112/launch_command.j
 [fixed Source depth inventory](training_runs/renderer_objects_walls_20261112/diagnostics/wall_depth_inventory_256.json),
 [actual auxiliary-pool smoke](training_runs/renderer_objects_walls_20261112/diagnostics/far_wall_pool_smoke.json).
 
+## H56. Current NPR in the RSSM preview with an immutable v 2 chain
+
+The request to show the latest renderer in “What the model shows” now uses the
+completed v 6 NPR at phase 6000 / cumulative 22200, Base 21800, and the same SR best
+local 18100 / cumulative 38100. RSSM resumed in the same run from checkpoint 5322
+through a preview-only v 2 revision. Training image assets, the pure-XY objective,
+all 165 Adam histories, RNG, curriculum and the ten-consecutive-update gate are
+retained; architecture and training scope are unchanged. The open game keeps
+its own earlier snapshots.
+
+The revision chain retains the original plan (`40d075…`) and v 1 NPR 6600 revision
+(`7585e1…`); v 2 is `d7696988…`. The selected NPR file's actual SHA256 is
+`a23dab83c6bc9203a31e922046db57747bb5b4890eb13c576354f8577bde795f`.
+The preview uses a frozen clone with the current RSSM dynamics, rather than
+replacing training or game weights. Source future remains a comparison row,
+with no correction of the model's own states or memory.
+
+The independent before/after audit at the same 5322 boundary passed with zero SGD:
+all 1321 model tensors,165 Adam states, serialized RNG/PCGs and the entire
+`rssm_training` state match exactly, including EMA clocks and N10/H128/streak 0.
+All 22 old/new file pins were checked; only operational and preview metadata changed.
+
+Live HTTP and Node VM checks passed at RSSM 5325 / preview 5322: current H128,
+128 generated transitions, displayed offsets 1/43/86/128, five rows and cadence 10.
+The actual caption identifies NPR 22200 (phase 6000) / SR 38100. The served PNG is
+2048×2684 and visibly contains context, Source, Base+RF1, learned SR and bilinear
+rows. A deliberately stale other-H snapshot hides its image and displays the
+current-H waiting state. Full 450-transition validation remains separate, every 250
+updates. This verifies the displayed assets and UI behavior, not gameplay quality
+or successful completion of the current dynamics stage.
+
+Evidence: [immutable v 2 revision](training_runs/rssm_loss_gated_drift_20261112/preview_assets_revision_npr6000_v2.json),
+[selected frozen assets](training_runs/renderer_far_geometry_20261112/preview_final_006000/preview_assets_npr6000_sr18100.json),
+[same-run resume receipt](training_runs/rssm_loss_gated_drift_20261112/preview_revision_resumes/g5322_d76969889ef3/resume.json),
+[trainer restore verification](training_runs/rssm_loss_gated_drift_20261112/resume_verification_g5322_loss_gated_drift_v1.json),
+[independent same-step audit](training_runs/rssm_loss_gated_drift_20261112/preview_revision_resumes/g5322_d76969889ef3/preview_revision_resume_verification.json),
+[preview asset verification](training_runs/rssm_loss_gated_drift_20261112/updated_preview_assets_verification.json),
+[immutable first updated preview](training_runs/rssm_loss_gated_drift_20261112/preview_revision_resumes/g5322_d76969889ef3/preview_after.png).
+
+## H57. Shared sparse MoE and simultaneous three-task curriculum
+
+At the user's request, both retained RSSMs now exchange their previous memories
+through a shared two-block Transformer, three top-2 feed-forward experts and three
+specialized residual heads: player navigation, enemy motion and combat. The
+player and enemy memories remain2032+1600=3632 values, updated every tick.
+The new module adds3,118,099 parameters; dynamics total48,125,470.
+
+The old pure-XY worker stopped at a complete5352 boundary. A separate immutable
+archive and append-only migration preserve all1321 existing tensors, all165 Adam
+states/groups and serialized RNG/history; only64 new MoE parameter tensors have a
+fresh optimizer group. Zero heads initially reproduce the original function.
+Actual GPU checks of two held-out actors over16 own steps passed bitexactly in
+both argmax eval and stochastic train modes, including old logits, states,
+memories and ending RNG. The latest frozen NPR22200 / SR38100 clone also passed.
+
+The new run `rssm_moe_multitask_20261112` trains all three tasks in each64×4 update.
+TOTAL is Player+Enemy+Combat+0.01 role-CE+0.001 load balancing, with fixed explicit
+component weights and actual event/axis denominators, no EMA scaling or KL floor.
+Auxiliary navigation weight is0.1, late own-prefix weight0.25, TBPTT16. Actual
+TRAIN sampler checks passed forH4/8/16:16 spawn+16 positive attacks+16 eligible
+negative attacks+16 shooting-replay windows per microbatch; all eight spawn
+anchors and requested events fall inside the actual horizon.
+
+The31-stage ladder is4→8→16→32→48→…→432→448→450. A stage advances only after10
+consecutive complete optimizer updates with TOTAL<0.25; equality resets the
+streak. The next stage begins at0/10, and450 continues. No forced long update is
+inserted. Current-H free previews run every10 updates and full450 held-out
+validation every250. The dashboard gives this new phase precedence over retained
+inactive XY-only metadata and old H128 previews.
+
+Executed first updates:5353 TOTAL3.338475 (Player0.020221 / Enemy0.021814 /
+Combat3.292408),5354 TOTAL3.249267. All three specialized heads and both RSSMs had
+finite nonzero gradients. The shared experts also had nonzero gradients on the
+second update after zero heads opened their gradient path. These two rows do not
+establish convergence or improved gameplay; H4 remains at0/10.
+
+Evidence: [migration](training_runs/rssm_moe_multitask_20261112/checkpoints/moe_initial_g5352.pt.fusion.json),
+[real GPU comparison](training_runs/rssm_moe_multitask_20261112/fusion_zero_residual_gpu_probe.json),
+[immutable phase plan](training_runs/rssm_moe_multitask_20261112/moe_training_plan.json),
+[TRAIN sampling](training_runs/rssm_moe_multitask_20261112/sampler_preflight.json),
+[metrics](training_runs/rssm_moe_multitask_20261112/metrics.jsonl),
+[first-update audit](training_runs/rssm_moe_multitask_20261112/first_updates_verification.json).
+Controlled resume at5354 also passed:2075 compared tensors,229 Adam states,
+all saved model/optimizer/PCG/CPU+CUDA RNG checks bitexact. Active metadata now
+explicitly enables all three tasks; old disabled flags remain in phase history.
+
+## H58. Persistent20M combat RSSM, preserving the current curriculum
+
+The user requested a third RSSM for combat, first15M and then corrected to20M.
+The resulting branch has **20,007,020 parameters**, including its condition/readout
+networks,268 interaction outputs and a zero512→256 adapter into the existing MoE
+combat query. Its categorical memory is h1344+8×32=1600 FP32 values; the packed
+player/enemy/combat memory is2032+1600+1600=5232. It updates every tick, including
+empty, dead and offscreen enemy cases. Source RGB is used only for observed
+initialization/posterior. Current neural P/E readouts remain differentiable inputs;
+the shared Transformer reads previous combat memory through the new adapter.
+
+The new branch refines target, attack, spawn tile and spawn anchor logits. Shared
+structured_transition remains the only coordinate/HP/event state. Zero task heads
+and the zero adapter preserve existing behavior on activation. Its sampling is
+isolated with fork_rng so additional categorical draws do not shift the established
+P/E random stream. No private mutable RNG clock or extra attention token is added.
+
+The old worker stopped after complete update5437. The separate
+`rssm_combat20m_moe_20261112` migration preserved1386 existing tensors,229 Adam
+states/groups with mixed ages, serialized RNG, sampler ledgers and the complete
+MoE gate (85 completed updates, H4, streak0). Only48 newly added parameter tensors
+have a fresh Adam group. The original MoE plan remains pinned; a separate
+combat_memory_plan.json records the architecture addition without a horizon reset.
+
+Actual GPU no-SGD checks passed on two genuine Source actors, combat and no-enemy,
+over16 steps in argmax and stochastic train modes: all old result fields, old3632
+memory prefix and ending CPU/CUDA RNG match exactly. New memory changes every
+tick for both actors. Strict latest NPR22200/Base21800/SR38100 loading and native32
+→SR128 inference also passed. Eight module, eight backend, five migration and
+four continuation-gate CPU tests passed, alongside legacy regressions and83 UI tests.
+
+Training resumed at64×4. Update5438 TOTAL2.189206 trained the new task head and
+adapter; at5439 TOTAL2.067064 the deep combat core had finite nonzero gradient
+norm0.014764. At5440 TOTAL1.961224, the existing gate had advanced its update
+clock85→88 while remaining H4/0-of-10. These observations establish a working
+training path, not improved held-out combat or a qualified15-second game.
+
+The live HTTP/VM/PNG audit passed23 checks: measured20,007,020 parameters,
+5232 memory, three-RSSM phase label, fresh five-row H4 preview with NPR22200/SR38100,
+correct TOTAL arithmetic and stale-horizon image hiding. Validation remains every
+250 MoE updates, preview every10, with the same ten-consecutive-TOTAL<0.25 gate.
+
+Evidence: [architecture migration](training_runs/rssm_combat20m_moe_20261112/checkpoints/combat20m_initial.pt.combat-memory.json),
+[GPU probe](training_runs/rssm_combat20m_moe_20261112/combat_memory_gpu_probe.json),
+[continuation plan](training_runs/rssm_combat20m_moe_20261112/combat_memory_plan.json),
+[restore](training_runs/rssm_combat20m_moe_20261112/resume_verification.json),
+[live UI audit](training_runs/rssm_combat20m_moe_20261112/diagnostics/live_combat_ui_g5440_20261112T175746Z/proof.json).
+
+## H59. Restore late respawn supervision by aligning death-clock arithmetic
+
+The combat-loss audit on5438–5453 found spawn contributed68.9% of the mean and
+80.9% of the observed variation. A reproducible numerical boundary censored late
+labels: normalized death age4.9444441795 produced Torch3.0s but Source2.999999841s.
+Torch revived the slot before the conditional Source query accepted a birth.
+Across4096 selected auxiliary windows,1043 recorded births yielded only264 labels,
+all at offset1;779 later labels disappeared.
+
+The authorized fix introduces a shared death/respawn phase advance at30Hz. Only
+float32 representation error near a simulation phase is recovered at STEP time.
+Literal Game.set_state_vector, strict canonical2e-7 checking, numerical state
+inputs and own h/z remain untouched. Fire/attack/flash/hurt/global-time clocks are
+unchanged. Shared death readiness now covers structured_transition, learned and
+hierarchical spawn decoders, spawn-render loss and runtime invariants. Generic dt
+and genuinely off-grid states keep their documented fallback. Normal Source
+128-step replay remains bitexact in events, serialized states and32px RGB.
+
+Independent replay of exactly the same panel restored **1043/1043 labels**:
+offsets264/267/240/272, with exact birth times and anchor labels. All eight anchor
+cohorts now have128–135 events instead of25–41. Four coverage regressions, seven
+clock tests, Source interop tests and existing structured/spawn regressions passed.
+No new Source corpus was needed; existing data files were unchanged.
+
+The old worker stopped at complete5476. Its entire checkpoint was copied
+bitexactly into `rssm_respawn_timing_20261112`:1434 tensors,277 Adam states,
+serialized RNG, sampler ledgers and both existing phase clocks (MoE124,
+Combat39,H4/streak0). An immutable `--respawn-timing-plan` pins the corrected
+rule files; architecture/parameter counts,64×4, the ten-consecutive-TOTAL<0.25
+gate, preview10 and validation250 remain unchanged.
+
+The disposable GPU probe passed14 checks without SGD: real B64×H4 backward for
+contexts1/2 had finite nonzero P/E/Combat gradients; all550 legal conditional
+queries agreed on respawn, with positive labels at every offset.26 geometry
+queries were honestly excluded. Two own450 rollouts kept finite5232D memory and
+revived exactly at tick90. Strict NPR22200/SR38100 inference passed. This is not a
+held-out gameplay-quality pass; invalid own geometry remains a separate issue.
+
+Actual update5477 produced61 spawn labels at offsets14/21/16/10, with7–8 per
+anchor. At5479 the count was57 at15/16/16/10. Logs now record seven flat Combat
+contributions; the dashboard shows aggregate offset/anchor counts from all four
+microbatches and timing-revision identity.84 UI tests and29
+live HTTP/VM/PNG checks passed. Loss before/after this coverage correction uses
+different event sets; short-term raw changes do not establish better quality.
+
+Evidence: [original diagnosis](training_runs/rssm_combat20m_moe_20261112/diagnostics/loss_audit_20261112/respawn_clock_probe.json),
+[same-panel coverage](training_runs/rssm_combat20m_moe_20261112/diagnostics/loss_audit_20261112/respawn_revision_coverage.json),
+[timing plan](training_runs/rssm_respawn_timing_20261112/respawn_timing_plan.json),
+[GPU probe](training_runs/rssm_respawn_timing_20261112/diagnostics/respawn_timing_gpu_probe.json),
+[restore](training_runs/rssm_respawn_timing_20261112/resume_verification.json),
+[live UI](training_runs/rssm_respawn_timing_20261112/diagnostics/live_respawn_ui_g5479_20261112T184303Z/proof.json).
+
+## H60. Loss streak OR stage budget without resetting training
+
+The user added a per-stage time budget to the existing three-task curriculum.
+The separate immutable `rssm_moe_loss_or_stage_budget_v2` plan advances after
+**10 consecutive complete optimizer updates with strict TOTAL loss <0.25 OR
+`50 + 15*N` completed updates at that stage**, with zero-based N. The original
+objective plan, loss weights,64×4 batch, Source physics and frozen image assets
+remain unchanged. Final H450 continues; a budget advance does not qualify gameplay.
+
+The old worker stopped at5542. Its1434 model tensors,277 Adam states/groups and
+serialized RNG were copied and restored exactly into `rssm_moe_budget_20261112`.
+The existing190 H4 updates were retained: activation advanced exactly once at
+the saved5542 boundary to H8, N=1, cap65. No historical stage count was reset or
+invented. The new worker actually resumed; at5545 it had completed three H8
+updates. Monitoring remains **http://127.0.0.1:8765/**. Full450 validation is
+separate from stage progression; no new gameplay-quality pass is claimed.
+
+Evidence: [budget plan](training_runs/rssm_moe_budget_20261112/stage_budget_plan.json),
+[bitexact source copy](training_runs/rssm_moe_budget_20261112/preparation.json),
+[model/Adam/RNG restoration](training_runs/rssm_moe_budget_20261112/resume_verification.json),
+[actual launch](training_runs/rssm_moe_budget_20261112/launch_command.json),
+[completed-update log](training_runs/rssm_moe_budget_20261112/metrics.jsonl).
+
+## H61. RGB-only semantic SR on actual neural-renderer pairs
+
+The user requested learned restoration of blurry enemies, in parallel with
+dynamics. The completed dataset contains **9216 pairs:8192 TRAIN/1024 VAL**,
+with equal near/mid/far/guard cohorts. Each input is actual frozen NPR32 using
+world5510/NPR22200/E7; the target is true same-pose Source128, never resized LR.
+Source masks supervise loss only. Source seeds/render conditions are held out;
+the cache audit records four identical cross-split NPR inputs, so NPR-byte
+disjointness is not claimed.
+
+On the same1024-frame NPR panel, SR40100 improved over SR38100 in every distance
+band and was selected as parent. Its full matching checkpoint retained74 Adam
+states at step2000. The new **1,667,368-parameter** Semantic EDSR appends149,797
+parameters for RGB-only mask/presence and a softly gated HR residual; the zero
+RGB head preserves the parent function initially. No atlas or Source mask is
+inserted at inference. A real GPU audit verified matching parent weights/moments,
+zero-append RGB equality and two disposable SGD steps without changing sources.
+
+The actual SR worker runs in `sr_semantic_npr_20261112/training`, alongside
+RSSM. Batch8 uses6 NPR inputs and2 clean/codec guards. **Preview15, full validation100**
+are separate; live checks observed image updates615→630 while full metrics retained
+their own validation step. Progress: **http://127.0.0.1:8779/**.
+
+| Actual NPR foreground MAE, fixed VAL1024 | SR38100 | Parent40100 | Semantic step500 |
+|---|---:|---:|---:|
+| Near,256 frames | .12334 | .12152 | .11808 |
+| Mid,256 frames | .13604 | .13205 | .13021 |
+| Far,256 frames | .14033 | .13568 | .13341 |
+
+At VAL500, NPR mean SSIM was.779728 and MAE.032607. The auxiliary presence head
+still had false-positive rate1.0 on178 negative frames. Enemies remained blurry;
+RGB improvement is not demonstrated recognition. All quality goals remained
+false. The game, RSSM preview and active SR38100 were not replaced automatically.
+
+Evidence: [Source-pair audit](training_runs/sr_semantic_npr_20261112/source_pairs_verification.json),
+[actual NPR cache audit](training_runs/sr_semantic_npr_20261112/npr_cache_verification.json),
+[parent comparison](training_runs/sr_semantic_npr_20261112/preflight/baseline_comparison.json),
+[GPU/migration proof](training_runs/sr_semantic_npr_20261112/preflight/semantic_sr_gpu_preflight.json),
+[training plan](training_runs/sr_semantic_npr_20261112/training/training_plan.json),
+[actual launch](training_runs/sr_semantic_npr_20261112/training/launch_command.json),
+[VAL500](training_runs/sr_semantic_npr_20261112/training/validation/step_000500.json),
+[live preview/UI proof](training_runs/sr_semantic_npr_20261112/training/diagnostics/live_sr_ui_s600_20261112T195546Z/proof.json).
+
+## H62. Restore the SR training chart and measure validation loss
+
+The SR chart rejected saved rows because they used `objective_protocol` while
+the generic filter required `loss_protocol`. A strict semantic-SR adapter now
+accepts the matching rows, and the server samples the whole training history
+into at most300 points while retaining actual validation measurements. From
+step1900, validation computes the same weighted semantic objective on1024 held-out
+NPR inputs; training mixes6 NPR and2 clean/codec inputs. RGB MAE is separate.
+The controlled restart at1800 retained all102 model tensors and102 Adam states,
+RNG and sampler. Live step1955 showed train0.23336 and validation0.24891;
+preview15/validation100 and parallel dynamics continued. Validation loss for
+earlier steps is unavailable and is not inferred from image metrics.
+Evidence: [restart](training_runs/sr_semantic_npr_20261112/training/diagnostics/loss_chart_restart/resume_verification.json),
+[live chart](training_runs/sr_semantic_npr_20261112/training/diagnostics/live_loss_chart_s1955/proof.json).
+
+## H63. Learned enemy decoder with predicted RSSM proposals
+
+The user authorized a learned decoder conditioned on a predicted RSSM hypothesis.
+After parent semantic SR7500/cumulative47600 stopped, all102 old model tensors,
+Adam states and recorded RNG were retained. The new1,957,382-parameter model adds
+290,014 parameters/43 fresh tensors: learned canonical RGBA32 → bbox warp → HR
+visible mask, with RGB-only ROI confirmation before composition. No atlas or
+Source state/mask is an inference input. Zero gain preserves the parent image;
+unknown/invalid hypotheses retain RGB-only fallback. The GPU preflight passed,
+including three disposable SGD steps without modifying the initial checkpoint.
+
+The first worker ran in `sr_enemy_decoder_20261112/training`, alongside dynamics,
+at **http://127.0.0.1:8779/** with preview15/full validation100. Frozen world5570
+(`b2480e27…`) supplied state20+validbit sidecars for9216 pairs:6736 valid one-step
+past-frame priors and2480 unknowns. This bootstrap is not autonomous450 validation.
+The new sampler balances actual HR-visible/empty cases50:50;25% of predicted hints
+are permuted during training, while Source masks remain truthful loss labels.
+Runtime/model/data/integration tests passed. No quality or automatic deployment
+is claimed. It later stopped at400: VAL SSIM fell.7826→.1609, and a real diagnostic
+found old-EDSR gradient norm1.17e15. Its checkpoint/archive remain; H64 supersedes
+this training attempt. Evidence: [gradient diagnosis](training_runs/sr_enemy_decoder_20261112/diagnostics/gradient_instability_probe.json),
+[GPU proof](training_runs/sr_enemy_decoder_20261112/diagnostics/gpu_preflight.json),
+[hypothesis audit](training_runs/sr_enemy_decoder_20261112/hypotheses_verification.json),
+[actual launch](training_runs/sr_enemy_decoder_20261112/training/launch_command.json).
+
+## H64. Frozen-parent SR and predicted hit/death animation
+
+After the failed400-update run, the new stable profile starts from the good
+semantic7500/cumulative47600 parent. All102 old weights and Adam states/RNG are
+retained; old RGB and its shared classifier gates are frozen. Only47 new tensors
+train:290,854 parameters,1,958,222 total. A real GPU three-step proof kept every
+parent tensor/moment unchanged. The canonical decoder now receives seven animation
+classes from predicted RSSM state, with independent RGB visual-phase CE. Source
+animation labels supervise loss only; conflicting phases do not supervise canonical
+RGBA. No atlas is used.
+
+The actual worker is `sr_enemy_decoder_stable_20261112/training`, on
+**http://127.0.0.1:8779/**, with preview15/validation100 alongside unchanged dynamics.
+Sampling is50:50 actual visible/empty, balancing available phases within all three
+distances. Existing Source TRAIN hurt/death-start/death-late counts1323/162/355
+and VAL184/20/40 needed no new collection. At VAL100, SSIM.782579/MAE.0326466 matched
+the parent; confirmation recall/FPR0/0 does not establish recognition. No quality
+or deployment is claimed. Evidence: [actual GPU preservation proof](training_runs/sr_enemy_decoder_stable_20261112/diagnostics/gpu_preflight.json),
+[launch](training_runs/sr_enemy_decoder_stable_20261112/training/launch_command.json),
+[VAL100](training_runs/sr_enemy_decoder_stable_20261112/training/validation/step_000100.json).
+
+## H65. Fifty updates per stage without resetting training
+
+The active dynamics worker60312 is `rssm_moe_cap50_20261113`, continued from the
+complete5596 checkpoint with1434 tensors,277 Adam states and RNG preserved.
+The v3 policy is **10 consecutive strict TOTAL loss<0.25 OR50 updates per stage**,
+including final H450; its budget stop is `completed_budget`, not a quality pass.
+Historical H4=190/H8=54 counts remain. Activation advanced once to H16/0 without
+SGD or a clock reset. The old `50+15*N` policy remains in H60; the interim100
+request was never activated.
+
+Original objective,64×4 batch, Source physics, preview10 and full450 validation250
+are unchanged. Stable SR67708 continues separately; no quality or deployment is
+claimed. Evidence: [cap50 plan](training_runs/rssm_moe_cap50_20261113/stage_budget_plan.json),
+[activation preview](training_runs/rssm_moe_cap50_20261113/budget_activation_preview.json),
+[exact model/Adam/RNG restore](training_runs/rssm_moe_cap50_20261113/resume_verification.json),
+[actual launch](training_runs/rssm_moe_cap50_20261113/launch_command.json).
+
+## H66. RGB-first enemy SR with optional RSSM hints
+
+Worker52968 initially ran `sr_visual_first_20261113/training`, on8779, alongside cap50
+dynamics. Confident RGB chooses geometry, appearance and animation without an
+RSSM veto; hints assist only uncertain RGB-confirmed cases. The model has
+1,967,824 parameters,300,456 trainable. Stable5500/cumulative53100 supplied all149
+Adam states/RNG and the active44,000-draw sampler;9 new tensors add9,602 parameters.
+Three GPU updates preserved the102 frozen parent tensors. Source labels are loss
+targets only; no atlas is used.
+
+Hint training is50% dropped/25% wrong/25% retained, with75% actual NPR inputs and25%
+guards. Six-row with/no-hint previews run every15; validation every100 uses all1024
+held-out frames (845 visible/179 empty) in each hint mode. Initial no-hint detections0
+establish no quality; the open game's immutable weights remain unchanged. Evidence:
+[migration](training_runs/sr_visual_first_20261113/inputs/visual_first_initial.pt.visual-first.json),
+[GPU preflight](training_runs/sr_visual_first_20261113/diagnostics/gpu_preflight.json),
+[launch](training_runs/sr_visual_first_20261113/training/launch_command.json),
+[initial validation](training_runs/sr_visual_first_20261113/training/validation_initial.json).
+
+## H67. Twenty-five updates or five TOTAL-loss passes per stage
+
+The user replaced cap50 with a maximum of25 completed optimizer updates per
+horizon, or an earlier advance after five consecutive strict TOTAL losses<0.5.
+`rssm_moe_cap25_20261113` continues the same31-stage H4→H450 objective and64×4
+batch. Loss≥0.5 resets the new streak. The v4 policy is pinned separately from
+the unchanged MoE objective; older policies and their losses remain history.
+
+Activation at global5741 changed H48/45→H64/0 with **zero SGD updates**. The
+389-update objective clock,1434 model tensors,277 Adam states and serialized
+CPU/CUDA RNG were preserved. The restoration receipt compares2267 tensors
+across the saved model, optimizer and RNG payload. A fresh streak starts at0;
+previous loss values are not retrospectively judged by the new threshold.
+Final H450 stops at25 updates (`completed_budget`) or its five-loss streak
+(`completed_loss_gate`); neither is a450-transition gameplay-quality pass.
+Source labels remain targets only; persistent h/z and the frozen renderer are
+unchanged by this policy revision.
+
+The live HTTP/served-JS/PNG check at5741 passed22 checks: H64/0 over25,
+the389-update clock, prior H4=190/H8=54 history, a finite five-row H64 preview
+and pinned NPR22200/SR38100. Old-H48 images and stale budget pins are hidden.
+The first new SGD committed5742: H64/1, objective390, policy1. TOTAL loss was
+1.2074103928 and the finite world gradient norm17.15399; this does not pass the
+new loss threshold. The post-update UI check also passed22 checks.
+The full copied source checkpoint is available at
+`checkpoints/initial_before_cap25.pt`; later checkpoints continue training.
+Evidence: [immutable policy](training_runs/rssm_moe_cap25_20261113/stage_budget_plan.json),
+[activation](training_runs/rssm_moe_cap25_20261113/budget_activation_preview.json),
+[bitexact restore](training_runs/rssm_moe_cap25_20261113/resume_verification.json),
+[live UI](training_runs/rssm_moe_cap25_20261113/diagnostics/live_cap25_ui_g5741_20261113T045920Z/proof.json),
+[first new update](training_runs/rssm_moe_cap25_20261113/diagnostics/live_cap25_ui_g5742_20261113T050242Z/proof.json),
+[launch](training_runs/rssm_moe_cap25_20261113/launch_command.json).
+
+## H68. Raw RGBA restoration before gradual blending
+
+The fixed near/mid/far decoder figures at visual-first update43100 (cumulative
+96200) showed diffuse raw RGB, a coarse alpha silhouette and visual gain0.0136658.
+The explicit forced-gain1 diagnostic did not create sharp enemy detail. These
+are three fixed validation cases, not a complete quality evaluation:
+[raw RGB/alpha](training_runs/sr_visual_first_20261113/training/diagnostics/decoder_raw_s43100/raw_decoder.png),
+[actual and forced outputs](training_runs/sr_visual_first_20261113/training/diagnostics/decoder_raw_s43100/full_frames.png),
+[snapshot/case metadata](training_runs/sr_visual_first_20261113/training/diagnostics/decoder_raw_s43100/metadata.json).
+
+An explicit `decoder_restoration_sr_v3` phase was launched from that checkpoint
+in `sr_decoder_restoration_20261113/training`. No parameter tensor is added:
+the model remains158 tensors,1,967,824 parameters/300,456 trainable, with102 frozen
+parent tensors. The opt-in config records `enemy_decoder_restoration=True` and
+`restoration_blend_scale=0`. Existing visual-first and guided profiles remain separate.
+
+Raw RGB/alpha, SSIM, edges and raw composites receive losses before learned
+display gains and routing. Label crops and layer warps use the same detached
+actual predicted box; a tight Source visible bbox is not stretched across a
+larger prediction. Source foreground is premultiplied by its visible mask before
+area pooling to32×32, preventing wall/sky colors from contaminating partly
+covered foreground color targets. Source RGB, background and masks remain labels
+only. Detection and optional causal RSSM-hint supervision continue.
+
+The saved schedule keeps the layer contribution at0 for at least200 optimizer
+updates. On each complete fixed validation100, raw foreground MAE and raw edge
+MAE must both strictly improve over the initial report; empty/background errors
+must not worsen. Until this relative gate passes, standalone training continues.
+After passing,400 subsequent optimizer updates linearly raise the saved blend
+scale0→1. The checkpoint retains phase, scale, counters, initial-report identity
+and decisions; previews remain every15. This blend gate does not establish the
+overall SR thresholds or autonomous gameplay quality.
+
+At preparation,38 focused CPU tests passed. A7.016-second GPU preflight performed
+three disposable optimizer updates with finite RGB/alpha gradients, while all102
+frozen parent tensors/Adam states remained unchanged. All158 source model tensors
+and158 Adam states/options/order, serialized RNG and388,800 active sampler draws
+were preserved; no parameter was added. These disposable updates are not
+production training progress. Worker67500 launched with scale0, previews15 and
+validation100; automatic game deployment remains disabled. New image-quality
+improvement is not yet claimed. Evidence:
+[migration](training_runs/sr_decoder_restoration_20261113/inputs/restoration_initial.pt.restoration.json),
+[GPU preflight](training_runs/sr_decoder_restoration_20261113/diagnostics/gpu_preflight.json),
+[actual launch](training_runs/sr_decoder_restoration_20261113/training/launch_command.json).
+
+The actual HTTP/served-JS/PNG check at local200 with validation100 passed49 checks:
+standalone phase, saved scale0,200 train points/two real validation points,
+six full preview rows plus three ROI rows, and the separate raw-quality card.
+The initial-report SHA, panel and data identity match. On the same1024-frame
+panel, raw foreground MAE changed0.130125899→0.129576445 (−0.42%), raw foreground
+edge0.134333679→0.132599063 (−1.29%), empty0.003311620→0.000844258 and background
+0.003475664→0.002298815. These are before-gain raw metrics; foreground/edge use845
+Source-visible frames, empty179 and background1024. The report at100 did not meet
+the minimum200-update blend condition; the captured state still had scale0.
+Final RGB MAE remained0.032646591 across hint modes, so no displayed-image quality
+improvement is claimed. Evidence:
+[live UI](training_runs/sr_decoder_restoration_20261113/training/diagnostics/live_restoration_s200_20261113T051104Z/proof.json),
+[same-panel raw comparison](training_runs/sr_decoder_restoration_20261113/training/diagnostics/live_restoration_s200_20261113T051104Z/raw_delta_at100.json).
+Implementation:
+[raw objectives](turkeyworld/decoder_restoration_objectives.py),
+[persistent schedule](turkeyworld/decoder_restoration_protocol.py).
+
+## H69. Matched ROI PatchGAN and NoGAN control
+
+The user authorized a small conditional enemy-ROI PatchGAN with a fair trained
+NoGAN control. The launched `enemy_roi_patchgan_ab_v1` phase forks restoration
+update1830/cumulative98030 into identical generators with the same158 model/Adam
+states, RNG and sampler. NoGAN is a learning control, not a frozen ancestor.
+One shared query supplies row IDs, domain mix, NPR input and optional causal
+RSSM hint to both arms; a rolling batch-input ledger and equal generator-step
+counts make this comparison auditable. Both saved restoration blends are1.
+
+The separate spectral-normalized discriminator sees a detached NPR ROI condition
+and real/fake RGB+alpha on the same crop/canvas. Fake raw RGBA uses the actual
+predicted box before gain or routing. Source RGB/masks define real labels only;
+Source future is never a generator input. Existing RGB/alpha/geometry/edge
+reconstruction losses remain active. GAN weight is0 during100 warmup updates,
+then ramps over400 updates to at most0.01, with an additional0.1 gradient-ratio
+limit measured on the shared RGB/alpha readout. Invalid ROI batches may skip a
+discriminator step; their counts must not be invented as successful D updates.
+
+Evaluation uses the same1024 held-out frames for both arms, including near/mid/far,
+foreground, silhouette and empty-scene supports. The existing fixed panel also
+contains138 proven adjacent cached one-step causal NPR pairs. Temporal errors
+compare the predicted image change with the true Source change; they are not an
+autonomous neural-game video result. Missing pairs produce unknown metrics,
+not zero error. Reconstruction validation excludes GAN losses; generator total,
+adversarial, feature matching and D losses remain separate diagnostics.
+
+The dashboard requires matching plan/source/panel/data pins, equal arm
+steps and the appropriate batch ledger for the report's step. Four preview rows
+show Source128 / NPR32 / trained NoGAN / GAN on the same fixed cases. An older
+valid report may have an older ledger than current training; mismatched arm
+steps or panels are rejected.122 Node UI tests and six evaluator CPU tests
+passed. The7.38-second GPU preflight preserved all158 generator model/Adam states
+per arm, all parent RNG and403,440 active sampler draws from cumulative98030.
+The zero-weight probe produced bitexact generator weights/Adam in both arms;
+three forced0.01-weight disposable probes reached RGB/alpha with monitored gradient
+ratios below0.1. All102 frozen parent tensors remained unchanged in both arms.
+The206,889-parameter discriminator has a separate fresh Adam. These probes were
+discarded and are not production progress.
+
+Worker74080 launched `sr_patchgan_ab_20261113/training` on8779. The live
+HTTP/served-JS/PNG check at paired200/validation100 passed33 checks: GAN/NoGAN/D
+steps200, scheduled weight0.0025/effective0.0008850393, four-row preview195,
+1024 held-out images and138 temporal pairs. Both reconstruction curves were
+real and excluded GAN total/control losses. The prior warmup validation100 had
+equal arms; that equality is not evidence for a GAN advantage.
+
+The first active validation200 gave mixed observations on the same panel:
+
+| VAL200 metric | GAN | Matched NoGAN |
+|---|---:|---:|
+| ROI crop SSIM ↑ | 0.2735549345 | 0.2732015178 |
+| Image SSIM ↑ | 0.773789014 | 0.773723594 |
+| Silhouette IoU ↑ | 0.432603435 | 0.434478600 |
+| Source sharpness error ↓ | 0.11131582 | 0.11146029 |
+| Empty layer false-positive rate ↓ | 9/179 | 9/179 |
+| Temporal FG delta MAE ↓,137 foreground pairs | 0.134167705 | 0.134144908 |
+
+Image/ROI SSIM increased slightly, while silhouette and temporal foreground
+results worsened slightly. This snapshot establishes no overall GAN quality or
+autonomous-gameplay advantage. No automatic game promotion is enabled. Evidence:
+[full-state twin initialization](training_runs/sr_patchgan_ab_20261113/inputs/initial.pt.patchgan.json),
+[GPU preflight](training_runs/sr_patchgan_ab_20261113/diagnostics/gpu_preflight.json),
+[launch](training_runs/sr_patchgan_ab_20261113/training/launch_command.json),
+[live A/B page](training_runs/sr_patchgan_ab_20261113/training/diagnostics/live_patchgan_s200_20261113T055217Z/proof.json),
+[active validation200](training_runs/sr_patchgan_ab_20261113/training/validation/step_000200.json).
+Implementation:
+[conditional ROI discriminator](turkeyworld/sr_enemy_patchgan.py),
+[matched continuation protocol](turkeyworld/sr_patchgan_protocol.py),
+[paired image/temporal evaluation](turkeyworld/sr_patchgan_validation.py).
+
+## H70. Fixed-atlas enemy appearance with learned geometry and visibility
+
+The user authorized an explicit hybrid after the learned RGBA remained diffuse.
+The running `atlas_enemy_hybrid_sr_v1` profile uses
+`sr_atlas_enemy_20261113/training` on8779. Enemy appearance comes from the fixed atlas;
+the NN learns full sprite geometry, animation phase, occlusion and binary
+visibility. This is not a claim of learned enemy-pixel generation. The learned
+parent SR supplies the background and is separately frozen as a reference;
+there is no matched NoGAN or discriminator training in this phase.
+
+The generator has1,967,873 parameters,70,195 trainable. The158 inherited parameter
+tensors/Adam states are retained; only a49-parameter RGB HP0 head adds two parameter
+tensors. Unused learned paint modules remain frozen. The RGBA asset is embedded
+as a persistent uint8 buffer `[7,4,444,444]` plus native frame sizes. The original
+`assets/turkey_atlas.png` is1774×887, SHA
+`56bec622ff615462971de4d68c982a319c5928f069d6047b93eafd0c210b7ac6`.
+Its four-by-two Source cuts use rounded boundaries, so native frames vary443/444
+pixels; frames0–6 are used. Checkpoints pin the file and embedded-pixel hashes.
+Strict loading uses the embedded buffers without an external asset or game engine.
+
+The full box remains unclipped so offscreen sprites keep their UV coordinates;
+it is not the tight bbox of visible mask pixels. Native atlas pixels are warped
+directly to128, with a hard phase choice and hard forward visibility. Straight-
+through gradients train geometry, phase and mask. Source full boxes, phases,
+visible masks and RGB are labels only. Runtime uses actual NPR32 and an optional
+current predicted RSSM hint; it never asks Source for a future pose or render.
+
+The new dashboard separates full-bbox IoU/L1, phase accuracy, alpha/visibility
+IoU, empty composite false positives and image/temporal metrics with their support
+counts. Four preview rows are Source / NPR / frozen learned SR / Atlas SR. The
+new NN content-loss graph excludes the frozen reference's different objective
+and prior GAN losses.128 Node tests,20 local-server tests and32 focused/legacy CPU
+runtime tests passed. The server retains all actual weighted validation points
+and uniformly samples at most300 train points; MAE/reference/GAN losses cannot
+stand in for atlas validation loss.
+
+Worker40076 launched from stopped PatchGAN2900/cumulative100930, SHA
+`27405e2aac6323d6b7ebaa833ef3d52b81e56b3a4eeeb223e3febdb9b3497119`.
+Its7.75-second real GPU preflight verified158 inherited tensors/Adam states,
+all RNG/sampler state, three disposable optimizer steps, unchanged120 frozen
+tensors/Adam states and embedded atlas buffers. Only the new two-tensor HP0 head
+starts with fresh Adam. The production source and initial files remained unchanged.
+
+The archived live HTTP/served-JavaScript/PNG check passed37/37 at update420,
+validation400 and preview420. It verified1024 held-out images,138 adjacent cached
+NPR pairs, exact plan/source/data/panel pins, both measured loss curves and the
+four-row1024×1120 image. Preview cadence is15; full validation cadence is100.
+Initial→VAL100 weighted loss was0.817255→0.716567, bbox L1 error10.2171→6.7076px,
+visibility IoU0.345981→0.394582 and empty composite FPR0.078212→0.050279.
+Phase accuracy worsened0.272189→0.197633. The fixed sprite is sharp, but placement
+and occlusion remain imperfect; these observations do not qualify the hybrid.
+The existing game and seven pinned physics files remain untouched. Evidence:
+[GPU preflight](training_runs/sr_atlas_enemy_20261113/diagnostics/gpu_preflight.json),
+[launch](training_runs/sr_atlas_enemy_20261113/training/launch_command.json),
+[live page proof](training_runs/sr_atlas_enemy_20261113/training/diagnostics/live_atlas_s420_20261113T065824Z/proof.json),
+[VAL100](training_runs/sr_atlas_enemy_20261113/training/validation/step_000100.json).
+Implementation:
+[embedded-atlas model](turkeyworld/atlas_enemy_sr.py),
+[full-geometry/mask objectives](turkeyworld/atlas_enemy_objectives.py),
+[hybrid validation](turkeyworld/atlas_enemy_validation.py).
+
+## H71. All-depth wall geometry refinement with SR stopped
+
+The user stopped atlas SR at saved update5175 and requested NPR wall/corner
+repair. The stopped atlas archive remains on8779. Cap25 dynamics and the open
+game are independent; this renderer phase does not replace their pinned images.
+
+Worker12752 runs `renderer_wall_repair_20261113`, continuing the complete v6
+renderer from counter6000 to8000 under `one_enemy_all_depth_wall_geometry_renderer_v7`.
+Its preserved restart boundary is6001.
+The source SHA is `0f20f72e9c9353576cbbf2cde299d4acbf7c83170458f7d8466dc1d49d60ddbd`.
+No architecture or model parameters are added. All317 Adam states, Base/RF1,
+RNG, MAIN sampler and old far-wall sampler are retained; the new geometry
+sampler has its own TRAIN-only pool and draw clock. RSSM5152, map, E7 codec and
+SR remain frozen, so same-Source-pose comparisons isolate rendering errors.
+
+Each update keeps original MAIN16 and far-wall aux4 with weight0.25, and adds
+geometry aux8 with weight1. Its fixed8192-candidate pool balances near corners,
+mid corners, far thin walls and other far walls. All five disjoint depth bands
+(0–2,2–5,5–8,8–12,12+) receive present-only normalized wall RGB0.25, boundary0.3,
+edge0.2, corner0.2, thin-face0.2, thin-height0.1 and cross-boundary contrast0.2.
+Source map/poses/masks/RGB define labels only; no correction is returned to RSSM.
+
+The additional independent128-image geometry VAL panel is drawn from4096
+held-out candidates. Main256, native-area256 and distance192 guards remain.
+Validation cadence is100, native32 preview10. The page at8781 separates
+Base/RF1/codec empirical errors and actual support by depth on the main and
+geometry panels; absent regions are unmeasured. It does not treat codec as a
+proven quality limit or image improvements as autonomous gameplay qualification.
+
+The discarded5.2-second GPU backward probe passed with Base/RF1 gradient norms
+3.9795/1.4677, all317 Adam states unchanged and no production update in that probe.
+The worker has launched; preparing status and a completed probe alone do not
+establish training or quality improvement. Actual TRAIN inventory found2176 near,2176 mid,2176 far-thin
+and195 other-far candidates; the independent128 VAL has32 per stratum with camera
+quadrants balanced and no TRAIN overlap. No new Source collection was needed.
+The new page runs on8781;8779 remains the stopped SR archive. Evidence:
+[plan](training_runs/renderer_wall_repair_20261113/launch_plan.json),
+[discarded probe](training_runs/renderer_wall_repair_20261113/gpu_backward_probe.json).
+
+The initial worker30140 failed while generating the first lightweight wall
+preview: an NPC-oriented evaluator expected `foreground_mae` on all-empty wall
+queries. Durable6001 had already saved all317 Adam states, MAIN96016/far16004/
+geometry8 draws. Reported but unsaved6002–6009 metrics were archived and removed
+from the active curve; they are not claimed as retained updates. The resumed
+worker12752 loads6001 and a dedicated all-empty-safe renderer preview, without
+resetting the phase or optimizer. The new four columns are fixed near corners /
+mid corners / far thin / other far, and status/preview metadata pin their panel,
+Source indices and actual step. Old NPC preview is hidden until those pins match.
+The correction passed23 geometry CPU tests, including real Source/PNG cases;
+the existing focused regression suite passed51, and the UI passed132 Node tests.
+The failure and the original attempt remain in
+[diagnostics](training_runs/renderer_wall_repair_20261113/diagnostics/first_preview_failure).
+
+Actual HTTP/served-JavaScript VM/PNG proof passed34/34 at6191, VAL6100 and
+geometry preview6190. It verified the317-state adoption proof, actual auxiliary
+draws, both Source panels,30 model/depth rows, exact geometry columns and rejection
+of stale NPC images. The640×740 PNG was inspected: geometry is still visibly
+blurred and displaced. On the fixed main256 panel RF SSIM0.743642→0.753754 and
+MAE0.0339271→0.0335728 improved, but geometry-preservation and overall release
+gates remain false. This is early rendering evidence, not repaired-wall or
+dynamic/gameplay qualification. See [live proof](training_runs/renderer_wall_repair_20261113/diagnostics/live_geometry_g6191_20261113T080253Z/proof.json)
+and [VAL6100](training_runs/renderer_wall_repair_20261113/validation/step_006100.json).
+
+## H72. Atlas SR in dynamics preview and separate navigation diagnosis
+
+The user requested the new upscaler in the active dynamics display. The stopped
+Atlas5175/cumulative106105 checkpoint was exported without optimizer/RNG/sampler
+state, retaining its strict embedded atlas and lineage. Its source SHA is
+`3aebf58b1122f04c89a1e25f077b600d86673d717ea137b46a6279a26e105d4a`;
+the immutable play/preview export SHA is
+`6e90c520acdfd22162d5ca6b068fe9ebb54bc55527727fbe7d291fb455baf550`.
+SR training remains stopped at5175 on8779. V7 NPR wall refinement continues
+separately on8781; the display retains NPR22200/phase6000, not the new candidate.
+
+An explicit SR-only v2 descendant pins the new export and preserves the NPR
+entry exactly. The preceding SR38100 plan/revision remain in the verified chain.
+Only `--preview-assets-revision-plan` changed when dynamics resumed as worker8872
+at the same5797 boundary. Independent before/after checkpoint verification found
+all world tensors,277 Adam states/options, RNG, source samplers, immutable training
+protocol and MoE gate identical before any SGD. H96, MoE445, stage index7 and
+stage-updates6 were preserved. No architecture/loss/curriculum reset occurred.
+
+All12 preview-assets CPU tests passed, including strict self-contained Atlas
+loading with Source rendering and external atlas loading forbidden. The existing
+SR preview call supplies only generated NPR RGB; optional hypothesis is None,
+explicitly `atlas_hypothesis_source='none_RGB_only'` in the selected SR metadata.
+No future Source pose/mask/image is an SR input or world correction. Actual8765
+HTTP/served-JavaScript VM/PNG proof passed23/23 at5797: H96/context2, offsets
+1/33/64/96, five rows, NPR22200 and SR106105. The open game was not replaced,
+and this display update does not establish quality qualification. Evidence:
+[export](training_runs/rssm_moe_cap25_20261113/preview_assets/atlas_sr_106105_export.json),
+[revision](training_runs/rssm_moe_cap25_20261113/preview_assets_revision_atlas_sr106105_v2.json),
+[same-step restoration](training_runs/rssm_moe_cap25_20261113/atlas_sr_preview_resume_verification.json),
+[actual page proof](training_runs/rssm_moe_cap25_20261113/diagnostics/live_atlas_preview_g5797_20261113T081002Z/proof.json).
+
+A separate read-only navigation audit compared the same16 no-enemy450-step
+windows at5602 and5797. Mean final player XY improved0.5304→0.4446 tiles, while
+wall-interior state steps increased611→634; both remain unqualified. This does
+not prove a whole-navigation regression or establish forgetting as its cause.
+An additional comparison with5194 uses the same128 short/context1 cases and
+the same16×450 windows: false stops20/168→40/168, missed blocks5/40→4/40,
+final XY0.3421→0.4446 tiles, states inside walls440→634. Partial navigation
+regression relative to5194 is therefore measured. Missing no-enemy replay is
+confirmed in code; its causal role remains a hypothesis. The diagnostic report
+now retains the5194 source report and matching panel fingerprints.
+Combat-focused sampling still requires independent no-enemy checks.
+For the shown H96 case, offset64 had0.6284-tile player error; replacing only the
+player pose with Source for an offline renderer counterfactual raised SSIM
+0.4416→0.8628 with unchanged neural features. At offset33, even the full Source
+pose produced SSIM0.5728, exposing a separate NPR rendering limitation. Zeroing
+the128-dimensional features did not consistently repair the images. These
+counterfactuals are diagnostics only and never feed the training/runtime state.
+See [report](training_runs/diagnostics/navigation_latest_20261113_g5797/diagnostic_report.json)
+and [pose/feature panel](training_runs/diagnostics/navigation_latest_20261113_g5797/preview_pose_feature_counterfactual.png).
+
+## H73. Three-way MAIN replay and twenty updates per stage
+
+The user required at least15% navigation and25% pure NPC movement in the
+effective MAIN batch. Each64-example micro now runs38 combat,16 NPC motion and10
+no-enemy navigation actors. Four micros give152/64/40 of256:59.375%/25%/15.625%.
+Combat AUX64/micro and late-prefix8/micro remain separate (256/32 actors per
+optimizer update). They are not included in the MAIN-share denominator.
+
+The original combat draw clock is preserved:64 source indices are reserved per
+micro,38 are used and26 discarded. The104 discarded indices per full update
+are RNG bookkeeping, not additional training examples. Navigation has its own
+Source sampler and own-h/z rollout at the same H/context/latent mode, with no
+combat Source queries or future RGB inputs. NPC-motion Source data uses the
+original engine/policy,64 TRAIN/16 VAL episodes with452 frames and no shooting;
+continuous-life movement labels remain Source-only targets. Actor means have
+explicit fixed weights: navigation Player10/64, combat Player38/64; Enemy
+motion16/54 and combat38/54, excluding navigation from the NPC denominator.
+Router means retain their corresponding actor shares and the existing fixed
+role/balance weights. AUX/late loss weights remain unchanged.
+
+Worker72536 launched `rssm_moe_nav15_enemy25_cap20_20261113` from full5800, SHA
+`5991057b7d4df9601bc084e9c6b870936da1dd45502ffdc4a1a6041c12975f39`.
+The restore check compared2267 tensors across the saved model/optimizer objects,
+all277 Adam states and serialized RNG exactly. H96, stage-updates9 and MoE448
+were retained. The user's further cap20 override keeps5 strict TOTAL<0.5
+consecutive completed updates as the early gate, otherwise20 completed updates
+per stage. Prior stage histories keep their actual old limits; final H450 stops
+without implying quality. At first update5801 the actual MAIN counts were
+40/64/152, AUX256/late32, and reserved draws104. No main-horizon reset occurred.
+
+The138-test UI build accepts pinned cap20/cap25 policies separately and shows
+only current revision/step counts and weighted navigation/NPC losses. Actual8765
+HTTP/served-JavaScript VM/PNG proof passed27/27 at5802/H96. Atlas SR106105 and
+NPR22200 remain the inference preview assets. This establishes sampling and
+execution, not improved navigation/combat or sharper images. The Source-corpus
+inventory and data collection did not change physics or runtime feedback.
+Evidence: [launch](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/launch_command.json),
+[restore](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/resume_verification.json),
+[first actual update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/diagnostics/first_three_way_update_5801.json),
+[live page](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/diagnostics/live_three_way_g5802_20261113T084627Z/proof.json),
+[NPC Source manifest](training_runs/rssm_enemy_motion_20261113/data/manifest.json),
+[prior corpus inventory](training_runs/diagnostics/npc_motion_corpus_inventory_20261113.json).
+
+## H74. Private renderer opacity and joint depth/RGB calibration
+
+The user showed sharp Source walls versus rounded Base/RF at the same GT pose.
+The audit found no camera-axis/FOV defect: normalized XY, sin/cos heading,
+68degree FOV and forward-depth convention match Source. The renderer's frozen
+CameraGeometry compresses32 columns×64 bilinear map samples into soft ray tokens.
+Its learned depth was nearly constant: within-frame column standard deviation
+0.051 versus Source1.506, with1.925-tile MAE on3762 exposed columns of the fixed128
+panel. These measurements expose a learned conditioning failure, separate from
+the RSSM pose drift. Depth, final RGB and autonomous gameplay remain distinct.
+
+V8 adds a private copy of the original193→32→1 opacity MLP under
+`flow_renderer.geometry_opacity`:6241 parameters/four tensors. Activation is
+function-preserving, including Base/RF RGB and RNG. The original shared
+geometry/map/RSSM is untouched. Only renderer `render_geometry` uses the copy;
+dynamics' geometry path remains unchanged. Runtime still samples learned map
+features; exact Source DDA intersections are detached training/validation labels,
+never runtime conditions or shaders. Compact Base remains996844, RF including
+the copy6998433, and frozen E7 codec997539. Full-world construction has an explicit
+default-false flag; strict renderer export/load binds the private SHA to its Base
+bundle and rejects missing/tampered modules or a standalone mismatched Base.
+
+Direct first-surface NLL labels the hit and all free-prefix samples, with0.1
+log-depth and0.05 clipped projected-height terms, balanced over present Source
+depth bands. A500-update private-only discarded pilot reduced depth MAE
+2.03208→0.28756 but RF SSIM collapsed0.77317→0.41312 on the same128 cases.
+Its Base/RF were frozen and its weights were discarded. It demonstrates that
+calibrated depth alone can invalidate the old learned image readout, not that
+wall RGB quality was solved.
+
+Production worker46212 instead started a fresh exact copy of completed v7/8000,
+SHA `6048bfa0227eef2e4cf76d5556853602f45d3a1a3d6b307200212a2ad69e3b41`, in
+`renderer_private_geometry_20261113`, target10000. Base/RF retain LR1e-4, private
+LR is5e-5, and direct-depth weight ramps0→1 over500 completed updates. MAIN16,
+far aux4×0.25 and geometry aux8×1 keep all three existing Source sampler clocks.
+All317 old Adam states/options and RNG were preserved; only four new tensors
+start with fresh Adam (321 states after SGD). No pilot weights were adopted.
+The33-second real GPU preflight verified zero-activation RGB equality, all three
+actual samplers, source/RNG preservation and finite gradients at first/max depth
+weights. Focused CPU tests independently cover private-only and Base-RGB gradient
+paths, original-world/Source-gradient isolation, strict full-world and paired
+bundle roundtrips, tamper rejection and legacy behavior. The UI suite passed138.
+
+At the first joint VAL8100, conditioning depth MAE improved2.03208→1.57261 and
+projected-height MAE9.39159→6.45530px over all4096 rays/128 cases. However, main256
+Base SSIM worsened0.74545→0.72376 and RF SSIM0.75799→0.73225; RF MAE increased
+0.032807→0.036869. Geometry preservation and release gates remain false. The
+actual PNG still shows rounded/displaced walls. No repaired-image/gameplay claim
+or automatic preview/game promotion follows from the improved depth loss.
+The8781 HTTP/served-JavaScript VM/PNG proof passed27/27 at8105/VAL8100/preview8100,
+including private counts/LR/current ramp, both RGB/depth tables and stale-v7
+rejection. Dynamics72536 and Atlas SR106105 preview continue independently.
+The next VAL8200 still did not qualify: depth MAE reached1.2391 tiles, while
+RF SSIM0.72661 and MAE0.038584 remained worse than the0.75799/0.032807 baseline.
+The user-visible task remains in progress; smaller depth error is not sharper RGB.
+Evidence: [frozen-depth audit](training_runs/diagnostics/geometry_opacity_audit_20261113/depth_audit.json),
+[discarded pilot](training_runs/renderer_private_geometry_20261113/pilot/pilot_report.json),
+[GPU preflight](training_runs/renderer_private_geometry_20261113/gpu_preflight.json),
+[launch](training_runs/renderer_private_geometry_20261113/launch_command.json),
+[VAL8100](training_runs/renderer_private_geometry_20261113/validation/step_008100.json),
+[actual page proof](training_runs/renderer_private_geometry_20261113/diagnostics/live_private_geometry_g8105_20261113T085424Z/proof.json).
+
+## H75. User-requested latest private-geometry paired game
+
+The user explicitly requested the latest neural game. Immutable session
+`training_runs/paired_latest_20261113_private_geometry` combines dynamics5805,
+raw private-NPR8480 (RF cumulative24680/Base24280, private6241 parameters),
+frozen E7 codec and Atlas SR106105/local5175. The NAV5152 renderer profile was
+strictly rebound to combat with tensor-identical worlds, then strictly loaded
+on the latest three-RSSM/MoE world through its preserved migration lineage.
+All Base/RF/private/codec tensors match the export; world tensors are unchanged.
+
+Two actual GPU smoke steps in each of navigation/combat passed. The requested
+visible paired window launched as PID40072, Source left/neural right, autonomous
+combat, display-size1024; its launch check recorded93/450 updates and empty
+stderr. `training_runs/latest_play_session.json` selects this session. Dynamics
+and NPR training continue independently; the open game uses fixed snapshots.
+This is a user-requested latest-weight experiment, not a quality or15-second
+gameplay pass. Evidence:
+[export/rebind proof](training_runs/paired_latest_20261113_private_geometry/export_verification.json),
+[profile proof](training_runs/paired_latest_20261113_private_geometry/renderer_profile_rebind.json),
+[runtime smoke](training_runs/paired_latest_20261113_private_geometry/runtime_smoke_verification.json).
+
 ## Changes to goals, batches and data units
 
 | What changed | Chat sequence / outcome |

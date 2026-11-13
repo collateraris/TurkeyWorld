@@ -56,6 +56,63 @@ class PreviewClient(nn.Module):
 
 
 class StagePreviewTests(unittest.TestCase):
+    def test_moe_active_31_stage_gate_overrides_historical_xy_gate_and_old_combat_clock(self):
+        from turkeyworld.rssm_moe_protocol import MOE_HORIZONS
+        self.assertEqual(len(MOE_HORIZONS),31)
+        state={'rssm_training':{'combat_completed':999,
+            'loss_gated_curriculum':{'current_horizon':128,'sha256':'historical'},
+            'moe_training':{'current_horizon':4,'stage_index':0,'updates':0,'sha256':'moe'}}}
+        for index,horizon in enumerate(MOE_HORIZONS):
+            state['rssm_training']['moe_training'].update(current_horizon=horizon,stage_index=index)
+            spec=stage_preview_spec(state)
+            self.assertEqual(spec['horizon'],horizon);self.assertEqual(spec['plan_sha256'],'moe')
+            self.assertEqual(spec['context'],1)
+            self.assertEqual(spec['display_offsets'][0],1);self.assertEqual(spec['display_offsets'][-1],horizon)
+            self.assertEqual(len(set(spec['display_offsets'])),4)
+        state['rssm_training']['moe_training'].update(current_horizon=8,updates=16)
+        self.assertEqual(stage_preview_spec(state)['context'],2)
+        for horizon in (True,12,24,451):
+            state['rssm_training']['moe_training']['current_horizon']=horizon
+            with self.assertRaises(ValueError):stage_preview_spec(state)
+
+    def test_moe_h4_h8_h48_full_own_rollout_and_actual_four_offsets(self):
+        for horizon in (4,8,48):
+            spec=stage_preview_spec({'rssm_training':{'moe_training':
+                {'current_horizon':horizon,'updates':0,'sha256':'moe','stage_index':0}}})
+            data,client=PreviewData(),PreviewClient()
+            generated,source=generate_stage_preview(client,stage_preview_batch(data,spec),spec)
+            self.assertEqual(len(client.calls),horizon)
+            self.assertEqual(client.render_offsets,spec['display_offsets'])
+            self.assertEqual(generated.shape,(4,3,32,32));self.assertEqual(source.shape,generated.shape)
+
+    def test_trainer_moe_metadata_uses_current_plan_without_reusing_historical_xy_gate(self):
+        with tempfile.TemporaryDirectory()as folder:
+            trainer=RSSMTraining.__new__(RSSMTraining)
+            trainer.root=Path(folder);trainer.device=torch.device('cpu');trainer.rng=np.random.default_rng(17)
+            trainer.args=SimpleNamespace(preview_assets_plan='pinned',renderer_checkpoint='old.pt',sr='old_sr.pt')
+            trainer.preview_model=PreviewClient();trainer.long_val=PreviewData()
+            trainer.sr=nn.Identity();trainer.sr_metadata={'training_steps':38100}
+            trainer._preview_renderer_checkpoint='latest6000.pt';trainer._preview_sr_checkpoint='sr38100.pt'
+            trainer.state={'global_training_step':5350,'rssm_training':{'phase':'moe','combat_completed':999,
+                'loss_gated_curriculum':{'current_horizon':128,'sha256':'historical'},
+                'moe_training':{'current_horizon':4,'updates':0,'stage_index':0,'sha256':'moe'}}}
+            trainer.publish=lambda:None
+            pinned={'renderer_refinement_updates':6000,'renderer_training_steps':22200,'sr_training_steps':38100}
+            saved=[]
+            def save(preview,*args,**kwargs):saved.append(preview);return preview['metadata']
+            source=nn.Linear(2,2);rng=torch.get_rng_state().clone()
+            with patch.object(trainer,'initialize_preview_assets',return_value=pinned),\
+                 patch('turkeyworld.vjepa_validation.save_autoregressive_preview',side_effect=save):
+                trainer.preview(source)
+            metadata=saved[0]['metadata']
+            self.assertEqual(metadata['horizon'],4);self.assertEqual(metadata['generated_rollout_transitions'],4)
+            self.assertEqual(metadata['display_offsets'],[1,2,3,4]);self.assertEqual(metadata['context'],1)
+            self.assertEqual(metadata['moe_training_plan_sha256'],'moe')
+            self.assertIsNone(metadata['loss_gated_curriculum_plan_sha256'])
+            self.assertEqual(metadata['preview_assets'],pinned)
+            self.assertIn('NPR 22200 (phase 6000)',metadata['caption'])
+            self.assertTrue(torch.equal(torch.get_rng_state(),rng))
+
     def test_active_stage_overrides_old_replay_next_horizon_and_preserves_context_policy(self):
         self.assertEqual(stage_preview_spec({'rssm_training': {}})['horizon'], 4)
         state = {'rssm_training': {'combat_completed': 16,

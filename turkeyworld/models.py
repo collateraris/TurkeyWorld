@@ -81,6 +81,7 @@ class WorldModelConfig:
     game_training_v5: bool = False
     flow_patch_size: int = 4
     flow_block_conditioning: bool = False
+    flow_geometry_opacity_enabled: bool = False
     rssm_deter_dim: int = 1008
     rssm_hidden_dim: int = 1024
     rssm_stoch: int = 32
@@ -101,8 +102,61 @@ class WorldModelConfig:
     enemy_rssm_action_dim: int = 128
     enemy_rssm_blocks: int = 4
     enemy_rssm_unimix: float = .01
+    rssm_fusion_moe_enabled: bool = False
+    rssm_fusion_moe_width: int = 256
+    rssm_fusion_moe_depth: int = 2
+    rssm_fusion_moe_heads: int = 4
+    rssm_fusion_moe_expert_hidden: int = 512
+    rssm_fusion_moe_experts: int = 3
+    rssm_fusion_moe_top_k: int = 2
+    rssm_fusion_moe_role_bias: float = 2.
+    combat_rssm_enabled: bool = False
+    combat_rssm_deter_dim: int = 1344
+    combat_rssm_hidden_dim: int = 1392
+    combat_rssm_stoch: int = 8
+    combat_rssm_classes: int = 32
+    combat_rssm_embed_dim: int = 128
+    combat_rssm_action_dim: int = 128
+    combat_rssm_blocks: int = 4
+    combat_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if type(self.flow_geometry_opacity_enabled) is not bool:
+            raise ValueError('Private renderer opacity flag must be a boolean')
+        if self.flow_geometry_opacity_enabled and (self.architecture not in {'vjepa2_ac','dreamer_rssm'}
+                or self.image_size != 32 or self.renderer_codec != 'vqgan'
+                or self.renderer_mode != 'rectified_flow' or self.flow_kind != 'student' or self.flow_steps != 1):
+            raise ValueError('Private geometry opacity requires native32 one-step latent student rendering')
+        if (type(self.combat_rssm_enabled) is not bool
+                or any(type(value) is not int or value < 1 for value in
+                       (self.combat_rssm_deter_dim, self.combat_rssm_hidden_dim,
+                        self.combat_rssm_stoch, self.combat_rssm_classes,
+                        self.combat_rssm_embed_dim, self.combat_rssm_action_dim,
+                        self.combat_rssm_blocks))
+                or self.combat_rssm_classes < 2 or self.combat_rssm_deter_dim % self.combat_rssm_blocks
+                or not isinstance(self.combat_rssm_unimix, (int, float))
+                or isinstance(self.combat_rssm_unimix, bool)
+                or not math.isfinite(self.combat_rssm_unimix) or not 0 <= self.combat_rssm_unimix < 1):
+            raise ValueError('Invalid persistent Combat RSSM configuration')
+        if self.combat_rssm_enabled and (self.architecture != 'dreamer_rssm'
+                or not self.enemy_rssm_enabled or not self.rssm_fusion_moe_enabled
+                or self.player_motion_mode != 'axis_fraction' or not self.spatial_entities
+                or not self.spatial_combat or not self.endless):
+            raise ValueError('Combat memory requires the existing dual spatial endless fusion RSSM game')
+        if (type(self.rssm_fusion_moe_enabled) is not bool
+                or any(type(value) is not int or value < 1 for value in
+                       (self.rssm_fusion_moe_width, self.rssm_fusion_moe_depth, self.rssm_fusion_moe_heads,
+                        self.rssm_fusion_moe_expert_hidden, self.rssm_fusion_moe_experts, self.rssm_fusion_moe_top_k))
+                or self.rssm_fusion_moe_width % self.rssm_fusion_moe_heads
+                or self.rssm_fusion_moe_experts != 3 or self.rssm_fusion_moe_top_k != 2
+                or not isinstance(self.rssm_fusion_moe_role_bias, (int, float))
+                or isinstance(self.rssm_fusion_moe_role_bias, bool)
+                or not math.isfinite(self.rssm_fusion_moe_role_bias) or self.rssm_fusion_moe_role_bias < 0):
+            raise ValueError('Invalid shared role-token RSSM MoE configuration')
+        if self.rssm_fusion_moe_enabled and (self.architecture != 'dreamer_rssm'
+                or not self.enemy_rssm_enabled or self.player_motion_mode != 'axis_fraction'
+                or not self.spatial_entities or not self.spatial_combat or not self.endless):
+            raise ValueError('Shared fusion MoE requires the existing dual spatial endless RSSM game')
         if (not isinstance(self.enemy_rssm_enabled,bool)
                 or any(type(value)is not int or value<1 for value in
                     (self.enemy_rssm_deter_dim,self.enemy_rssm_hidden_dim,self.enemy_rssm_stoch,
@@ -337,10 +391,16 @@ class NeuralWorldModel(nn.Module):
         if self.config.architecture == 'dreamer_rssm':
             from .rssm_world_backend import RSSMWorldBackend
             self.vjepa_backend = RSSMWorldBackend(self.config)
+            if self.config.flow_geometry_opacity_enabled:
+                from .renderer_geometry_opacity import enable_geometry_opacity
+                enable_geometry_opacity(self)
             return
         if self.config.architecture == 'vjepa2_ac':
             from .vjepa2_ac import VJEPA2ACWorldBackend
             self.vjepa_backend = VJEPA2ACWorldBackend(self.config)
+            if self.config.flow_geometry_opacity_enabled:
+                from .renderer_geometry_opacity import enable_geometry_opacity
+                enable_geometry_opacity(self)
             return
         if self.config.architecture == "camera_transformer":
             from .transformer_model import CameraTransformerWorldModel
@@ -473,7 +533,7 @@ class NeuralWorldModel(nn.Module):
 
     def render_base(self, state, features, map_features):
         if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'} and hasattr(self, 'base_student'):
-            geometry = self.vjepa_backend.geometry(state, map_features)
+            geometry = self.render_geometry(state, map_features)
             return self.base_student(state, features, geometry)
         if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.render_with_aux(state, features, map_features)['rgb']
@@ -501,7 +561,7 @@ class NeuralWorldModel(nn.Module):
     def render_base_with_residual(self, state, features, map_features):
         if (self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}
                 and hasattr(self, 'base_student') and getattr(self.base_student.config, 'pixel_residual', False)):
-            geometry = self.vjepa_backend.geometry(state, map_features)
+            geometry = self.render_geometry(state, map_features)
             return self.base_student.forward_with_residual(state, features, geometry)
         return self.render_base(state, features, map_features), None
 
@@ -526,6 +586,19 @@ class NeuralWorldModel(nn.Module):
             result = {**result, "base_rgb": result["rgb"],
                       "rgb": apply_pixel_residual(self.flow_renderer.sample(result["rgb"], condition), residual)}
         return result
+
+    def render_geometry(self, state, map_features):
+        """Rendering alone may use calibrated private opacity; prior geometry does not."""
+        opacity = getattr(getattr(self, 'flow_renderer', None), 'geometry_opacity', None)
+        if self.config.flow_geometry_opacity_enabled != (opacity is not None):
+            raise ValueError('Private renderer opacity module and explicit configuration flag differ')
+        binding = getattr(self, 'base_student_bundle', {}).get('geometry_opacity_binding')
+        if binding is not None and opacity is None:
+            raise ValueError('Compact Base cannot render without its bound private opacity')
+        if opacity is None:
+            return self.geometry(state, map_features)
+        from .renderer_geometry_opacity import shared_camera_geometry
+        return shared_camera_geometry(self)(state, map_features, opacity_override=opacity)
 
     def geometry(self, state, map_features):
         """Camera-conditioned learned auxiliaries; legacy renderer has none."""
@@ -652,6 +725,19 @@ def build_upscaler(config=None, **overrides):
     architecture = values.pop('architecture', 'separable')
     if architecture == 'edsr':
         return EDSRUpscaler(**values)
+    if architecture == 'semantic_edsr':
+        from .semantic_sr import SemanticEDSRUpscaler
+        return SemanticEDSRUpscaler(**values)
+    if architecture == 'enemy_decoder_edsr':
+        from .enemy_decoder_sr import EnemyDecoderEDSRUpscaler
+        if values.get('enemy_decoder_restoration') and 'restoration_blend_scale'not in values:
+            raise ValueError('Saved restoration SR must declare its actual blend scale')
+        return EnemyDecoderEDSRUpscaler(**values)
+    if architecture == 'atlas_enemy_edsr':
+        from .atlas_enemy_sr import AtlasEnemyEDSRUpscaler
+        if 'restoration_blend_scale'not in values:
+            raise ValueError('Saved atlas SR must declare its actual blend scale')
+        return AtlasEnemyEDSRUpscaler(**values)
     if architecture in ('separable', 'legacy'):
         return SingleFrameUpscaler(**values)
     raise ValueError(f'Unknown SR architecture: {architecture}')
@@ -669,6 +755,10 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
             if getattr(backend,'enemy_rssm',None)is not None:
                 parts['enemy_rssm'] = sum(p.numel()for p in backend.enemy_rssm.parameters())
                 parts['player_rssm_core'] = parts['rssm_core']
+            if getattr(backend, 'fusion_moe', None) is not None:
+                parts['rssm_fusion_moe'] = sum(p.numel() for p in backend.fusion_moe.parameters())
+            if getattr(backend, 'combat_rssm', None) is not None:
+                parts['combat_rssm'] = sum(p.numel() for p in backend.combat_rssm.parameters())
         elif model.config.architecture == 'vjepa2_ac':
             parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
@@ -728,6 +818,14 @@ def load_world_checkpoint(path, device="cpu"):
     model.rssm_migration = checkpoint.get('rssm_migration')
     model.dual_rssm_migration = checkpoint.get('dual_rssm_migration')
     model.enemy_rssm_resize = checkpoint.get('enemy_rssm_resize')
+    model.rssm_fusion_migration = checkpoint.get('rssm_fusion_migration')
+    model.combat_rssm_migration = checkpoint.get('combat_rssm_migration')
+    if model.config.rssm_fusion_moe_enabled:
+        from .renderer_student import validate_fusion_renderer_lineage
+        validate_fusion_renderer_lineage(model, checkpoint['config'])
+    if model.config.combat_rssm_enabled:
+        from .renderer_student import validate_combat_renderer_lineage
+        validate_combat_renderer_lineage(model, checkpoint['config'])
     return model.eval(), checkpoint
 
 

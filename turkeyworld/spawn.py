@@ -74,6 +74,7 @@ def decode_spawn_positions(logits, previous, walkable, dt, *, deterministic=Fals
     """
     import torch
     from .structured_state import DEATH_DURATION, ENTITY_SLOTS, MAP_EXTENT, RESPAWN_DELAY
+    from .simulation_clock import normalized_timer_ready
 
     # Selection is a discrete, disclosed rule in both modes, never a gradient
     # path. Detach once so source-only users need no PyTorch import at all.
@@ -89,7 +90,8 @@ def decode_spawn_positions(logits, previous, walkable, dt, *, deterministic=Fals
         raise ValueError("encode the matching initialization map before spawning")
     old = previous[:, 8:-2].reshape(batch, ENTITY_SLOTS, 10)
     alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
-    ready = (~alive & (old[:, :, 8] * DEATH_DURATION + dt >= RESPAWN_DELAY - 1e-6)
+    ready = (~alive & normalized_timer_ready(old[:, :, 8], duration=DEATH_DURATION,
+             dt=dt, increasing=True, deadline=RESPAWN_DELAY)
              & (previous[:, 4:5] > 0))
     positions = old[:, :, :2].clone()
     available = torch.zeros_like(alive)

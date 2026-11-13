@@ -17,6 +17,7 @@ from torch.nn import functional as F
 from .object_losses import object_region_weights, weighted_image_l1
 from .spawn import decode_spawn_positions
 from .structured_state import DEATH_DURATION, MAP_EXTENT, RESPAWN_DELAY
+from .simulation_clock import advance_normalized_timer, normalized_timer_ready
 
 
 def _walkable_batch(walkable, batch, device):
@@ -54,7 +55,8 @@ def spawn_positions_with_grad(logits, previous, walkable, dt):
     hard_positions, available = decode_spawn_positions(logits, previous, walkable, dt, deterministic=False)
     old = previous[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
     alive = (old[:, :, 5] >= .5) & (old[:, :, 4] > 0)
-    ready = (~alive & (old[:, :, 8]*DEATH_DURATION+dt >= RESPAWN_DELAY-1e-6)
+    ready = (~alive & normalized_timer_ready(old[:, :, 8], duration=DEATH_DURATION,
+             dt=dt, increasing=True, deadline=RESPAWN_DELAY)
              & (previous[:, 4:5] > 0))
     axis = (torch.arange(16, device=previous.device, dtype=previous.dtype)+.5)/MAP_EXTENT
     yy, xx = torch.meshgrid(axis, axis, indexing='ij')
@@ -182,7 +184,8 @@ def spawn_image_objective(model, payload):
     # No Source resurrection when the own decoder cannot legally place a slot.
     corpse = old_selected.clone()
     corpse[:, :, 4:6] = 0
-    corpse[:, :, 8] = (corpse[:, :, 8]+dt/DEATH_DURATION).clamp_max(RESPAWN_DELAY/DEATH_DURATION)
+    corpse[:, :, 8] = advance_normalized_timer(corpse[:, :, 8], duration=DEATH_DURATION,
+        dt=dt, increasing=True, maximum=RESPAWN_DELAY)
     fields = torch.where((changed & ~available)[:, :, None], corpse[:, :, 2:], target_selected[:, :, 2:])
     entities = torch.cat([xy, fields], -1)
     image_state = torch.cat([pose[:, :8], entities.flatten(1), pose[:, -2:]], -1)

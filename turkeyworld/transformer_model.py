@@ -134,13 +134,14 @@ class CameraGeometry(nn.Module):
         self.slot_embedding = nn.Parameter(torch.randn(ENTITY_SLOTS, width) * .02)
         self.visibility_head = nn.Sequential(nn.Linear(OBJECT_CAMERA_DIM + 2, 64), nn.SiLU(), nn.Linear(64, 1))
 
-    def forward(self, state, map_features):
+    def forward(self, state, map_features, *, opacity_override=None):
         samples = sample_camera_frustum(map_features, state, rays=RAY_COUNT,
                                         samples=RAY_SAMPLES, max_depth=MAX_DEPTH)
         sampled = samples["sampled"]
         depths = samples["forward_depths"].to(dtype=sampled.dtype)
         depth_channel = (depths / MAX_DEPTH)[None, None, :, None].expand(*sampled.shape[:3], 1)
-        alpha = self.opacity_network(torch.cat([sampled, depth_channel], -1)).squeeze(-1).sigmoid()
+        opacity = self.opacity_network if opacity_override is None else opacity_override
+        alpha = opacity(torch.cat([sampled, depth_channel], -1)).squeeze(-1).sigmoid()
         # Leaving a finite map is opaque. This is only a bounds prior; walls
         # inside the map are represented by learned alpha, never oracle hits.
         alpha = torch.where(samples["in_bounds"], alpha, torch.ones_like(alpha))

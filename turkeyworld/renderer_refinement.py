@@ -52,7 +52,12 @@ def causal_conditions(model, batch, *, context=1):
         prior = model.transition(current, controls, map_features, memory)
         features = prior['features'].detach()
         state = batch['target_states'][:, 0].to(device).float().detach()
-        geometry = {key: value.detach() for key, value in model.vjepa_backend.geometry(state, map_features).items()
+        private_opacity = getattr(model.flow_renderer, 'geometry_opacity', None)
+        if private_opacity is None:
+            geometry = {key: value.detach() for key, value in model.vjepa_backend.geometry(state, map_features).items()
+                        if torch.is_tensor(value)}
+    if private_opacity is not None:
+        geometry = {key:value for key,value in model.render_geometry(state.detach(),map_features.detach()).items()
                     if torch.is_tensor(value)}
     # The future image is a loss label, never an observed posterior input.
     target = batch['target_frames'][:, 0].to(device).float().detach()
@@ -147,9 +152,12 @@ def export_refined_bundle(source, working, directory, *, updates, report, initia
     base_path, renderer_path = directory/'base_student.pt', directory/'renderer_student.pt'
     base_metrics = {'source_validation': report, 'passed': report['passed'], 'refinement_updates': updates,
                     'criterion': 'Source RGB; previous imitation gate is not reused'}
+    from .renderer_geometry_opacity import geometry_opacity_metadata
+    opacity_binding = geometry_opacity_metadata(working.flow_renderer, source)
     export_base_student(source, working.base_student, base_path,
         training_steps=initial_base_steps+updates, metrics=base_metrics,
-        provenance={**provenance, 'refinement_updates': updates, 'initial_training_steps': initial_base_steps})
+        provenance={**provenance, 'refinement_updates': updates, 'initial_training_steps': initial_base_steps},
+        geometry_opacity_binding=opacity_binding)
     base_bundle = torch.load(base_path, map_location='cpu', weights_only=False)
     source.base_student = working.base_student
     source.base_student_bundle = base_bundle
