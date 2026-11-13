@@ -131,6 +131,8 @@ def interactive(pair, gui, args, pygame, screen, layout):
             'window_size': [layout['width'], layout['height']], 'panel_size': layout['panel'],
             'source_render_size': gui.source_size,
             'neural_display_chain': 'native32 -> learnedSR128 -> bilinear1024 -> fitted panel',
+            'renderer_solver_steps': getattr(getattr(pair.neural.model, 'flow_renderer', None), 'steps', None),
+            'renderer_solver_override': getattr(pair.neural, 'rf_solver_override', None),
             'one_keyboard_action_per_paired_tick': True, 'independent_source_clock': False,
             'catchup_steps': 0, 'trial_holds_after_completion': True,
             'updated_at': datetime.now(timezone.utc).isoformat(), **metrics}

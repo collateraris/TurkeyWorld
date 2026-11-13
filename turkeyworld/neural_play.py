@@ -35,6 +35,8 @@ def _arguments(argv=None):
     p.add_argument("--world", type=Path, required=True, help="World checkpoint produced by turkeyworld.train.")
     p.add_argument("--renderer-checkpoint", type=Path,
                    help="Optional RF renderer bundle; preserves teacher dynamics, validates source conditions and approved compact assets.")
+    p.add_argument("--rf-euler-steps", type=int,
+                   help="Override Euler steps for this playback only, after validated RF student loading.")
     p.add_argument("--base-checkpoint", type=Path,
                    help="Optional validated compact Base bundle; renderer bundles may also embed it automatically.")
     p.add_argument("--allow-unqualified-codec", action='store_true',
@@ -66,6 +68,8 @@ def _arguments(argv=None):
         a.display_size = 1024
     if a.steps < 0 or a.warmup < 0:
         p.error("--steps and --warmup must be non-negative")
+    if a.rf_euler_steps is not None and a.rf_euler_steps < 1:
+        p.error("--rf-euler-steps must be positive")
     if not math.isfinite(a.seconds) or a.seconds < 0:
         p.error("--seconds must be finite and non-negative")
     if a.display_size is not None and not 32 <= a.display_size <= 4096:
@@ -105,6 +109,26 @@ def _demo_action(t):
     if phase < 10:
         return [0.5, -0.25, -0.10, 1.0]
     return [0.0, 0.0, -0.7, 0.0]
+
+
+def configure_runtime_rf_steps(model, steps):
+    """Change sampling work after strict loading, preserving trained metadata.
+
+    This attribute is not a parameter or buffer. Checkpoint configurations and
+    their one-step MoE/Base bindings retain the original training contract.
+    """
+    if steps is None:
+        return None
+    if type(steps) is not int or steps < 1:
+        raise ValueError('Runtime RF Euler steps must be a positive integer')
+    flow = getattr(model, 'flow_renderer', None)
+    if (flow is None or flow.kind != 'student'
+            or getattr(flow, 'mode', None) != 'rectified_flow'):
+        raise ValueError('Runtime Euler override requires a loaded Rectified Flow student')
+    original = flow.steps
+    flow.steps = steps
+    return dict(kind='runtime_rf_euler_steps_v1', checkpoint_solver_steps=original,
+                solver='euler', solver_steps=steps, runtime_only=True)
 
 
 class NeuralRuntime:
@@ -151,6 +175,8 @@ class NeuralRuntime:
         self.sr, self.sr_metadata = (None, None)
         if args.sr is not None:
             self.sr, self.sr_metadata = load_sr_checkpoint(args.sr, self.device)
+        self.rf_solver_override = configure_runtime_rf_steps(
+            self.model, getattr(args, 'rf_euler_steps', None))
         if getattr(args, "two_stage_upscale", False):
             trained = self.sr_metadata.get("training_steps", 0)
             if (not isinstance(trained, (int, float)) or isinstance(trained, bool)
@@ -368,6 +394,7 @@ class NeuralRuntime:
             "renderer_training_steps": self.renderer_metadata.get('training_steps') if self.renderer_metadata else None,
             "renderer_solver": 'euler' if getattr(self.model, 'flow_renderer', None) is not None and self.model.flow_renderer.kind == 'student' else 'heun' if getattr(self.model, 'flow_renderer', None) is not None else None,
             "renderer_solver_steps": getattr(getattr(self.model, 'flow_renderer', None), 'steps', None),
+            "renderer_solver_override": getattr(self, 'rf_solver_override', None),
             "base_student_parameters": getattr(self.model, 'base_student_metadata', {}).get('head_parameters'),
             "base_student_training_steps": getattr(self.model, 'base_student_metadata', {}).get('training_steps'),
             "experimental_codec_preview": bool(self.renderer_metadata and self.renderer_metadata.get('experimental_preview') is True),

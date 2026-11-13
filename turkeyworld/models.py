@@ -115,6 +115,7 @@ class WorldModelConfig:
     rssm_fusion_moe_top_k: int = 2
     rssm_fusion_moe_role_bias: float = 2.
     rssm_five_role_enabled: bool = False
+    rssm_five_expanded_enabled: bool = False
     combat_rssm_enabled: bool = False
     combat_rssm_deter_dim: int = 1344
     combat_rssm_hidden_dim: int = 1392
@@ -126,6 +127,10 @@ class WorldModelConfig:
     combat_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if (type(self.rssm_five_expanded_enabled)is not bool or self.rssm_five_expanded_enabled and
+                (not self.rssm_five_role_enabled or self.rssm_fusion_moe_width!=256
+                 or self.rssm_fusion_moe_heads!=4 or self.rssm_fusion_moe_expert_hidden!=512)):
+            raise ValueError('Expanded dynamics experts require the existing five d256/heads4/FF512 roles')
         if (type(self.rssm_five_role_enabled) is not bool or self.rssm_five_role_enabled and
                 (self.architecture != 'dreamer_rssm' or not self.rssm_fusion_moe_enabled
                  or not self.combat_rssm_enabled)):
@@ -846,6 +851,7 @@ def load_world_checkpoint(path, device="cpu"):
     model.rssm_fusion_migration = checkpoint.get('rssm_fusion_migration')
     model.combat_rssm_migration = checkpoint.get('combat_rssm_migration')
     model.rssm_five_migration = checkpoint.get('rssm_five_migration')
+    model.rssm_five_expanded_migration = checkpoint.get('rssm_five_expanded_migration')
     if model.config.rssm_fusion_moe_enabled:
         from .renderer_student import validate_fusion_renderer_lineage
         validate_fusion_renderer_lineage(model, checkpoint['config'])

@@ -41,7 +41,14 @@ def restore_optimizer(model, saved):
     policy = configure_rssm_training(model)
     parameters = dict(model.named_parameters())
     canonical = [n for n, p in model.named_parameters() if p.requires_grad]
-    if names != canonical or not model.config.rssm_fusion_moe_enabled:
+    if getattr(model.config,'rssm_five_expanded_enabled',False):
+        report=saved.get('rssm_five_expanded_migration',{})
+        added=set(report.get('added_parameter_names',[]))
+        correct=(names==report.get('optimizer_parameter_names')and len(names)==len(canonical)
+            and set(names)==set(canonical)
+            and [n for n in canonical if n not in added]==[n for n in names if n not in added])
+    else:correct=names==canonical
+    if not correct or not model.config.rssm_fusion_moe_enabled:
         raise ValueError('MoE continuation requires the complete canonical migrated optimizer')
     groups = [{'params': [parameters[names[i]] for i in group['params']]}
               for group in saved['optimizer']['param_groups']]
@@ -131,6 +138,20 @@ class RSSMMoETraining(RSSMCombatTraining):
                 raise ValueError('Five-role status/training protocol pin is missing or changed')
             five_diagnostics = FiveRoleDiagnostics()
             model.vjepa_backend.five_role_fusion.register_forward_hook(five_diagnostics)
+        expanded_enabled=getattr(model.config,'rssm_five_expanded_enabled',False)
+        expanded_report=None
+        if expanded_enabled:
+            from .rssm_five_expanded_migration import bind_expanded_five_plan
+            expanded_report=saved['rssm_five_expanded_migration']
+            if expanded_report.get('revision_sha256')!=report_sha(expanded_report):
+                raise ValueError('Expanded dynamics migration pin changed')
+            expanded_path=getattr(args,'five_expanded_plan',None)
+            if expanded_path is None:raise ValueError('Expanded dynamics requires its explicit immutable revision plan')
+            bind_expanded_five_plan(self.state,json.loads(expanded_path.read_text(encoding='utf-8')),
+                path=expanded_path,sha256=_digest(expanded_path),report=expanded_report)
+            self.state['rssm_five_expanded_training']['current_step']=saved['training_steps']
+        elif getattr(args,'five_expanded_plan',None)is not None:
+            raise ValueError('An expansion plan cannot enable an unmigrated checkpoint')
         self.plan_sha = _digest(args.moe_plan)
         plan = json.loads(args.moe_plan.read_text(encoding='utf-8'))
         self.moe = bind_moe_training(self.state, plan, path=args.moe_plan,
@@ -217,7 +238,7 @@ class RSSMMoETraining(RSSMCombatTraining):
         optimizer, self._optimizer_parameter_names, policy = restore_optimizer(model, saved)
         metadata = {k: saved[k] for k in ('rssm_migration', 'source_teacher_checkpoint',
             'dual_rssm_migration', 'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration',
-            'rssm_five_migration') if k in saved}
+            'rssm_five_migration','rssm_five_expanded_migration') if k in saved}
         self._drift_optimizer, self._drift_metadata = optimizer, metadata
         roots = {'combat': args.combat_data_root, 'navigation': args.navigation_data_root,
                  'recovery': args.recovery_data_root}
@@ -379,6 +400,8 @@ class RSSMMoETraining(RSSMCombatTraining):
             diagnostic_updates = min(architecture_updates, self.respawn_timing_revision['updates']) if self.respawn_timing_revision else architecture_updates
             if five_enabled:
                 diagnostic_updates = min(diagnostic_updates, step - five_report['source_step'] - 1)
+            if expanded_enabled:
+                diagnostic_updates=min(diagnostic_updates,step-expanded_report['source_step']-1)
             if diagnostic_updates < 3:
                 gradient_groups = {}
                 for label, prefix in {
@@ -398,6 +421,10 @@ class RSSMMoETraining(RSSMCombatTraining):
                         'five_player_heads': 'vjepa_backend.five_role_fusion.player_heads.',
                         'five_enemy_head': 'vjepa_backend.five_role_fusion.enemy_head.',
                         'five_combat_head': 'vjepa_backend.five_role_fusion.combat_head.'} if five_enabled else {}),
+                    **({f'expanded_private_Transformer_{i}':f'vjepa_backend.five_role_fusion.experts.{i}.private_transformer.'
+                        for i in range(5)}if expanded_enabled else{}),
+                    **({f'expanded_private_output_{i}':f'vjepa_backend.five_role_fusion.experts.{i}.private_output.'
+                        for i in range(5)}if expanded_enabled else{}),
                 }.items():
                     gradients = [p.grad.detach().float().square().sum()
                         for n, p in model.named_parameters() if n.startswith(prefix) and p.grad is not None]
@@ -407,6 +434,11 @@ class RSSMMoETraining(RSSMCombatTraining):
             optimizer.step()
             self.state['global_training_step'] = step
             if five_enabled: self.state['rssm_five_training']['current_step'] = step
+            if expanded_enabled:
+                self.state['rssm_five_expanded_training']['current_step']=step
+                metrics.update(rssm_five_expanded_migration_sha256=expanded_report['revision_sha256'],
+                    rssm_five_expanded_plan_sha256=self.state['rssm_five_expanded_training']['plan_sha256'],
+                    rssm_five_expanded_protocol=self.state['rssm_five_expanded_training']['protocol'])
             gate = commit_moe_update(self.state, step=step, horizon=horizon, train_loss=metrics['train_loss'],
                 microbatches=self.accumulation,
                 microbatch_size=self.microbatch, effective_batch_size=effective_batch,
@@ -492,6 +524,7 @@ def main(argv=None):
     parser.add_argument('--respawn-timing-plan', type=Path)
     parser.add_argument('--stage-budget-plan', type=Path)
     parser.add_argument('--batch-revision-plan', type=Path)
+    parser.add_argument('--five-expanded-plan',type=Path)
     parser.add_argument('--navigation-replay-plan',type=Path)
     parser.add_argument('--enemy-motion-data-root',type=Path)
     parser.add_argument('--seed', type=int, default=173)

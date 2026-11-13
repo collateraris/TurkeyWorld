@@ -3262,6 +3262,168 @@ Evidence:
 [same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/initial_resume_verification.json),
 [first-update UI proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/live_first_update_ui_proof.json).
 
+## H90. Completed SR validation, preview deployment and dynamics recovery
+
+SR5 completed2000 local updates/cumulative108105. Independent fixed256 validation
+used the refreshed NPR inputs and cached one-step causal hypotheses, not an
+autonomous450-step game. Against its frozen Atlas106105 parent, SSIM improved
+0.761640→0.762556 and MAE2559.726→9.614. Enemy foreground MAE worsened
+0.158270→0.160411 (205 frames), foreground edge0.182256→0.186701,
+far-wall edge0.052267→0.054808 (188 frames), and false NPC detections changed
+0/51→2/51 empty frames. The image goal SSIM>0.91 AND MAE255<2.5 remains false.
+Validation integrity passed with zero SGD and unchanged SR/reference/sampler;
+this is a mixed experimental result, not a quality promotion. See the
+[independent report](training_runs/sr_moe_20261113/diagnostics/validation_20261113T192236Z/summary.json).
+
+The user explicitly requested this SR in dynamics' “What the model shows”.
+Self-contained export SHA3127bef2… retains embedded Atlas pixels and the five
+private Transformer experts. Preview revision044e0811… changes only the frozen
+SR selection to108105/local2000; NPR29609/Base29209 remains exact. Dynamics
+previews call SR with `none_RGB_only`, without cached hypotheses. The validation
+numbers above therefore describe a different input-hypothesis scenario and are
+not presented as measurements of the displayed autonomous frames.
+
+A separate fixed256 RGB-only evaluation then matched the dynamics-preview SR
+call: SSIM0.763592→0.764103 and MAE2559.638→9.531 versus the frozen parent.
+Foreground MAE0.149978→0.153620 and edge0.168969→0.175860 worsened; near-wall
+MAE0.055005→0.055175 and far-wall0.056358→0.057505 also worsened. Both models had
+0/51 empty false-NPC frames. The strict image goal remained false; this measures
+cached NPR/SR quality, not autonomous dynamics or gameplay. See the
+[RGB-only report](training_runs/sr_moe_20261113/diagnostics/rgb_only_validation_20261113T193747Z/summary.json).
+
+Meanwhile the dynamics process was interrupted around5972 with a damaged rolling
+checkpoint (NUL tail) and an all-NUL status file; the cause is unknown. An older
+Source exception predates this worker and does not explain this interruption.
+The damaged files and orphan5972 metrics were archived under
+`failure_recoveries/20261113T193007.035316Z_g5971`. Recovery used the exact saved
+5971 snapshot (SHAf01217e8…) and preserved1517 model tensors,360 Adam states,
+all RNG/three sampler streams, batch32×1 and the v5 mandatory100 policy.
+Independent same-step verification passed28/28. The replayed5972 update passed
+27/27, with finite loss2.959626062313931,1157 frozen tensors exact and all
+nonoperational metrics/Source-pair receipts identical to archived5972.
+No game-engine modification is claimed by this recovery.
+
+Live8765 HTTP/JavaScript VM/PNG checks passed17/17 at current5976/preview5971H240:
+SR108105/local2000/five private Transformers, unchanged NPR/Base, five image rows,
+the same map trace, zero future feedback, batch32×1 and mandatory100 intact.
+The absent8765 listener was separately restored; the existing8779 SR server was
+not restarted. Evidence:
+[resume audit](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/independent_verification.json),
+[replayed update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/first_update.json),
+[live preview proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/live_ui_verification.json).
+
+On the subsequent explicit launch request, a fresh paired window opened as
+`paired_latest_20261113T193445Z` with immutable dynamics5974/NPR29609/Base29209/
+SR108105 snapshots: Source left, neural game right, T toggles combat and E turns
+right. It initially paused at0/450; the visible game is a separate snapshot and
+does not receive later training weights automatically. Gameplay remains
+unqualified. See its
+[runtime smoke](training_runs/paired_latest_20261113T193445Z/runtime_smoke_verification.json).
+
+## H91. Explicit five-Euler-step RF playback
+
+The user requested RF playback with five integration steps. The new runtime
+option `--rf-euler-steps 5` is applied after strict checkpoint loading; the
+saved model and validated training configuration remain RF1. Actual velocity
+evaluations use Euler times0/0.2/0.4/0.6/0.8. Four focused ODE tests and seven
+RSSM/control regressions passed. The runtime smoke recorded five velocity
+evaluations on each of four transitions: `[5,5,5,5]`.
+
+New paired session `paired_latest_20261113T200421Z` (PID44096) reuses the exact
+previous immutable dynamics5974/NPR29609/Base29209/SR108105 assets. This changes
+inference integration only: no five-step fine-tuning or expert widening was
+performed. More RF evaluations cost additional rendering time; quality remains
+unqualified. See its
+[runtime smoke](training_runs/paired_latest_20261113T200421Z/runtime_smoke_verification.json).
+
+The separate capacity discussion was advice, not an architecture-change request.
+Each current private Transformer has600 parameters in Base and8544 in RF.
+Replacing each of five blocks by approximately0.5M parameters would bring Base
+to roughly3.50M and RF to9.51M, or13.01M combined before further adapter changes.
+The current implementation evaluates all five experts; wider blocks would
+increase runtime work. These sizes have not been implemented or validated.
+
+## H92. Expanded RF experts trained with three Euler steps
+
+The user authorized approximately0.5M parameters per RF expert, then selected
+three Euler steps instead of five. Each of the five experts now retains its
+8544-parameter legacy block and adds a private width256/heads8/FF416 Transformer
+with zero-initialized residual output:503,072 parameters per expert.
+RF totals9,524,294 excluding codec. Base, VQGAN, private opacity and the frozen
+feature world5906 remain unchanged; no Base expansion or GAN training is used.
+
+The new run `renderer_rf_expanded_20261113` continues the full stopped1409 parent
+RF29609/Base29209:457 Adam states/five groups are retained,80 tensors enter a
+fresh sixth group, and all three Source sampler/RNG clocks continue. Budget2000,
+MAIN16/far4/geometry8, preview10 and VAL100 keep the original held-out panels.
+The new nested format2 bundle validates its RF1 parent and declares actual RF3;
+legacy RF1/RF4 validation remains strict. It does not rewrite the parent config.
+
+The first zero-SGD export exposed a real lineage error: revalidating an already
+compact-codec working model against original-teacher lineage. Export now receives
+the untouched original `source_model`, validates the parent there, and separately
+checks working conditioning/frozen assets. Restart occurred at0; no SGD was lost.
+Independent GPU checks passed19/19 with0 SGD: old/expanded RF1 and RF3 initial
+RGB/latents were bitexact, and the three-discarded-update RF3 bundle reloaded
+bitexactly. Inputs, Base/codec/private tensors and global RNG were unchanged.
+
+Production PID40968 was verified at local18/preview10/VAL0. Live HTTP/VM/PNG
+checks passed17/17, including three actual velocity calls and gradients in all
+five experts. Main loss0.268245 and total0.381563 are separate; VAL0 main loss
+was0.315476. Its SSIM0.729578/foreground MAE0.104547 versus parent RF1
+0.735882/0.094481 is a solver comparison, not an SGD improvement. Quality remains
+false. [Live page](http://127.0.0.1:8781/),
+[GPU bundle proof](training_runs/renderer_rf_expanded_20261113/gpu_bundle_verification.json),
+[live UI proof](training_runs/renderer_rf_expanded_20261113/diagnostics/live_ui/verification.json).
+
+The separate open three-Euler game `paired_latest_20261113T202309Z` retains
+the old dynamics5974/NPR29609/Base29209/SR108105 snapshots. Newly trained expanded
+RF weights have not been promoted into the game or dynamics previews.
+
+## H93. One million parameters per private dynamics expert
+
+The user separately requested approximately1M parameters per dynamics expert,
+not the RF renderer's0.5M profile. Each of five dynamics experts now has
+1,005,088 parameters: its527,104-parameter Transformer is retained and a second
+private FF288 block/zero-output branch adds477,984. Total five-role fusion is
+5,107,388;2,389,920 parameters/70 tensors are new. The three RSSMs and5232-value
+h/z memory, original task losses and shared trunk remain intact.
+
+Worker45296 continued source6022/H240/stage51 of100, preserving old360 Adam
+states/five groups, all Source samplers/RNG, batch32×1 and the v5 stage policy;
+the new70 parameter tensors enter a sixth group. Initial verification passed10/10:
+durable migration and the actual trainer restore were measured BEFORE startup
+preview. The separate after-preview6022 checkpoint capture window was missed;
+that file is not claimed as evidence. The first captured worker checkpoint is6023.
+
+Actual6023 passed24/24:1587 model tensors/430 Adam states finite,352 old moment
+ages advanced once,8 dormant states remained exact,70 fresh states reached
+local1 and1157 frozen tensors were bitexact. Loss2.994952 and gradient norm90.71459
+were finite; H240 advanced51→52 with mandatory100 retained. All five new output
+gradients were positive; the new deeper blocks had zero gradients on their
+first update while zero-initialized output projections opened. Their second-step
+gradient path had already passed the CPU test. Committed6024 and6025 then logged
+positive finite gradients for all five new private Transformers; this confirms
+that their training opened, not that image/gameplay quality passed.
+
+Whole preview revision044e…/selected plan18e425… and exact NPR29609/Base29209/
+SR108105 file pins stayed unchanged. Four measured CACHE provenance fields
+updated for the new architecture: current world6020→6022, copied tensors551→621,
+initialization5971→6022 and source-model SHA. These are not asset revisions.
+Live8765 HTTP/VM/PNG checks passed16/16 at6023/preview6022, including exact1M
+metadata,32×1, five image rows/map, mandatory100 and zero future Source feedback.
+The open game and preview do not receive the separately trained expanded RF3.
+An independent8.80s/zero-SGD compatibility probe combined dynamics6023 with
+expanded RF3 local100/cumulative29709 and SR108105: four own combat transitions,
+5232 memory and32→128→1024 images were finite, without future-engine feedback
+or asset promotion. This checks runtime compatibility, not quality; see
+[combined probe](training_runs/diagnostics/expanded_dynamics_rf3_sr_compat_20261113T204613Z/verification.json).
+Evidence:
+[initial restore](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/initial_verification.json),
+[first update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/first_update.json),
+[live UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/live_first_ui_verification.json),
+[subsequent gradients](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/private_transformer_gradients.json).
+
 ## Changes to goals, batches and data units
 
 | What changed | Chat sequence / outcome |

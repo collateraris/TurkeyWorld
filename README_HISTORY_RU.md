@@ -3240,6 +3240,167 @@ TOTAL<0,5 подряд, три RSSM/пять experts и frozen RF29609/Base29209
 [same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/initial_resume_verification.json),
 [проверка UI первого update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/live_first_update_ui_proof.json).
 
+## H90. Валидация завершённого SR, подключение превью и восстановление динамики
+
+SR5 завершил2000 local updates/накопленно108105. Независимая fixed256 валидация
+использует обновлённые NPR-входы и cached одноступенчатые causal hypotheses,
+а не автономную450-шаговую игру. Относительно frozen Atlas106105 SSIM улучшился
+0,761640→0,762556, MAE2559,726→9,614. Foreground MAE врага ухудшился
+0,158270→0,160411 (205 кадров), foreground edge0,182256→0,186701,
+far-wall edge0,052267→0,054808 (188 кадров), ложные NPC на пустых кадрах —
+0/51→2/51. Цель SSIM>0,91 И MAE255<2,5 не пройдена. Проверка целостности
+пройдена без SGD, SR/reference/sampler не менялись. Результат смешанный,
+экспериментальный, а не quality promotion. См.
+[независимый отчёт](training_runs/sr_moe_20261113/diagnostics/validation_20261113T192236Z/summary.json).
+
+Пользователь явно запросил этот SR в «Что показывает модель» динамики.
+Самодостаточный export SHA3127bef2… сохраняет embedded Atlas pixels и пять private
+Transformer-experts. Preview revision044e0811… меняет только frozen SR selection
+на108105/local2000, NPR29609/Base29209 прежние. В превью динамики SR вызывается
+как `none_RGB_only`, без cached hypotheses. Поэтому числа выше относятся к
+другому сценарию подсказок и не выдаются за метрики показанных автономных кадров.
+
+Затем отдельная fixed256 RGB-only оценка повторила вызов SR в превью динамики:
+SSIM0,763592→0,764103 и MAE2559,638→9,531 относительно frozen parent.
+Foreground MAE0,149978→0,153620 и edge0,168969→0,175860 ухудшились; near-wall
+MAE0,055005→0,055175 и far-wall0,056358→0,057505 также ухудшились. У обеих моделей
+0/51 ложных NPC на пустых кадрах. Строгая image goal не пройдена; это качество
+cached NPR/SR, а не автономной динамики или gameplay. См.
+[RGB-only отчёт](training_runs/sr_moe_20261113/diagnostics/rgb_only_validation_20261113T193747Z/summary.json).
+
+Тем временем процесс динамики прервался около5972 с повреждённым rolling
+checkpoint (NUL-хвост) и полностью NUL-файлом status; причина неизвестна.
+Прежнее Source-исключение возникло до запуска этого worker и не объясняет
+прерывание. Повреждённые файлы и orphan5972 metrics сохранены в
+`failure_recoveries/20261113T193007.035316Z_g5971`. Восстановление использовало
+точный snapshot5971 (SHAf01217e8…), сохранив1517 model tensors,360 Adam states,
+все RNG/три sampler streams, batch32×1 и v5 mandatory100 policy. Независимая
+same-step проверка прошла28/28. Повторённый update5972 прошёл27/27: конечный
+loss2,959626062313931,1157 frozen tensors прежние, все неоперационные метрики
+и Source-pair receipts совпали с архивным5972. Изменение игрового движка
+этим восстановлением не заявляется.
+
+HTTP/JavaScript VM/PNG проверка8765 прошла17/17 на current5976/preview5971H240:
+SR108105/local2000/пять private Transformers, прежние NPR/Base, пять строк,
+та же карта, нулевая future feedback, batch32×1 и mandatory100 сохранены.
+Отсутствовавший listener8765 восстановлен отдельно; прежний SR-сервер8779
+не перезапускался. Доказательства:
+[resume audit](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/independent_verification.json),
+[повторённый update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/first_update.json),
+[живая preview-проверка](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5971_044e081134af/live_ui_verification.json).
+
+По следующему явному запросу открыто новое парное окно
+`paired_latest_20261113T193445Z` с immutable snapshots динамики5974/NPR29609/
+Base29209/SR108105: Source слева, нейроигра справа, T переключает бой, E поворачивает
+направо. Сначала окно приостановлено на0/450. Игра — отдельный snapshot,
+последние веса обучения в неё автоматически не поступают. Качество gameplay
+не подтверждено. См.
+[runtime smoke](training_runs/paired_latest_20261113T193445Z/runtime_smoke_verification.json).
+
+## H91. Явный запуск RF с пятью шагами Эйлера
+
+Пользователь запросил RF playback с пятью шагами интегрирования. Новый runtime
+параметр `--rf-euler-steps 5` применяется после строгой загрузки checkpoint;
+сохранённая модель и проверенная обучающая конфигурация остаются RF1.
+Фактические velocity evaluations используют времена Эйлера0/0,2/0,4/0,6/0,8.
+Пройдены четыре focused ODE tests и семь RSSM/control regressions. Runtime smoke
+записал по пять velocity evaluations на четырёх переходах: `[5,5,5,5]`.
+
+Новая парная сессия `paired_latest_20261113T200421Z` (PID44096) использует точные
+прежние immutable assets динамики5974/NPR29609/Base29209/SR108105. Изменилось
+только интегрирование на inference: дообучения под пять шагов и расширения
+experts не выполнялось. Дополнительные RF evaluations увеличивают время рендера;
+качество не подтверждено. См.
+[runtime smoke](training_runs/paired_latest_20261113T200421Z/runtime_smoke_verification.json).
+
+Отдельное обсуждение ёмкости было советом, а не запросом сменить архитектуру.
+У каждого текущего private Transformer600 параметров в Base и8544 в RF.
+Замена каждого из пяти блоков примерно на0,5 млн параметров дала бы около
+3,50 млн у Base и9,51 млн у RF, суммарно13,01 млн до дополнительных изменений
+adapters. Сейчас вычисляются все пять experts; расширение повысило бы стоимость
+inference. Эти размеры не реализованы и не проверены.
+
+## H92. Расширенные RF-experts обучаются с тремя шагами Эйлера
+
+Пользователь разрешил примерно0,5 млн параметров на RF-expert, затем выбрал
+три шага Эйлера вместо пяти. Каждый из пяти experts сохраняет legacy-блок
+из8544 параметров и получает отдельный Transformer width256/heads8/FF416
+с нулевым residual output:503 072 параметра на expert. Всего RF9 524 294 без
+codec. Base, VQGAN, private opacity и feature world5906 заморожены;
+расширения Base и GAN-обучения нет.
+
+Новый run `renderer_rf_expanded_20261113` продолжает полный parent остановленного
+1409 RF29609/Base29209:457 Adam states/пять групп сохранены,80 новых тензоров
+добавлены шестой группой, три Source sampler/RNG clocks продолжаются. Бюджет2000,
+MAIN16/far4/geometry8, preview10 и VAL100 сохраняют исходные held-out панели.
+Новый nested format2 bundle строго проверяет RF1 parent и явно указывает RF3;
+проверки legacy RF1/RF4 не ослаблены, parent config не переписывается.
+
+Первый export без SGD выявил настоящую ошибку lineage: проверку уже заменённого
+compact-codec working model по lineage исходного teacher. Теперь export получает
+неизменённый original `source_model`, проверяет parent там, затем отдельно
+проверяет conditioning/frozen assets working model. Перезапуск был на0, SGD не
+потерян. Независимая GPU-проверка прошла19/19 без SGD: initial RGB/latents старого
+и расширенного RF1/RF3 побитно совпали, bundle после трёх отброшенных RF3 updates
+загрузился точно. Inputs, Base/codec/private tensors и global RNG сохранены.
+
+Production PID40968 проверен на local18/preview10/VAL0. Живые HTTP/VM/PNG проверки
+прошли17/17, включая три фактических velocity calls и градиенты всех пяти experts.
+Main loss0,268245 и total0,381563 показаны отдельно; VAL0 main loss0,315476.
+SSIM0,729578/foreground MAE0,104547 против parent RF1 0,735882/0,094481 — сравнение
+solver, а не прогресс SGD. Качество не пройдено.
+[Страница](http://127.0.0.1:8781/),
+[GPU bundle proof](training_runs/renderer_rf_expanded_20261113/gpu_bundle_verification.json),
+[живая UI-проверка](training_runs/renderer_rf_expanded_20261113/diagnostics/live_ui/verification.json).
+
+Отдельная открытая игра с тремя шагами Эйлера `paired_latest_20261113T202309Z`
+сохраняет прежние snapshots динамики5974/NPR29609/Base29209/SR108105. Новые
+обучаемые expanded RF веса не перенесены в игру или превью динамики.
+
+## H93. Миллион параметров на private expert динамики
+
+Пользователь отдельно запросил примерно1 млн параметров на expert динамики,
+а не профиль RF-рендера по0,5 млн. Каждый из пяти experts теперь содержит
+1 005 088 параметров: Transformer из527 104 сохранён, второй private FF288
+блок/ветка с zero output добавляет477 984. Всего five-role fusion5 107 388;
+новые2 389 920 параметров/70 тензоров. Три RSSM и h/z-память5232, исходные
+task losses и shared trunk сохранены.
+
+Worker45296 продолжил source6022/H240/stage51 из100, сохранив360 старых Adam
+states/пять групп, все Source samplers/RNG, batch32×1 и v5 stage policy;
+70 новых параметрических тензоров добавлены шестой группой. Initial-проверка
+прошла10/10: durable migration и настоящий restore worker измерены ДО startup
+preview. Окно отдельного захвата checkpoint после preview6022 пропущено;
+такой файл не выдаётся за доказательство. Первый захваченный worker checkpoint —6023.
+
+Настоящий6023 прошёл24/24:1587 model tensors/430 Adam states конечны,352 старых
+moment ages продвинулись один раз,8 dormant states прежние,70 новых states имеют
+local1,1157 frozen tensors побитно сохранены. Loss2,994952 и gradient norm90,71459
+конечны; H240 продвинулся51→52 с прежними mandatory100. Градиенты всех пяти новых
+output положительны; у новых глубоких блоков градиент первого update нулевой,
+пока открывались нулевые output projections. Второй шаг их градиентного пути
+ранее проверен CPU-тестом. В завершённых6024 и6025 уже положительны и конечны
+градиенты всех пяти новых private Transformers: обучение открылось, но это
+не подтверждение image/gameplay качества.
+
+Вся preview revision044e…/selected plan18e425… и точные file pins
+NPR29609/Base29209/SR108105 не изменились. Обновились четыре измеренных CACHE
+provenance поля новой архитектуры: current world6020→6022, copied tensors551→621,
+initialization5971→6022 и source-model SHA. Это не ревизия assets.
+Живые HTTP/VM/PNG проверки8765 прошли16/16 на6023/preview6022: точная1M metadata,
+32×1, пять строк/карта, mandatory100 и нулевая future Source feedback.
+Отдельно обучаемый expanded RF3 не подключён в открытую игру или превью динамики.
+Независимый compatibility probe за8,80с без SGD совместил динамику6023,
+expanded RF3 local100/накопленно29709 и SR108105: четыре собственных боевых
+перехода, память5232 и изображения32→128→1024 конечны, без future-engine feedback
+и переноса assets. Это проверка совместимости runtime, а не качества; см.
+[совместный probe](training_runs/diagnostics/expanded_dynamics_rf3_sr_compat_20261113T204613Z/verification.json).
+Доказательства:
+[initial restore](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/initial_verification.json),
+[первый update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/first_update.json),
+[живой UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/live_first_ui_verification.json),
+[последующие градиенты](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/private_transformer_gradients.json).
+
 ## Изменения целей, batch и единиц данных
 
 | Что менялось | Последовательность из чата / итог |

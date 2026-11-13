@@ -192,6 +192,8 @@ class RSSMTraining:
                 self.preview_model.combat_rssm_migration=copy.deepcopy(model.combat_rssm_migration)
             if hasattr(model,'rssm_five_migration'):
                 self.preview_model.rssm_five_migration=copy.deepcopy(model.rssm_five_migration)
+            if hasattr(model,'rssm_five_expanded_migration'):
+                self.preview_model.rssm_five_expanded_migration=copy.deepcopy(model.rssm_five_expanded_migration)
             load_renderer_student(self.preview_model, renderer_checkpoint,
                 allow_unqualified_codec=True)
             self.preview_model.to(self.device).eval().requires_grad_(False)

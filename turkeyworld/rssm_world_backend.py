@@ -151,6 +151,9 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                     width=config.rssm_fusion_moe_width, heads=config.rssm_fusion_moe_heads,
                     expert_hidden=config.rssm_fusion_moe_expert_hidden,
                     role_bias=config.rssm_fusion_moe_role_bias)
+                if getattr(config,'rssm_five_expanded_enabled',False):
+                    from .rssm_five_expanded import expand_five_experts
+                    expand_five_experts(self.five_role_fusion)
 
     @property
     def memory_size(self):

@@ -119,7 +119,7 @@ and deaths continue to follow those events through structured bookkeeping.
 def five_role_metadata(module):
     if not isinstance(module, RSSMFiveRoleFusion):
         raise TypeError('Expected the explicit five-role RSSM adapter')
-    return dict(protocol=FIVE_ROLE_PROTOCOL, roles=list(FIVE_ROLES), experts=5,
+    result = dict(protocol=FIVE_ROLE_PROTOCOL, roles=list(FIVE_ROLES), experts=5,
         private_Transformer_blocks_per_expert=1, width=module.width, heads=module.heads,
         expert_hidden=module.expert_hidden, role_bias=module.role_bias,
         parameters=sum(p.numel() for p in module.parameters()),
@@ -128,3 +128,8 @@ def five_role_metadata(module):
         zero_task_readouts_at_activation=True,
         enemy_head_outputs='NPC XY residual +256 spawn tiles +9 spawn anchors',
         combat_head_outputs='shot target and enemy attack logits; structured events change HP/hits/deaths')
+    if hasattr(module.experts[0],'legacy'):
+        from .rssm_five_expanded import expanded_five_metadata
+        result.update(expanded_experts=True,expanded_architecture=expanded_five_metadata(module),
+            private_Transformer_blocks_per_expert=2,parameters_per_expert=1005088)
+    return result

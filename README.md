@@ -63,6 +63,16 @@ playback is a separate command below.
 
 ## Current RSSM dynamics run
 
+The active dynamics now has **1,005,088 parameters per private role expert**,
+with two Transformer blocks per expert and5,107,388 parameters in the five-role
+fusion. Continuation from6022 preserved the three RSSMs/5232-value memory,
+360 old Adam states, all samplers/RNG,32×1 batching and H240/stage51 of100;
+70 new tensors form a sixth optimizer group. Actual6023 and the live UI were
+verified; this is a capacity change, not a demonstrated quality improvement.
+Frozen preview assets remain NPR29609/Base29209/SR108105. The separately trained
+expanded RF3 renderer has not been promoted into dynamics or the game. See
+[H93](README_HISTORY_EN.md#h93-one-million-parameters-per-private-dynamics-expert).
+
 The current phase is `training_runs/rssm_moe_nav15_enemy25_cap20_20261113`, monitored at
 **http://127.0.0.1:8765/**. Three persistent RSSM memories contain2032 player,
 1600 enemy and1600 combat values:5232 total, updated every tick. The shared
@@ -146,7 +156,9 @@ previous cap50 and `50+15*N` policies remain historical; the interim100 cap was 
 The original objective/`--moe-plan` is unchanged; model tensors1434, all277 Adam
 states and serialized RNG were preserved. Previews every10 updates use the current H and explicitly
 pinned five-role NPR29609/Base29209 (stopped local1409,6241 private-geometry
-parameters) with unchanged Atlas SR106105/local5175. Full450-transition held-out validation runs every250 updates.
+parameters) with five-expert SR108105/local2000, explicitly selected after recovery5971.
+Full450-transition held-out validation runs every250 updates. See
+[H90](README_HISTORY_EN.md#h90-completed-sr-validation-preview-deployment-and-dynamics-recovery).
 The display-only revision resumed the same5816 boundary without SGD; see
 [H76](README_HISTORY_EN.md#h76-latest-private-npr-in-the-dynamics-preview).
 The later selected budgets and renderer revision are recorded in
@@ -181,7 +193,8 @@ The preceding cap50 activation remains in [H65](README_HISTORY_EN.md#h65-fifty-u
 
 ### Current SR: five private Transformer experts
 
-The separate SR worker in `training_runs/sr_moe_20261113/training` is training
+The separate SR worker in `training_runs/sr_moe_20261113/training` completed2000
+local updates (cumulative108105), training
 five private Transformer experts: enemy detection, sprite selection/placement,
 far walls, near walls and player/weapon effects. All160 parent AtlasSR parameter tensors
 and buffers remain frozen; only343,460 new parameters are trained
@@ -197,7 +210,12 @@ recent train rows; the client additionally plots the latest verified validation
 report and explicitly discloses the missing full VAL history. Preview reference0
 is labelled separately from the latest full validation. Neither the strict
 SSIM>0.91/MAE255<2.5 goal nor gameplay quality has passed. These weights are not
-automatically connected to the game or dynamics preview. See
+automatically connected to other components. The later explicit user request
+selected SR108105 for dynamics visualization and a freshly launched game snapshot;
+the main cached-hypothesis validation is distinct from the RGB-only dynamics-preview
+call. Its fixed256 scores were SSIM0.762556/MAE2559.614, with mixed foreground/wall
+results and failed quality goals. See
+[H90](README_HISTORY_EN.md#h90-completed-sr-validation-preview-deployment-and-dynamics-recovery) and
 [H88](README_HISTORY_EN.md#h88-five-private-sr-experts-on-refreshed-npr-pairs).
 
 ### Stopped hybrid-atlas SR archive
@@ -416,9 +434,19 @@ Codec and same-pose diagnostics: **http://127.0.0.1:8780/**.
 See [H54](README_HISTORY_EN.md#h54-student-renderer-training-for-small-enemies-and-walls)
 and [H55](README_HISTORY_EN.md#h55-far-wall-strata-and-preserved-adam-continuation).
 
-Renderer training in `training_runs/renderer_moe_five_20261113` was stopped at
-local1409 by request; worker38908 has exited. Its report remains on
-**http://127.0.0.1:8781/**. It continued the completed three-role MoE2000 parent
+The active renderer phase is `training_runs/renderer_rf_expanded_20261113` on
+**http://127.0.0.1:8781/**: five RF experts of503,072 parameters each,
+RF9,524,294 total excluding codec, with frozen Base/VQGAN/private opacity/world5906.
+The user's latest choice is **three Euler steps**; budget2000, preview10 and
+VAL100 retain the same held-out panels. All457 parent Adam states and source/RNG
+clocks continue, with80 new tensors in a sixth group; GAN is off. Initial RF3
+SSIM0.729578 is a solver baseline, not evidence of SGD improvement or a quality
+pass. Expanded weights are not in the open game. See
+[H92](README_HISTORY_EN.md#h92-expanded-rf-experts-trained-with-three-euler-steps).
+
+Earlier renderer training in `training_runs/renderer_moe_five_20261113` stopped at
+local1409 by request; worker38908 exited and its files remain archived.
+It continued the completed three-role MoE2000 parent
 (cumulative RF28200/Base27800) for 2000 new local updates. MAIN16, far-wall4×0.25
 and geometry8×1 remain; the frozen feature world is still5906, using recorded
 navigation/combat profiles for past-observation priors and zero static features.
@@ -447,8 +475,9 @@ this is the completed parent at the same5906-feature poses. Independent read-onl
 validation of local1156 measured RF SSIM0.730221/MAE0.037521, while its distant-NPC
 foreground MAE regressed0.081721→0.083856. Quality, geometry and distance guards
 remain false. At the user's explicit request the stopped1409 export
-RF29609/Base29209 now renders dynamics previews; the game retains its prior
-assets and Atlas SR106105 is unchanged. No automatic promotion is implied. See
+RF29609/Base29209 renders dynamics previews and the latest separately launched
+game snapshot. The later explicit SR108105 selection is recorded in H90;
+these are experimental selections, not automatic promotion. See
 [H83](README_HISTORY_EN.md#h83-five-renderer-experts-with-preserved-parent-routing),
 [H86](README_HISTORY_EN.md#h86-independent-validation-of-five-role-renderer1156) and
 [H87](README_HISTORY_EN.md#h87-requested-five-role-npr-in-the-dynamics-preview).
@@ -519,18 +548,16 @@ The new immutable plan is `quality_revision_ssim091_mae2p5.json`; the page displ
 MAE on the0–255 scale. Gameplay weights are not replaced automatically.
 
 The latest user-requested paired game is the experimental session
-`training_runs/paired_latest_20261113_private_geometry`, also selected by
-`training_runs/latest_play_session.json`. Its immutable snapshots are dynamics5805,
-private-geometry NPR8480 (RF cumulative24680/Base24280, Euler1), frozen E7 codec
-and self-contained Atlas SR106105/local5175. The visible paired window opened
-with Source left/neural right, autonomous combat and display-size1024; the launch
-check observed93/450 updates with no stderr. Training on8765/8781 continues
-independently. These latest weights have no quality/gameplay pass and are not
-updated in the open game automatically. Strict profile rebinding and two GPU
-smoke steps in each of navigation/combat passed; see
-[export proof](training_runs/paired_latest_20261113_private_geometry/export_verification.json),
-[runtime smoke](training_runs/paired_latest_20261113_private_geometry/runtime_smoke_verification.json)
-and [H75](README_HISTORY_EN.md#h75-user-requested-latest-private-geometry-paired-game).
+`training_runs/paired_latest_20261113T193445Z`, also selected by
+`training_runs/latest_play_session.json`. Its immutable snapshots are dynamics5974,
+five-role NPR29609/Base29209, frozen E7 codec and self-contained five-expert
+SR108105/local2000. Source is left and the neural game right; T toggles combat,
+E turns right. The visible window initially paused at0/450. Dynamics training
+continues separately on8765; renderer and SR phases have stopped/completed.
+These weights have no quality/gameplay pass and are not updated in the open
+game automatically. See
+[runtime smoke](training_runs/paired_latest_20261113T193445Z/runtime_smoke_verification.json)
+and [H90](README_HISTORY_EN.md#h90-completed-sr-validation-preview-deployment-and-dynamics-recovery).
 Own RSSM state/memory receive no future Source correction. In optional
 shared-camera diagnostics, the Source camera affects display only.
 **T** switches navigation/combat, **Q/left** turn left, **E/right** turn right, **W/S/up/down** move,

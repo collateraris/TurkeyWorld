@@ -142,6 +142,42 @@ class InvalidSourceSupportTests(unittest.TestCase):
         self.assertGreater(float(model.attack.weight.grad.abs().sum()), 0.)
         self.assertEqual(len(model.calls), 12)
 
+    def test_current_H240_main19_aux32_late4_keeps_valid_auxiliary_and_marks_empty_late(self):
+        model,calls=TinyModel(),0
+        def source(*args):
+            nonlocal calls
+            calls+=1
+            if calls>32*16:
+                raise ValueError('Cannot restore an entity inside a wall')
+            return oracle(*args)
+        with patch(QUERY,side_effect=source):
+            report=moe_dynamics_backward(model,data(240,19),data(16,32),expected_horizon=240,
+                main_player_weight=19/32,main_router_weight=19/32,main_enemy_weight=19/27,
+                auxiliary_actor_limit=32,late_own_prefix_actors=4)
+        auxiliary,late=report['moe_auxiliary'],report['moe_late_own_prefix']
+        self.assertEqual(calls,(32+4)*16)
+        self.assertEqual(len(model.calls),240+16+16)
+        self.assertEqual(report['moe_late_prefix_start'],224)
+        self.assertEqual(auxiliary['actors'],32)
+        self.assertEqual(auxiliary['direct_queries_valid'],512)
+        self.assertTrue(auxiliary['direct_objective_backpropagated'])
+        self.assert_empty_support(late,4,16)
+        self.assertFalse(late['direct_objective_backpropagated'])
+        self.assertEqual(late['direct_invalid_skips'],{'Cannot restore an entity inside a wall':64})
+        self.assertEqual(report['moe_direct_empty_branch_count'],1)
+        self.assertFalse(report['moe_direct_support_gate_eligible'])
+        self.assertGreater(report['moe_main_player_loss'],0.)
+        self.assertGreater(report['moe_main_enemy_loss'],0.)
+        self.assertGreater(report['moe_router_loss'],0.)
+        self.assertGreater(report['moe_combat_loss'],0.)
+        self.assertEqual(report['moe_combat_loss'],auxiliary['combat'])
+        self.assertEqual(report['moe_player_loss'],report['moe_main_player_loss']+auxiliary['player'])
+        for module in(model.p_core,model.e_core,model.fusion.router,model.attack):
+            gradients=[p.grad for p in module.parameters()if p.grad is not None]
+            self.assertTrue(all(bool(torch.isfinite(g).all())for g in gradients))
+            self.assertGreater(sum(float(g.abs().sum())for g in gradients),0.)
+        json.dumps(report,allow_nan=False)
+
     def test_one_legal_tick_after_empty_support_restores_direct_head_training(self):
         model, batch = TinyModel(), data(4, 1)
         with patch(QUERY, side_effect=ValueError(INVALID)):

@@ -160,6 +160,15 @@ def validate_fusion_renderer_lineage(teacher, source_config):
 def validate_five_role_renderer_lineage(teacher, source_config):
     """An explicit append-only five-role proof is required even for old bundles."""
     source, target = _world_config(source_config), _world_config(teacher.config)
+    expanded=target.get('rssm_five_expanded_enabled',False)
+    if source.get('rssm_five_expanded_enabled',False)and not expanded:
+        raise ValueError('Renderer lineage cannot disable expanded dynamics experts')
+    if expanded:
+        validate_expanded_five_renderer_lineage(teacher,source)
+        # Validate the ORIGINAL five-role proof against its real retained
+        # parameters, rather than broadening that historical proof's contract.
+        source={**source,'rssm_five_expanded_enabled':False}
+        target={**target,'rssm_five_expanded_enabled':False}
     if not target['rssm_five_role_enabled']:
         if source['rssm_five_role_enabled']:
             raise ValueError('Renderer five-role lineage cannot disable its appended architecture')
@@ -175,7 +184,11 @@ def validate_five_role_renderer_lineage(teacher, source_config):
         raise ValueError('Renderer reuse requires explicit five-role Transformer fusion migration lineage')
     previous, migrated = _world_config(report['source_config']), _world_config(report['target_config'])
     changed = sorted(key for key in previous if previous[key] != migrated[key])
-    expected = ['vjepa_backend.five_role_fusion.'+name for name, _ in module.named_parameters()]
+    if expanded:
+        from .rssm_five_expanded import legacy_five_named_parameters
+        legacy=legacy_five_named_parameters(module)
+    else:legacy=list(module.named_parameters())
+    expected = ['vjepa_backend.five_role_fusion.'+name for name, _ in legacy]
     fields = lambda config: {key:value for key,value in config.items() if key.startswith('rssm_five_')}
     if (previous['rssm_five_role_enabled'] or not migrated['rssm_five_role_enabled']
             or not previous['combat_rssm_enabled'] or not previous['rssm_fusion_moe_enabled']
@@ -183,10 +196,43 @@ def validate_five_role_renderer_lineage(teacher, source_config):
             or report.get('allowed_config_changes') != changed or fields(migrated) != fields(target)
             or source['rssm_five_role_enabled'] and fields(source) != fields(target)
             or report.get('added_parameter_names') != expected
-            or report.get('added_parameter_count') != sum(p.numel() for p in module.parameters())
+            or report.get('added_parameter_count') != sum(p.numel() for _,p in legacy)
             or report.get('memory_size') != teacher.vjepa_backend.memory_size
             or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
         raise ValueError('Five-role fusion lineage changed architecture, memory, or frozen renderer assets')
+
+
+def validate_expanded_five_renderer_lineage(teacher,source_config):
+    from .rssm_five_expanded import PREFIX,expanded_five_metadata
+    from .rssm_five_migration import report_sha
+    source,target=_world_config(source_config),_world_config(teacher.config)
+    report=getattr(teacher,'rssm_five_expanded_migration',None)
+    module=getattr(teacher.vjepa_backend,'five_role_fusion',None)
+    if (not isinstance(report,dict)or report.get('format_version')!=1
+            or report.get('kind')!='expand_five_private_dynamics_experts'
+            or report.get('revision_sha256')!=report_sha(report)
+            or any(report.get(k)is not True for k in('old_model_tensors_bitexact',
+                'frozen_render_assets_bitexact','zero_residual_initialization'))
+            or not isinstance(report.get('source_config'),dict)
+            or not isinstance(report.get('target_config'),dict)or module is None):
+        raise ValueError('Expanded dynamics experts require explicit strict migration lineage')
+    previous,migrated=_world_config(report['source_config']),_world_config(report['target_config'])
+    fields=lambda cfg:{k:v for k,v in cfg.items()if k.startswith('rssm_five_')}
+    meta=expanded_five_metadata(module)
+    expected=[PREFIX+n for n in meta['added_parameter_names']]
+    mapping={PREFIX+old:PREFIX+new for old,new in meta['legacy_parameter_name_map'].items()}
+    if (not previous['rssm_five_role_enabled']or previous['rssm_five_expanded_enabled']
+            or migrated!={**previous,'rssm_five_expanded_enabled':True}
+            or fields(migrated)!=fields(target)
+            or source['rssm_five_expanded_enabled']and fields(source)!=fields(target)
+            or report.get('allowed_config_changes')!=['rssm_five_expanded_enabled']
+            or report.get('added_parameter_names')!=expected
+            or report.get('legacy_parameter_name_map')!=mapping
+            or report.get('added_parameter_count')!=meta['added_parameters']
+            or report.get('architecture')!=meta
+            or report.get('memory_size')!=teacher.vjepa_backend.memory_size
+            or report.get('source_renderer_conditioning_identity')!=renderer_condition_identity(teacher)):
+        raise ValueError('Expanded dynamics lineage changed capacity, old names, memory or frozen image assets')
 
 
 def validate_combat_renderer_lineage(teacher, source_config):
@@ -550,6 +596,19 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
 def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualified_codec=False):
     """Validate all tensors/dependencies before replacing only teacher.flow_renderer."""
     payload = torch.load(Path(path), map_location='cpu', weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError('Expected a standalone renderer bundle dictionary')
+    if payload.get('format_version') == 2:
+        from .renderer_rf5_bundle import load_rf5_renderer_payload
+        return load_rf5_renderer_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    return _load_renderer_student_payload(teacher, payload, checkpoint=path,
+        require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+
+
+def _load_renderer_student_payload(teacher, payload, *, checkpoint,
+                                 require_trained=True, allow_unqualified_codec=False):
+    """Strict legacy RF1/RF4 validation for an already-read trusted payload."""
     if not isinstance(allow_unqualified_codec, bool):
         raise ValueError('allow_unqualified_codec must be an explicit boolean')
     if (payload.get('format_version') != FORMAT_VERSION or payload.get('stage') != STAGE
@@ -650,7 +709,7 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     metadata = {key: value for key, value in payload.items() if key not in {'model', 'base_student_bundle'}}
     if pending_base is not None:
         metadata['base_student'] = base_metadata
-    metadata['checkpoint'] = str(Path(path).resolve())
+    metadata['checkpoint'] = str(Path(checkpoint).resolve())
     teacher.renderer_student_metadata = metadata
     return metadata
 
