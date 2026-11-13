@@ -72,10 +72,12 @@ def render_cache_batch(model, batch, *, include_codec=True):
 
 
 def build_cache(source_root, output, model, *, cache_identity, batch_size=8, seed=173,
-                include_codec=True):
+                include_codec=True, render_batch_fn=None):
     """Pure frozen-model worker, separately callable with a CPU test backend."""
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError('Positive cache batch size required')
+    if render_batch_fn is not None and not callable(render_batch_fn):
+        raise TypeError('Optional cache renderer must be callable')
     if (not isinstance(cache_identity,dict) or cache_identity.get('future_rgb_features') is not False
             or cache_identity.get('paired_same_pose_map_tick') is not True):
         raise ValueError('Cache identity must explicitly prohibit future RGB features and pin same-tick Source poses')
@@ -138,7 +140,11 @@ def build_cache(source_root, output, model, *, cache_identity, batch_size=8, see
             for start in range(0,count,batch_size):
                 panel = [lookup[split][(name,j)] for j in range(start,min(count,start+batch_size))]
                 batch = readers[split].batch(len(panel),indices=panel)
-                result = render_cache_batch(model,batch,include_codec=include_codec)
+                if render_batch_fn is None:
+                    result = render_cache_batch(model,batch,include_codec=include_codec)
+                else:
+                    result = render_batch_fn(model,batch,include_codec=include_codec,
+                        records=[readers[split].rows[i] for i in panel])
                 generated.append(result['lr_npr'])
                 if include_codec:
                     codecs.append(result['codec_lr'])

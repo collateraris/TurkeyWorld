@@ -25,6 +25,12 @@ from .rssm_moe_protocol import MOE_PROTOCOL, MOE_HORIZONS, SETTINGS
 COMBAT_COMPONENTS = ('combat_events', 'combat_target', 'combat_attack',
     'combat_damage_npc', 'combat_damage_player', 'combat_death_npc', 'combat_spawn')
 
+INVALID_OWN_SOURCE_STATES = frozenset((
+    'invalid_direct_own_state_geometry',
+    'noncanonical_direct_own_state_no_repair',
+    'Cannot restore an entity inside a wall',
+))
+
 
 def _router_terms(result):
     diagnostics = result.get('rssm_fusion_moe')
@@ -61,6 +67,8 @@ def _direct_task_terms(results, previous, actions, grid, *, simulation_hz):
                 label = _source_step_at_own_state(poses[actor, tick], controls[actor, tick],
                     maps[actor], {'canonical_atol': 2e-7}, 1 / simulation_hz)
             except ValueError as error:
+                if str(error) not in INVALID_OWN_SOURCE_STATES:
+                    raise
                 skipped[str(error)] += 1
                 continue
             selected.append((tick, actor)); labels.append(label)
@@ -74,8 +82,24 @@ def _direct_task_terms(results, previous, actions, grid, *, simulation_hz):
                 index = next((i for i, cell in enumerate(SPAWN_ANCHORS)
                     if np.allclose(center, np.asarray(cell)+.5, rtol=0, atol=2e-6)), None)
                 spawn_anchors[str(index) if index is not None else 'fallback'] += 1
+    support_metrics = {'direct_queries_attempted': count * horizon,
+        'direct_queries_valid': len(selected), 'direct_invalid_skips': dict(skipped),
+        'direct_per_tick_counts': per_tick, 'direct_spawn_anchor_counts': spawn_anchors,
+        'direct_source_labels_after_own_rollout': True, 'source_future_feedback': False,
+        'direct_source_supervision_available': bool(selected),
+        'direct_source_support_fraction': len(selected) / (count * horizon),
+        'direct_source_support': ('empty' if not selected else
+            'complete' if len(selected) == count * horizon else 'partial')}
     if not selected:
-        raise ValueError('MoE combat branch has no legal actual-own-state Source supervision')
+        # There is no lawful conditional combat target here. Do not repair the
+        # own trajectory or invent a label; the full main XY/router objective
+        # has already backpropagated and remains active for these bad states.
+        zero = results[0]['state'].sum() * 0
+        metrics = {**support_metrics, 'direct_present_combat_components': [],
+            'player_pass_loss': 0., **{key: 0. for key in (*COMBAT_COMPONENTS,
+                'combat_npc_motion', 'combat_kinematic_player_axes',
+                'combat_kinematic_npc_speed', 'combat_kinematic_npc_direction')}}
+        return dict.fromkeys(('player', 'enemy', 'combat'), zero), metrics
     device = actions.device
     def tensor(values, dtype=torch.float32):
         return torch.as_tensor(np.asarray(values), dtype=dtype, device=device).detach()
@@ -106,10 +130,7 @@ def _direct_task_terms(results, previous, actions, grid, *, simulation_hz):
         'combat_damage_player': bool(supervision['player_alive_count']),
         'combat_death_npc': bool(supervision['killable_count']), 'combat_spawn': bool(supervision['spawn_count'])}
     combat = sum(terms[name] for name in COMBAT_COMPONENTS)
-    metrics = {'direct_queries_attempted': count * horizon, 'direct_queries_valid': len(selected),
-        'direct_invalid_skips': dict(skipped), 'direct_per_tick_counts': per_tick,
-        'direct_spawn_anchor_counts': spawn_anchors,
-        'direct_source_labels_after_own_rollout': True, 'source_future_feedback': False,
+    metrics = {**support_metrics,
         'direct_present_combat_components': [key for key in COMBAT_COMPONENTS if present[key]],
         'player_pass_loss': float(pass_loss.detach()),
         **{key: float(value.detach()) for key, value in terms.items()},
@@ -137,21 +158,25 @@ def _own_branch_backward(model, initial, memory, grid, actions, *, amp, weight=1
                           + tasks['combat'])
     if not bool(torch.isfinite(value)):
         raise FloatingPointError('Nonfinite three-task MoE direct own-branch loss')
-    value.backward()
-    if check_gradients:
+    supported = metrics['direct_source_supervision_available']
+    if supported:
+        value.backward()
+    if supported and check_gradients:
         finite_gradient_norm(model.named_parameters(), context='Three-task MoE own branch')
     return {'player': weight * SETTINGS['local_navigation_weight'] * float(tasks['player'].detach()),
             'enemy': weight * SETTINGS['local_navigation_weight'] * float(tasks['enemy'].detach()),
             'combat': weight * float(tasks['combat'].detach()),
             'horizon': int(actions.shape[1]), 'actors': len(initial),
-            'memory_resets_after_initialization': 0, **metrics}
+            'memory_resets_after_initialization': 0,
+            'direct_objective_backpropagated': supported, **metrics}
 
 
 def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_context=None,
                           auxiliary_context=1, expected_horizon=None, chunk_size=16,
                           amp=None, progress_callback=None,
                           coordinate_gradient_protocol=COORDINATE_GRADIENT_PROTOCOL,
-                          check_gradients=True, main_player_weight=1., main_router_weight=1., main_enemy_weight=1.):
+                          check_gradients=True, main_player_weight=1., main_router_weight=1., main_enemy_weight=1.,
+                          auxiliary_actor_limit=64, late_own_prefix_actors=8):
     """Backpropagate three tasks plus router regularization; never step Adam.
 
     Router losses are per-step Bx3 means, divided by full H before adding TBPTT
@@ -163,6 +188,9 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
             raise ValueError('MoE '+name+' must be finite in(0,1]')
     if type(chunk_size) is not int or chunk_size != 16:
         raise ValueError('MoE training preserves16-step TBPTT')
+    if (type(auxiliary_actor_limit) is not int or auxiliary_actor_limit not in (16,32,64)
+            or type(late_own_prefix_actors) is not int or late_own_prefix_actors not in (2,4,8)):
+        raise ValueError('MoE branch sizes require explicit legacy64/8 or micro16 revision bounds')
     coordinate = normalize_coordinate_gradient_protocol(coordinate_gradient_protocol)
     if coordinate is None:
         raise ValueError('MoE navigation retains integrated XY gradients')
@@ -193,7 +221,7 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
         with autocast():
             for tick in range(first, last):
                 if tick == late_start:
-                    count = min(len(states), SETTINGS['late_own_prefix_actors'])
+                    count = min(len(states), late_own_prefix_actors)
                     late_prefix = (current[:count].detach(), memory[:count].detach(),
                                    grid[:count], actions[:count, tick:])
                 result = model.transition(current.detach(), actions[:, tick], features, memory)
@@ -224,8 +252,8 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
     main_totals=dict(totals)
     aux_states, aux_frames, aux_actions, _, aux_grid = _batch_data(auxiliary_batch, auxiliary_context)
     expected_aux = min(horizon, SETTINGS['combat_branch_max_horizon'])
-    if aux_actions.shape[1] != expected_aux or len(aux_states) > 64:
-        raise ValueError('MoE balanced combat auxiliary must match min(currentH,16), at most64 actors')
+    if aux_actions.shape[1] != expected_aux or len(aux_states) > auxiliary_actor_limit:
+        raise ValueError('MoE balanced combat auxiliary must match min(currentH,16), at most'+str(auxiliary_actor_limit)+' actors')
     with torch.no_grad(), autocast():
         aux_features = model.encode_map(aux_grid).detach()
     with autocast():
@@ -253,6 +281,10 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
         'moe_main_enemy_weight':float(main_enemy_weight),
         'moe_late_prefix_start': late_start, 'moe_auxiliary': auxiliary,
         'moe_late_own_prefix': late, 'moe_fixed_task_weights': dict(SETTINGS['task_weights'])}
+    metrics.update(moe_direct_empty_branch_count=int(not auxiliary['direct_source_supervision_available'])
+        + int(not late['direct_source_supervision_available']),
+        moe_direct_support_gate_eligible=auxiliary['direct_source_supervision_available']
+            and late['direct_source_supervision_available'])
     metrics.update(moe_auxiliary_direct_per_step_counts=auxiliary['direct_per_tick_counts'],
         moe_late_direct_per_step_counts=late['direct_per_tick_counts'],
         moe_auxiliary_spawn_anchor_counts=auxiliary['direct_spawn_anchor_counts'],
@@ -304,16 +336,19 @@ def sample_moe_combat_batch(sampler, data, rng, *, horizon, batch_size=64):
     """Return (ordinary Source batch, native-JSON quota/row receipt)."""
     import copy
     import json
-    if (data.split != 'train' or type(batch_size) is not int or batch_size != 64
+    if (data.split != 'train' or type(batch_size) is not int or batch_size not in (16,32,64)
             or type(horizon) is not int or horizon not in MOE_HORIZONS
             or sampler.horizon != min(horizon, 16) or sampler.context != 1):
-        raise ValueError('MoE event quotas must cover the actual64x min(currentH,16) Source tape')
-    pairs = sampler.sample(64, rng)
-    batch = data.batch(64, context=1, horizon=sampler.horizon, indices=pairs)
+        raise ValueError('MoE event quotas must cover actual16/32/64x min(currentH,16) Source tape')
+    pairs = (sampler.sample(batch_size,rng,allow_micro32_continuation=True) if batch_size==32
+             else sampler.sample(batch_size,rng))
+    batch = data.batch(batch_size, context=1, horizon=sampler.horizon, indices=pairs)
     receipt = {**copy.deepcopy(sampler.last_sample),
         'moe_horizon': horizon, 'auxiliary_horizon': sampler.horizon,
         'source_identity': copy.deepcopy(sampler.moe_identity),
         'pairs': pairs.tolist(), 'index_reservation_only': False,
-        'used_aux_fragments': 64, 'training_cases_used': True}
+        'used_aux_fragments': batch_size, 'training_cases_used': True}
+    if batch_size == 16:
+        receipt['runtime_batch_size'] = 16
     json.dumps(receipt, allow_nan=False)
     return batch, receipt

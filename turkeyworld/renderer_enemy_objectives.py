@@ -125,7 +125,7 @@ def source_object_crop_ssim(prediction, target, mask, *, padding=2):
 def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contrast_weight=.1,
                           base_only=False, latent_weight=0., detach_base=True,
                           base_regression_weight=0., object_crop_weight=0., small_enemy_rebalance=False,
-                          far_wall_supervision=False):
+                          far_wall_supervision=False,conditions_fn=None):
     """Supervise compact Base/RF1 with equal present foreground/background mass."""
     for name, value in (('ssim_weight', ssim_weight), ('edge_weight', edge_weight),
                         ('contrast_weight', contrast_weight), ('latent_weight', latent_weight),
@@ -147,7 +147,7 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
     if (flow.kind != 'student' or flow.steps != 1 or codec.training or codec.quantize.training
             or any(parameter.requires_grad for parameter in codec.parameters())):
         raise ValueError('Enemy refinement requires RF1 and the entire codec/quantizer frozen in eval')
-    conditions = enemy_conditions(model, batch)
+    conditions = (conditions_fn or enemy_conditions)(model, batch)
     residual_enabled = bool(getattr(model.base_student.config, 'pixel_residual', False))
     residual = None
     if base_only:
@@ -268,7 +268,7 @@ def enemy_refinement_loss(model, batch, *, ssim_weight=.2, edge_weight=.1, contr
     return total, metrics
 
 
-def far_wall_refinement_loss(model,batch,*,detach_base=True):
+def far_wall_refinement_loss(model,batch,*,detach_base=True,conditions_fn=None):
     """Auxiliary GT-pose renderer query with ONLY the explicit v6 far terms."""
     from .renderer_far_wall_protocol import far_wall_loss,far_wall_protocol
     from .renderer_wall_depth import source_wall_depth_labels
@@ -277,7 +277,7 @@ def far_wall_refinement_loss(model,batch,*,detach_base=True):
             or codec.training or codec.quantize.training
             or any(parameter.requires_grad for parameter in codec.parameters())):
         raise ValueError('Far-only auxiliary requires RF1 and the entire frozen codec in eval')
-    conditions=enemy_conditions(model,batch)
+    conditions=(conditions_fn or enemy_conditions)(model,batch)
     base,rgb,_=refinement_forward(model,conditions,detach_base=detach_base)
     labels=source_wall_depth_labels(conditions['map'],conditions['state'],conditions['object_mask'])
     total=base.sum()*0;metrics={'far_wall_protocol':far_wall_protocol(),

@@ -94,6 +94,7 @@ def validate_renderer_source_lineage(teacher, source_config):
     teacher's trained image assets through configuration normalization alone.
     """
     source = _world_config(source_config)
+    validate_five_role_renderer_lineage(teacher, source)
     validate_combat_renderer_lineage(teacher, source)
     validate_fusion_renderer_lineage(teacher, source)
     validate_dual_renderer_lineage(teacher, source)
@@ -154,6 +155,38 @@ def validate_fusion_renderer_lineage(teacher, source_config):
                 +teacher.vjepa_backend.enemy_rssm.memory_size)
             or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
         raise ValueError('Shared fusion MoE lineage changed architecture, memory, or frozen renderer assets')
+
+
+def validate_five_role_renderer_lineage(teacher, source_config):
+    """An explicit append-only five-role proof is required even for old bundles."""
+    source, target = _world_config(source_config), _world_config(teacher.config)
+    if not target['rssm_five_role_enabled']:
+        if source['rssm_five_role_enabled']:
+            raise ValueError('Renderer five-role lineage cannot disable its appended architecture')
+        return
+    report = getattr(teacher, 'rssm_five_migration', None)
+    module = getattr(teacher.vjepa_backend, 'five_role_fusion', None)
+    if (not isinstance(report, dict) or report.get('format_version') != 1
+            or report.get('kind') != 'append_five_role_transformer_fusion'
+            or any(report.get(key) is not True for key in ('old_model_tensors_bitexact',
+                'frozen_render_assets_bitexact', 'zero_residual_initialization'))
+            or not isinstance(report.get('source_config'), dict)
+            or not isinstance(report.get('target_config'), dict) or module is None):
+        raise ValueError('Renderer reuse requires explicit five-role Transformer fusion migration lineage')
+    previous, migrated = _world_config(report['source_config']), _world_config(report['target_config'])
+    changed = sorted(key for key in previous if previous[key] != migrated[key])
+    expected = ['vjepa_backend.five_role_fusion.'+name for name, _ in module.named_parameters()]
+    fields = lambda config: {key:value for key,value in config.items() if key.startswith('rssm_five_')}
+    if (previous['rssm_five_role_enabled'] or not migrated['rssm_five_role_enabled']
+            or not previous['combat_rssm_enabled'] or not previous['rssm_fusion_moe_enabled']
+            or any(not key.startswith('rssm_five_') for key in changed)
+            or report.get('allowed_config_changes') != changed or fields(migrated) != fields(target)
+            or source['rssm_five_role_enabled'] and fields(source) != fields(target)
+            or report.get('added_parameter_names') != expected
+            or report.get('added_parameter_count') != sum(p.numel() for p in module.parameters())
+            or report.get('memory_size') != teacher.vjepa_backend.memory_size
+            or report.get('source_renderer_conditioning_identity') != renderer_condition_identity(teacher)):
+        raise ValueError('Five-role fusion lineage changed architecture, memory, or frozen renderer assets')
 
 
 def validate_combat_renderer_lineage(teacher, source_config):
@@ -348,7 +381,9 @@ def _construct(config, source, *, share_codec, codec=None, geometry_opacity_sour
         adapter_width=0, adapter_depth=0, adapter_heads=0,
         codec_config=config.renderer_codec_config, spatial_conditioning=config.spatial_combat,
         patch_size=config.flow_patch_size, block_conditioning=config.flow_block_conditioning,
-        improved_loss=config.game_training_v5)
+        improved_loss=config.game_training_v5, output_moe_enabled=config.flow_output_moe_enabled,
+        output_moe_expert_width=config.flow_output_moe_expert_width,
+        output_moe_role_schema=config.flow_output_moe_role_schema,output_moe_experts=config.flow_output_moe_experts)
     parameter = source.image_input.weight
     student.to(device=parameter.device, dtype=parameter.dtype)
     # Attach after casting the velocity net: a mixed-precision source codec
@@ -412,6 +447,7 @@ def _student_config(student, teacher):
     if not isinstance(raw, dict):
         raise ValueError('Build the renderer student with build_renderer_student before export')
     config = WorldModelConfig(**raw)
+    validate_five_role_renderer_lineage(teacher, asdict(config))
     validate_dual_renderer_lineage(teacher, asdict(config))
     replacement = isinstance(getattr(student, '_renderer_codec_distillation', None), dict)
     if (config.kind != 'teacher' or config.flow_kind != 'student'
@@ -421,12 +457,21 @@ def _student_config(student, teacher):
             or not bool(student.codec_loaded)
             or hasattr(student, 'residual_adapter')
             or hasattr(student, 'geometry_opacity') != config.flow_geometry_opacity_enabled
+            or hasattr(student, 'output_moe') != config.flow_output_moe_enabled
             or _backbone_config(config, codec_replacement=replacement) !=
                _backbone_config(teacher.config, codec_replacement=replacement)):
         raise ValueError('Student renderer configuration changed its teacher backbone or one/four-step RF protocol')
     for name in ('flow_patch_size', 'flow_block_conditioning', 'spatial_combat'):
         if getattr(config, name) != getattr(teacher.config, name):
             raise ValueError('Student spatial/patch conditioning differs from the source teacher')
+    if config.flow_output_moe_enabled:
+        module = student.output_moe
+        if (module.expert_width != config.flow_output_moe_expert_width
+                or module.role_schema != config.flow_output_moe_role_schema
+                or module.expert_count != config.flow_output_moe_experts
+                or module.width != student.width or module.grid != student.grid
+                or module.output_dim != student.latent_channels*student.patch*student.patch):
+            raise ValueError('Student output MoE differs from its configured token dimensions')
     return config
 
 
@@ -447,6 +492,9 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
     from .renderer_geometry_opacity import geometry_opacity_metadata, validate_geometry_opacity_bundle
     opacity_metadata = geometry_opacity_metadata(student, teacher)
     validate_geometry_opacity_bundle(student, teacher, opacity_metadata, base_bundle)
+    from .renderer_moe import renderer_moe_metadata, validate_renderer_moe_bundle
+    moe_metadata = renderer_moe_metadata(student, getattr(teacher, 'base_student', None))
+    validate_renderer_moe_bundle(student, base_bundle, moe_metadata)
     if base_bundle is not None:
         from .base_student import prepare_base_student
         head, _, _ = prepare_base_student(teacher, base_bundle)
@@ -479,6 +527,8 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
         'quality_status': 'Distilled renderer; gameplay accuracy is not qualified'}
     if opacity_metadata is not None:
         payload['geometry_opacity_override'] = opacity_metadata
+    if moe_metadata is not None:
+        payload['renderer_output_moe'] = moe_metadata
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name+f'.{os.getpid()}.tmp')
@@ -569,6 +619,8 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     student.load_state_dict(state, strict=True)
     from .renderer_geometry_opacity import validate_geometry_opacity_bundle
     validate_geometry_opacity_bundle(student, teacher, opacity_metadata, base_bundle)
+    from .renderer_moe import validate_renderer_moe_bundle
+    validate_renderer_moe_bundle(student, base_bundle, payload.get('renderer_output_moe'))
     student._check_codec()
     if provenance is not None:
         _validate_compact_codec(teacher, student.codec, provenance,

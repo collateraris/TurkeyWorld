@@ -103,7 +103,7 @@ def geometry_wall_loss(prediction, target, labels):
     return total, result
 
 
-def geometry_refinement_loss(model, batch, *, detach_base=True, opacity_depth_weight=0.):
+def geometry_refinement_loss(model, batch, *, detach_base=True, opacity_depth_weight=0.,conditions_fn=None):
     """Extra all-depth geometry batch; no changes to the v6 main objective."""
     if type(opacity_depth_weight) not in (int,float) or not math.isfinite(opacity_depth_weight) or opacity_depth_weight<0:
         raise ValueError('Private opacity depth weight must be finite and nonnegative')
@@ -114,7 +114,7 @@ def geometry_refinement_loss(model, batch, *, detach_base=True, opacity_depth_we
             or codec.training or codec.quantize.training
             or any(p.requires_grad for p in codec.parameters())):
         raise ValueError('Geometry refinement requires RF1 and the frozen codec in eval')
-    conditions = enemy_conditions(model, batch)
+    conditions = (conditions_fn or enemy_conditions)(model, batch)
     base, rgb, _ = refinement_forward(model, conditions, detach_base=detach_base)
     labels = source_wall_depth_labels(conditions['map'], conditions['state'], conditions['object_mask'])
     total = base.sum()*0

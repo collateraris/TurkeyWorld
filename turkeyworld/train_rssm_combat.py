@@ -96,7 +96,7 @@ class RSSMCombatTraining(RSSMTraining):
         if names is None:
             names = [name for name, value in model.named_parameters() if value.requires_grad]
         payload = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration',
-            'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration') if key in metadata}
+            'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration', 'rssm_five_migration') if key in metadata}
         payload.update(stage='world', state_schema=dict(STATE_SCHEMA), config=asdict(model.config),
             model=model.state_dict(), optimizer=optimizer.state_dict(), optimizer_parameter_names=names,
             training_steps=self.state['global_training_step'], global_training_step=self.state['global_training_step'],

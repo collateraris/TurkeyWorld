@@ -190,6 +190,8 @@ class RSSMTraining:
                 self.preview_model.rssm_fusion_migration=copy.deepcopy(model.rssm_fusion_migration)
             if hasattr(model,'combat_rssm_migration'):
                 self.preview_model.combat_rssm_migration=copy.deepcopy(model.combat_rssm_migration)
+            if hasattr(model,'rssm_five_migration'):
+                self.preview_model.rssm_five_migration=copy.deepcopy(model.rssm_five_migration)
             load_renderer_student(self.preview_model, renderer_checkpoint,
                 allow_unqualified_codec=True)
             self.preview_model.to(self.device).eval().requires_grad_(False)
@@ -207,11 +209,14 @@ class RSSMTraining:
                             and name in client_state and client_state[name].shape == value.shape):
                         client_state[name].copy_(value)
         from .rssm_stage_preview import stage_preview_spec, stage_preview_batch, generate_stage_preview
+        from .rssm_drift_preview import build_drift_preview
         spec = stage_preview_spec(self.state)
         horizon, context, offsets = spec['horizon'], spec['context'], spec['display_offsets']
         data = self.long_val if spec['gated'] else self.short_val
         batch = stage_preview_batch(data, spec)
-        generated, source = generate_stage_preview(client, batch, spec)
+        generated, source, own_states = generate_stage_preview(client, batch, spec, collect_states=True)
+        map_drift = build_drift_preview(batch, spec, own_states,
+            step=self.state['global_training_step'])
         offset_label = ', '.join(str(offset) for offset in offsets)
         renderer_label=('NPR '+str(pinned.get('renderer_training_steps',pinned['renderer_refinement_updates']))
             +' (phase '+str(pinned['renderer_refinement_updates'])+')')if pinned else ''
@@ -223,6 +228,7 @@ class RSSMTraining:
                 'step': self.state['global_training_step'], 'every': 10, 'context': context, 'horizon': horizon,
                 'generated_rollout_transitions': horizon, 'display_offsets': offsets,
                 'displayed_future_frames': len(offsets), 'current_stage_preview': spec['gated'],
+                'map_drift': map_drift,
                 'loss_gated_curriculum_plan_sha256': None if spec.get('moe') else spec.get('plan_sha256'),
                 **({'moe_training_plan_sha256':spec.get('plan_sha256'),
                     'moe_training_stage_index':spec.get('stage_index')}if spec.get('moe')else {}),

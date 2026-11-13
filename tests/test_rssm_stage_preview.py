@@ -143,6 +143,28 @@ class StagePreviewTests(unittest.TestCase):
         torch.testing.assert_close(source[:, 0, 0, 0], torch.tensor(spec['display_offsets'])/500)
         self.assertFalse(generated.requires_grad)
 
+    def test_map_trace_retains_same_own_rollout_without_extra_calls_or_source_feedback(self):
+        spec = {'horizon': 16, 'context': 2, 'display_offsets': [1, 6, 11, 16]}
+        batch = stage_preview_batch(PreviewData(), spec)
+        baseline, traced = PreviewClient(), PreviewClient()
+        rng = torch.get_rng_state().clone()
+        expected = generate_stage_preview(baseline, batch, spec)
+        expected_rng = torch.get_rng_state().clone()
+        torch.set_rng_state(rng)
+        generated, source, states = generate_stage_preview(traced, batch, spec, collect_states=True)
+        self.assertTrue(torch.equal(torch.get_rng_state(), expected_rng))
+        torch.testing.assert_close(generated, expected[0])
+        torch.testing.assert_close(source, expected[1])
+        self.assertEqual(tuple(states.shape), (17, 20))
+        torch.testing.assert_close(states[0], batch['states'][0, 1])
+        for offset in range(17):
+            self.assertAlmostEqual(float(states[offset, 0]), .26+.001*offset, places=5)
+        self.assertEqual(len(traced.calls), 16)
+        self.assertEqual(traced.render_offsets, spec['display_offsets'])
+        self.assertEqual(traced.initializations, 1)
+        self.assertFalse(states.requires_grad)
+        self.assertFalse(torch.equal(states[1:], batch['states'][0, 2:]))
+
     def test_trainer_refresh_uses_new_current_stage_and_keeps_rng_training_caches_and_asset_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             trainer = RSSMTraining.__new__(RSSMTraining)
@@ -183,6 +205,8 @@ class StagePreviewTests(unittest.TestCase):
             self.assertEqual(saved[1]['source'].shape[0], 4)
             self.assertIn('H32', saved[1]['metadata']['caption'])
             self.assertIn('NPR 22200 (phase 6000)',saved[1]['metadata']['caption'])
+            self.assertEqual(saved[1]['metadata']['map_drift']['step'], 5090)
+            self.assertEqual(saved[1]['metadata']['map_drift']['horizon'], 32)
             self.assertEqual(len(trainer.preview_model.calls), 48)
             self.assertEqual(len(published), 2)
             self.assertTrue(torch.equal(torch.get_rng_state(), rng))

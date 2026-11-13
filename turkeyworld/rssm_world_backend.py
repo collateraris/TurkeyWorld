@@ -142,6 +142,15 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                 blocks=config.combat_rssm_blocks, unimix=config.combat_rssm_unimix),
                 width=width, observation_dim=config.rssm_embed_dim,
                 fusion_width=config.rssm_fusion_moe_width)
+        if getattr(config, 'rssm_five_role_enabled', False):
+            from .rssm_five_role_fusion import RSSMFiveRoleFusion
+            # Appended after every pretrained branch; the new zero task heads
+            # neither consume nor reset any recurrent memory or RNG stream.
+            with torch.random.fork_rng(devices=[]):
+                self.five_role_fusion = RSSMFiveRoleFusion(
+                    width=config.rssm_fusion_moe_width, heads=config.rssm_fusion_moe_heads,
+                    expert_hidden=config.rssm_fusion_moe_expert_hidden,
+                    role_bias=config.rssm_fusion_moe_role_bias)
 
     @property
     def memory_size(self):
@@ -363,6 +372,11 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
             result.update(rssm_fusion_moe=fusion,
                 rssm_fusion_moe_router_role_loss=fusion['router_role_loss'],
                 rssm_fusion_moe_router_balance_loss=fusion['router_balance_loss'])
+            addition = fusion.get('five_role_fusion')
+            if addition is not None:
+                result.update(five_role_fusion=addition,
+                    five_role_router_role_loss=addition['router_role_loss'],
+                    five_role_router_balance_loss=addition['router_balance_loss'])
         return result
 
     def _previous_memory_fusion(self, player_memory, enemy_memory, state, action, map_features, spatial,
@@ -373,8 +387,17 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
             raise ValueError('Shared RSSM fusion requires both persistent previous memories')
         extra = ({'combat_context': self.combat_rssm.fusion_context(combat_memory)}
             if hasattr(self, 'combat_rssm') else {})
-        return self.fusion_moe(player_memory, enemy_memory, state, action,
+        result = self.fusion_moe(player_memory, enemy_memory, state, action,
             self._map_context(map_features, state), spatial, **extra)
+        if hasattr(self, 'five_role_fusion'):
+            from .rssm_five_role_fusion import RESIDUAL_KEYS
+            addition = self.five_role_fusion(result['role_tokens'], state, action,
+                navigation_only=self.config.navigation_only)
+            result = {**result, **{key: result[key]+addition[key] for key in RESIDUAL_KEYS},
+                'router_role_loss': result['router_role_loss']+addition['router_role_loss'],
+                'router_balance_loss': result['router_balance_loss']+addition['router_balance_loss'],
+                'five_role_fusion': addition}
+        return result
 
     def transition(self, state, action, map_features, memory, projection):
         state = state.float()

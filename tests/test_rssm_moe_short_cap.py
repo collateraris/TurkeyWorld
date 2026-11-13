@@ -40,11 +40,34 @@ class MoEShortCapTests(unittest.TestCase):
                            loaded_checkpoint_sha256=file_sha(source))
         return plan, path
 
-    def update(self, loss=1.):
+    def update(self, loss=1., *, eligible=True):
         horizon = moe_training_horizon(self.state)
         self.state['global_training_step'] += 1
         return commit_moe_update(self.state, step=self.state['global_training_step'],
-                                  horizon=horizon, train_loss=loss)
+                                  horizon=horizon, train_loss=loss, loss_gate_eligible=eligible)
+
+    def test_missing_direct_labels_reset_loss_streak_but_preserve_twenty_update_budget(self):
+        plan = short_cap_plan(self.state, source_checkpoint=self.source, cap=20)
+        path = self.root/'cap20.json'; path.write_text(json.dumps(plan), encoding='utf-8')
+        bind_budget_policy(self.state, plan, path=path, sha256=file_sha(path),
+                           loaded_checkpoint_sha256=file_sha(self.source))
+        for _ in range(4): self.update(.01)
+        self.update(.01, eligible=False)
+        self.assertEqual((self.gate['current_horizon'], self.gate['consecutive_below_threshold']), (4,0))
+        self.assertFalse(self.gate['last_gate_passed'])
+        self.assertEqual(self.gate['last_train_loss'], .01)
+        self.assertEqual(moe_training_horizon(json.loads(json.dumps(self.state))), 4)
+        for _ in range(15): self.update(.01, eligible=False)
+        self.assertEqual((self.gate['current_horizon'], self.gate['stage_updates']), (8,0))
+        entry = self.gate['advance_history'][-1]
+        self.assertEqual(entry['advance_reason'], 'stage_budget')
+        self.assertEqual(entry['qualifying_streak'], 0)
+        self.assertFalse(entry['loss_gate_eligible'])
+        self.assertFalse(self.gate['goal_met'])
+        self.assertEqual(moe_training_horizon(json.loads(json.dumps(self.state))), 8)
+        for _ in range(5): self.update(.01)
+        self.assertEqual(self.gate['current_horizon'], 16)
+        self.assertTrue(self.gate['last_loss_gate_eligible'])
 
     def test_five_consecutive_losses_and_exact_half_resets(self):
         self.activate()

@@ -44,7 +44,10 @@ def _velocity(network, noisy, time, base_latents, state, self_condition=None, ma
         tokens = tokens+network.wall_condition(tokens, state, map_condition)
     shift, scale = network.final_modulation(condition).chunk(2, -1)
     tokens = network.final_norm(tokens)*(1+scale[:, None])+shift[:, None]
-    patches = network.output(tokens).reshape(-1, network.grid, network.grid,
+    output = network.output(tokens)
+    if hasattr(network, 'output_moe'):
+        output = output+network.output_moe(tokens, state)
+    patches = output.reshape(-1, network.grid, network.grid,
                                              network.latent_channels, network.patch, network.patch)
     return patches.permute(0, 3, 1, 4, 2, 5).reshape(-1, network.latent_channels,
                                                   network.latent_size, network.latent_size)
@@ -231,9 +234,17 @@ class LatentFlowRenderer(LatentVelocityNetwork):
                  adapter_width=0, adapter_depth=0, adapter_heads=0, adapter_mlp_ratio=4,
                  codec_config=None, mlp_hidden=0, spatial_conditioning=False, patch_size=4,
                  block_conditioning=False, improved_loss=False, time_uniform_fraction=0.,
-                 time_stratified=True, decoded_ssim_weight=.05, decoded_edge_weight=.05):
+                 time_stratified=True, decoded_ssim_weight=.05, decoded_edge_weight=.05,
+                 output_moe_enabled=False, output_moe_expert_width=32,
+                 output_moe_role_schema='scene_enemy_combat_v1',output_moe_experts=3):
         if kind not in {'teacher', 'student'} or mode not in {'flow_matching', 'rectified_flow'}:
             raise ValueError('Unsupported latent flow kind/mode')
+        if (type(output_moe_enabled) is not bool or output_moe_expert_width != 32
+                or output_moe_enabled and (kind != 'student' or mode != 'rectified_flow'
+                    or steps != 1 or adapter_width or adapter_depth)):
+            raise ValueError('Output MoE requires the one-step latent student without a residual adapter')
+        from .renderer_moe import validate_role_schema
+        validate_role_schema(output_moe_role_schema,output_moe_experts,output_moe_enabled)
         if steps < 0 or min(width, depth, heads, adapter_width, adapter_depth, adapter_heads) < 0:
             raise ValueError('Steps and optional flow dimensions must be nonnegative')
         if (any(not isinstance(value, bool) for value in (spatial_conditioning, block_conditioning, improved_loss, time_stratified))
@@ -282,6 +293,12 @@ class LatentFlowRenderer(LatentVelocityNetwork):
         self.block_conditioning, self.improved_loss = block_conditioning, improved_loss
         self.time_uniform_fraction, self.time_stratified = float(time_uniform_fraction), time_stratified
         self.decoded_ssim_weight, self.decoded_edge_weight = float(decoded_ssim_weight), float(decoded_edge_weight)
+        if output_moe_enabled:
+            from .renderer_moe import _new_module
+            self.output_moe = _new_module(self, width=self.width,
+                output_dim=self.latent_channels*self.patch*self.patch,
+                expert_width=output_moe_expert_width, grid=self.grid,
+                role_schema=output_moe_role_schema,experts=output_moe_experts)
 
     @property
     def uses_wall_conditioning(self):

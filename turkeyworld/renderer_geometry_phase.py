@@ -225,7 +225,7 @@ def geometry_candidate_assessment(report, baseline):
 GEOMETRY_PREVIEW_COLUMNS = ('near_corners','mid_corners','far_thin','other_far')
 
 
-def geometry_preview_arrays(model,data,panel):
+def geometry_preview_arrays(model,data,panel,*,conditions_fn=None):
     """Four held-out render queries; no NPC-presence or quality assumptions."""
     from .renderer_enemy_objectives import enemy_conditions
     from .renderer_refinement import refinement_forward
@@ -234,7 +234,7 @@ def geometry_preview_arrays(model,data,panel):
         raise ValueError('Geometry preview requires four distinct held-out queries')
     with _isolated_validation(model,data,173):
         batch=data.batch(len(panel),indices=panel)
-        conditions=enemy_conditions(model,batch)
+        conditions=(conditions_fn or enemy_conditions)(model,batch)
         base,rgb,_=refinement_forward(model,conditions,detach_base=True)
         codec=model.flow_renderer.codec
         reference=codec.decode(codec.encode(conditions['target'])['quantized'])

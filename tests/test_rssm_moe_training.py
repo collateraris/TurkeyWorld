@@ -180,6 +180,19 @@ class MoEProtocolTests(unittest.TestCase):
             bind_moe_training(state, self.plan, path=self.path, sha256=self.sha,
                                loaded_checkpoint_sha256='a' * 64)
 
+    def test_unsupported_direct_branch_cannot_qualify_loss_advance_or_history(self):
+        for _ in range(9): self.step(.01)
+        gate = self.step(.01, loss_gate_eligible=False)
+        self.assertEqual(gate['current_horizon'], 4)
+        self.assertEqual(gate['consecutive_below_threshold'], 0)
+        self.assertFalse(gate['last_gate_passed'])
+        self.bind()
+        for _ in range(10): self.step(.01)
+        gate = self.state['rssm_training']['moe_training']
+        self.assertEqual(gate['current_horizon'], 8)
+        gate['advance_history'][0]['loss_gate_eligible'] = False
+        with self.assertRaises(ValueError): moe_training_horizon(self.state)
+
 
 class MoETrainingTests(unittest.TestCase):
     @classmethod
@@ -235,10 +248,10 @@ class MoETrainingTests(unittest.TestCase):
             self.assertEqual(report['moe_late_prefix_start'], max(0, horizon - 16))
         self.assertAlmostEqual(*values, places=7)
 
-    def test_zero_direct_labels_and_wrong_aux_horizon_fail_closed(self):
+    def test_unknown_direct_error_and_wrong_aux_horizon_fail_closed(self):
         model = TinyModel()
         with patch('turkeyworld.rssm_combat_branches._source_step_at_own_state', side_effect=ValueError('illegal')):
-            with self.assertRaisesRegex(ValueError, 'no legal'):
+            with self.assertRaisesRegex(ValueError, 'illegal'):
                 moe_dynamics_backward(model, data(4), data(4))
         with self.assertRaisesRegex(ValueError, r'min\(currentH,16\)'):
             moe_dynamics_backward(TinyModel(), data(4), data(16))

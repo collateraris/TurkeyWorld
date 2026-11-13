@@ -8,13 +8,15 @@ from .rssm_combat_memory_protocol import digest_json, file_sha
 BUDGET_PROTOCOL = 'rssm_moe_loss_or_stage_budget_v2'
 FLAT_CAP_PROTOCOL = 'rssm_moe_flat_stage_cap_v3'
 SHORT_CAP_PROTOCOL = 'rssm_moe_flat_stage_cap_v4'
+TARGETED_HORIZON_PROTOCOL = 'rssm_moe_targeted_horizon_budget_v5'
+MANDATORY_HORIZON_UPDATES = {'240': 100, '368': 100, '450': 100}
 CAP100_PROTOCOL = FLAT_CAP_PROTOCOL  # Existing preparation callers may keep this alias.
-FLAT_PROTOCOLS = (FLAT_CAP_PROTOCOL, SHORT_CAP_PROTOCOL)
+FLAT_PROTOCOLS = (FLAT_CAP_PROTOCOL, SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOCOL)
 
 
 def loss_gate_settings(gate):
     policy = gate.get('advance_policy') or {}
-    if policy.get('kind') == SHORT_CAP_PROTOCOL:
+    if policy.get('kind') in (SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOCOL):
         return policy['threshold'], policy['required_consecutive_passes']
     return .25, 10
 
@@ -22,9 +24,35 @@ def loss_gate_settings(gate):
 def stage_budget(index, policy=None):
     if type(index) is not int or not 0 <= index <= 30:
         raise ValueError('MoE stage index must be zero-based0..30')
+    if policy is not None and policy.get('kind') == TARGETED_HORIZON_PROTOCOL:
+        from .rssm_moe_protocol import MOE_HORIZONS
+        return policy['mandatory_horizon_updates'].get(str(MOE_HORIZONS[index]), policy['budget_base'])
     if policy is not None and policy.get('kind') in FLAT_PROTOCOLS:
         return policy['budget_base']
     return 50+15*index
+
+
+def stage_requires_full_budget(index, policy=None):
+    if type(index) is not int or not 0 <= index <= 30:
+        raise ValueError('MoE stage index must be zero-based0..30')
+    if not policy or policy.get('kind') != TARGETED_HORIZON_PROTOCOL:
+        return False
+    from .rssm_moe_protocol import MOE_HORIZONS
+    return str(MOE_HORIZONS[index]) in policy['mandatory_horizon_updates']
+
+
+def _targeted_settings_valid(value):
+    selected = value.get('mandatory_horizon_updates')
+    return (type(value.get('version')) is int and value['version'] == 5
+        and type(value.get('budget_base')) is int and value['budget_base'] == 20
+        and type(value.get('budget_increment')) is int and value['budget_increment'] == 0
+        and selected == MANDATORY_HORIZON_UPDATES
+        and isinstance(selected, dict) and all(type(n) is int for n in selected.values())
+        and value.get('mandatory_horizons_disable_loss_gate') is True
+        and type(value.get('final_stage_max_updates')) is int and value['final_stage_max_updates'] == 100
+        and type(value.get('threshold')) in (float, int) and value['threshold'] == .5
+        and type(value.get('required_consecutive_passes')) is int and value['required_consecutive_passes'] == 5
+        and value.get('comparison') == 'strict_less_than')
 
 
 def curriculum_completion(gate):
@@ -32,9 +60,9 @@ def curriculum_completion(gate):
     policy = gate.get('advance_policy')
     if not isinstance(policy, dict) or policy.get('kind') not in FLAT_PROTOCOLS:
         return None
-    if gate.get('goal_met'):
+    if gate.get('goal_met') and not stage_requires_full_budget(gate['stage_index'], policy):
         return 'completed_loss_gate'
-    if gate.get('stage_index') == 30 and gate.get('stage_updates', 0) >= policy['budget_base']:
+    if gate.get('stage_index') == 30 and gate.get('stage_updates', 0) >= stage_budget(30, policy):
         return 'completed_budget'
     return None
 
@@ -43,6 +71,10 @@ def update_completion(gate):
     policy = gate.get('advance_policy')
     if not isinstance(policy, dict) or policy.get('kind') not in FLAT_PROTOCOLS:
         return
+    if policy['kind'] == TARGETED_HORIZON_PROTOCOL:
+        mandatory = stage_requires_full_budget(gate['stage_index'], policy)
+        gate.update(effective_stage_budget=stage_budget(gate['stage_index'], policy),
+                    mandatory_stage_budget=mandatory, loss_streak_can_advance=not mandatory)
     completion = curriculum_completion(gate)
     gate.update(budget_exhausted=completion == 'completed_budget',
         curriculum_completed=completion is not None,
@@ -60,10 +92,15 @@ def validate_completion(gate):
     if tuple(gate.get(k) for k in ('budget_exhausted', 'curriculum_completed', 'completion_reason')) != expected:
         raise ValueError('Saved MoE final-stage completion or budget exhaustion changed')
     # An already overdue source is historical; no additional step may run there.
-    cap = policy['budget_base']
+    cap = stage_budget(gate['stage_index'], policy)
     maximum = max(cap, policy['source_gate']['stage_updates']) if gate['stage_index'] == policy['source_gate']['stage_index'] else cap
     if gate['stage_updates'] > maximum or gate['stage_index'] < 30 and gate['stage_updates'] >= cap:
         raise ValueError('Saved MoE stage exceeded its explicit flat update cap')
+    if policy['kind'] == TARGETED_HORIZON_PROTOCOL:
+        mandatory = stage_requires_full_budget(gate['stage_index'], policy)
+        if (gate.get('effective_stage_budget') != cap or gate.get('mandatory_stage_budget') is not mandatory
+                or gate.get('loss_streak_can_advance') is not (not mandatory)):
+            raise ValueError('Saved MoE horizon-specific mandatory budget/early-loss flag changed')
 
 
 def validate_policy(gate, step):
@@ -78,6 +115,7 @@ def validate_policy(gate, step):
                  or policy['budget_base'] not in (20,25) or policy.get('budget_increment') != 0
                  or policy.get('threshold') != .5 or type(policy.get('required_consecutive_passes')) is not int
                  or policy['required_consecutive_passes'] != 5 or policy.get('comparison') != 'strict_less_than'))
+            or (policy.get('kind') == TARGETED_HORIZON_PROTOCOL and not _targeted_settings_valid(policy))
             or (policy.get('kind') == BUDGET_PROTOCOL and
                 (policy.get('budget_base'), policy.get('budget_increment')) != (50, 15))
             or type(policy.get('source_optimizer_step')) is not int
@@ -90,7 +128,8 @@ def validate_policy(gate, step):
     if policy['kind'] in FLAT_PROTOCOLS:
         from .rssm_moe_protocol import _validate_gate
         previous = policy.get('source_gate')
-        if (policy.get('version') != (4 if policy['kind'] == SHORT_CAP_PROTOCOL else 3)
+        if (policy.get('version') != (5 if policy['kind'] == TARGETED_HORIZON_PROTOCOL else
+                                     4 if policy['kind'] == SHORT_CAP_PROTOCOL else 3)
                 or not isinstance(previous, dict)
                 or policy['kind'] == CAP100_PROTOCOL and (previous.get('advance_policy') or {}).get('kind') in FLAT_PROTOCOLS
                 or digest_json(previous) != policy.get('source_gate_sha256')
@@ -98,6 +137,9 @@ def validate_policy(gate, step):
                 or previous.get('last_optimizer_step') != policy['source_optimizer_step']
                 or previous.get('sha256') != gate.get('sha256')
                 or (previous.get('advance_policy') or {}).get('sha256') != policy.get('previous_policy_sha256')
+                or policy['kind'] == TARGETED_HORIZON_PROTOCOL
+                   and ((previous.get('advance_policy') or {}).get('kind') != SHORT_CAP_PROTOCOL
+                        or (previous.get('advance_policy') or {}).get('budget_base') != 20)
                 or gate.get('advance_history', [])[:len(previous.get('advance_history', []))] != previous.get('advance_history')
                 or any(gate.get('horizon_update_counts', {}).get(h, -1) < n
                        for h, n in previous.get('horizon_update_counts', {}).items())):
@@ -120,7 +162,7 @@ def validate_budget_advance(gate, entry, index):
         and type(entry.get('completed_updates_at_previous_stage')) is int
         and entry['completed_updates_at_previous_stage']>=stage_budget(index, policy)
         and (policy['kind'] not in FLAT_PROTOCOLS or entry.get('activation_boundary') is True
-             or entry['completed_updates_at_previous_stage'] == policy['budget_base'])
+             or entry['completed_updates_at_previous_stage'] == stage_budget(index, policy))
         and type(entry.get('qualifying_streak')) is int
         and 0<=entry['qualifying_streak']<=loss_gate_settings(gate)[1])
 
@@ -132,6 +174,11 @@ def validate_loss_advance(gate, entry):
         previous = policy['source_gate']
         return entry in previous.get('advance_history', []) and validate_loss_advance(previous, entry)
     threshold, required = loss_gate_settings(gate)
+    if policy.get('kind') == TARGETED_HORIZON_PROTOCOL:
+        from .rssm_moe_protocol import MOE_HORIZONS
+        if entry.get('from_horizon') in MOE_HORIZONS and stage_requires_full_budget(
+                MOE_HORIZONS.index(entry['from_horizon']), policy):
+            return False
     loss = entry.get('train_loss')
     return (entry.get('advance_reason') in (None, 'loss_streak')
             and type(loss) in (float, int) and 0 <= loss < threshold
@@ -188,24 +235,47 @@ def short_cap_plan(state, *, source_checkpoint, cap=25):
     return plan
 
 
+def targeted_horizon_plan(state, *, source_checkpoint):
+    """Keep the v4 gate/history; selected future horizons require all100 updates."""
+    plan = budget_plan(state, source_checkpoint=source_checkpoint)
+    previous = state['rssm_training']['moe_training'].get('advance_policy') or {}
+    if previous.get('kind') != SHORT_CAP_PROTOCOL or previous.get('budget_base') != 20:
+        raise ValueError('Selected100 horizons require the complete existing v4 cap20 parent')
+    plan.update(version=5, kind=TARGETED_HORIZON_PROTOCOL, budget_base=20, budget_increment=0,
+        threshold=.5, required_consecutive_passes=5, comparison='strict_less_than',
+        mandatory_horizon_updates=deepcopy(MANDATORY_HORIZON_UPDATES),
+        mandatory_horizons_disable_loss_gate=True,
+        advance_condition='mandatory_selected_stage_budget_else_loss_streak_OR_completed_stage_budget',
+        final_stage_continues=False, final_stage_max_updates=100,
+        source_policy_sha256=previous['sha256'], completion_status='completed_budget',
+        loss_gate_completion_status='completed_loss_gate',
+        streak_initialization='preserve_same_threshold_streak_and_completed_stage_counts')
+    return plan
+
+
 def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
     from .rssm_moe_protocol import _validate_gate, MOE_HORIZONS
     raw=json.loads(Path(path).read_text(encoding='utf-8'))
     short = plan.get('kind') == SHORT_CAP_PROTOCOL and plan.get('version') == 4
-    flat = short or plan.get('kind') == CAP100_PROTOCOL and plan.get('version') == 3
+    targeted = plan.get('kind') == TARGETED_HORIZON_PROTOCOL and plan.get('version') == 5
+    flat = targeted or short or plan.get('kind') == CAP100_PROTOCOL and plan.get('version') == 3
     if (raw!=plan or file_sha(path)!=sha256
             or not (flat or plan.get('kind') == BUDGET_PROTOCOL and plan.get('version') == 2)
-            or flat and (type(plan.get('budget_base')) is not int
+            or targeted and not _targeted_settings_valid(plan)
+            or targeted and (type(plan.get('stage_index_origin')) is not int or plan['stage_index_origin'] != 0)
+            or flat and not targeted and (type(plan.get('budget_base')) is not int
                          or plan['budget_base'] not in ((20,25) if short else (50,100))
                          or (plan.get('budget_increment'),plan.get('stage_index_origin')) != (0,0))
             or not flat and (plan.get('budget_base'),plan.get('budget_increment'),plan.get('stage_index_origin'))!=(50,15,0)
-            or (plan.get('threshold'),plan.get('required_consecutive_passes'))!=((.5,5) if short else (.25,10))
+            or (plan.get('threshold'),plan.get('required_consecutive_passes'))!=((.5,5) if short or targeted else (.25,10))
             or short and plan.get('streak_initialization') != 'new_policy_zero_no_reinterpretation_of_historical_losses'
+            or targeted and plan.get('streak_initialization') != 'preserve_same_threshold_streak_and_completed_stage_counts'
             or plan.get('comparison') != 'strict_less_than'
-            or plan.get('advance_condition')!='loss_streak_OR_completed_stage_budget'
+            or plan.get('advance_condition') != ('mandatory_selected_stage_budget_else_loss_streak_OR_completed_stage_budget'
+                                                if targeted else 'loss_streak_OR_completed_stage_budget')
             or any(plan.get(k)is not True for k in ('preserve_completed_updates','budget_does_not_qualify_gameplay'))
             or plan.get('final_stage_continues') is not (not flat)
-            or flat and (plan.get('final_stage_max_updates') != plan['budget_base']
+            or flat and (plan.get('final_stage_max_updates') != (100 if targeted else plan['budget_base'])
                          or plan.get('completion_status') != 'completed_budget'
                          or plan.get('loss_gate_completion_status') != 'completed_loss_gate')
             or any(plan.get(k)is not False for k in ('weights_reset','optimizer_reset'))
@@ -217,7 +287,7 @@ def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
         raise ValueError('Stage budget cannot replace the established objective plan')
     policy=gate.get('advance_policy')
     replacing = (flat and policy is not None and policy.get('kind') == BUDGET_PROTOCOL
-                 or short and policy is not None and policy.get('sha256') != sha256)
+                 or (short or targeted) and policy is not None and policy.get('sha256') != sha256)
     if policy is None or replacing:
         if (step!=plan['source_optimizer_step'] or loaded_checkpoint_sha256!=plan['source_checkpoint_sha256']
                 or digest_json(gate)!=plan['source_gate_sha256']):
@@ -225,7 +295,9 @@ def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
         previous=deepcopy(gate)
         if flat and plan.get('source_policy_sha256') != (policy or {}).get('sha256'):
             raise ValueError('Flat-cap activation changed the exact historical parent budget policy')
-        policy=dict(version=4 if short else 3 if flat else 2,kind=plan['kind'],plan=str(Path(path).resolve()),sha256=sha256,
+        if targeted and ((policy or {}).get('kind') != SHORT_CAP_PROTOCOL or policy['budget_base'] != 20):
+            raise ValueError('Selected100 horizons must retain their exact v4 parent history')
+        policy=dict(version=5 if targeted else 4 if short else 3 if flat else 2,kind=plan['kind'],plan=str(Path(path).resolve()),sha256=sha256,
             budget_base=plan['budget_base'],budget_increment=plan['budget_increment'],source_optimizer_step=step,
             source_moe_updates=gate['updates'],last_optimizer_step=step,updates=0,source_gate=previous)
         if flat:
@@ -235,6 +307,11 @@ def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
             policy.update(threshold=.5, required_consecutive_passes=5, comparison='strict_less_than')
             gate.update(consecutive_below_threshold=0, last_gate_passed=False,
                         last_stage_advanced=False, goal_met=False)
+        if targeted:
+            policy.update(threshold=.5, required_consecutive_passes=5, comparison='strict_less_than',
+                mandatory_horizon_updates=deepcopy(plan['mandatory_horizon_updates']),
+                mandatory_horizons_disable_loss_gate=True, final_stage_max_updates=100)
+            if stage_requires_full_budget(gate['stage_index'], policy): gate['goal_met'] = False
         gate['advance_policy']=policy
         # The user counts updates already completed on the current stage.
         # An overdue stage advances once at this existing complete boundary.
@@ -256,13 +333,17 @@ def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
           or flat and
           (policy.get('source_gate_sha256') != plan['source_gate_sha256']
            or policy.get('previous_policy_sha256') != plan['source_policy_sha256'])
-          or short and (policy.get('threshold'), policy.get('required_consecutive_passes')) != (.5,5)):
+          or (short or targeted) and (policy.get('threshold'), policy.get('required_consecutive_passes')) != (.5,5)
+          or targeted and (policy.get('mandatory_horizon_updates') != plan['mandatory_horizon_updates']
+                          or policy.get('mandatory_horizons_disable_loss_gate') is not True)):
         raise ValueError('Saved stage-budget policy identity changed')
     _validate_gate(gate,step)
     state['horizon_curriculum_protocol']=plan['kind']
     state.setdefault('training_protocol',{})['moe_stage_budget']={
         'kind':plan['kind'],'plan_sha256':sha256,'budget_base':plan['budget_base'],'budget_increment':plan['budget_increment'],
-        'stage_index_origin':0,'advance_condition':'loss_streak_OR_completed_stage_budget',
+        'stage_index_origin':0,'advance_condition':plan['advance_condition'],
         'final_stage_continues':not flat,
-        **({'threshold':.5, 'required_consecutive_passes':5, 'comparison':'strict_less_than'} if short else {})}
+        **({'threshold':.5, 'required_consecutive_passes':5, 'comparison':'strict_less_than'} if short or targeted else {}),
+        **({'version':5, 'mandatory_horizon_updates':deepcopy(MANDATORY_HORIZON_UPDATES),
+            'mandatory_horizons_disable_loss_gate':True, 'final_stage_max_updates':100} if targeted else {})}
     return policy

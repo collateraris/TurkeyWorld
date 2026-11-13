@@ -48,8 +48,12 @@ def stage_preview_batch(data, spec):
                       indices=np.asarray([[eligible, 0]], dtype=np.int64))
 
 
-def generate_stage_preview(client, batch, spec):
-    """Generate all H own transitions; render only the four displayed offsets."""
+def generate_stage_preview(client, batch, spec, *, collect_states=False):
+    """Generate H own transitions and optionally retain their diagnostic states.
+
+    The trace includes the initial state and uses this same rollout, without
+    additional model calls or any future Source state as an input.
+    """
     horizon, context = spec['horizon'], spec['context']
     offsets = spec['display_offsets']
     if (batch['actions'].shape[:2] != (1, horizon)
@@ -62,13 +66,17 @@ def generate_stage_preview(client, batch, spec):
         memory = client.initialize_from_image(batch['context_frames'], batch['states'][:, :context], fmap)
         memory_shape = tuple(memory.shape)
         images = []
+        states = [state[0].detach().clone()] if collect_states else None
         for offset in range(1, horizon+1):
             result = client.transition(state, batch['actions'][:, offset-1], fmap, memory)
             state, memory = result['state'], result['memory']
             if (state.shape != (1, 20) or tuple(memory.shape) != memory_shape
                     or not bool(torch.isfinite(state).all() and torch.isfinite(memory).all())):
                 raise FloatingPointError('Nonfinite current-stage preview state/h-z; no reset or repair')
+            if states is not None:
+                states.append(state[0].detach().clone())
             if offset in offsets:
                 images.append(client.render(state, result['features'], fmap)[0].float())
         selected = torch.tensor([offset-1 for offset in offsets], device=batch['target_frames'].device)
-        return torch.stack(images), batch['target_frames'][0].index_select(0, selected)
+        result = (torch.stack(images), batch['target_frames'][0].index_select(0, selected))
+        return (*result, torch.stack(states)) if states is not None else result

@@ -82,6 +82,10 @@ class WorldModelConfig:
     flow_patch_size: int = 4
     flow_block_conditioning: bool = False
     flow_geometry_opacity_enabled: bool = False
+    flow_output_moe_enabled: bool = False
+    flow_output_moe_expert_width: int = 32
+    flow_output_moe_role_schema: str = 'scene_enemy_combat_v1'
+    flow_output_moe_experts: int = 3
     rssm_deter_dim: int = 1008
     rssm_hidden_dim: int = 1024
     rssm_stoch: int = 32
@@ -110,6 +114,7 @@ class WorldModelConfig:
     rssm_fusion_moe_experts: int = 3
     rssm_fusion_moe_top_k: int = 2
     rssm_fusion_moe_role_bias: float = 2.
+    rssm_five_role_enabled: bool = False
     combat_rssm_enabled: bool = False
     combat_rssm_deter_dim: int = 1344
     combat_rssm_hidden_dim: int = 1392
@@ -121,6 +126,19 @@ class WorldModelConfig:
     combat_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if (type(self.rssm_five_role_enabled) is not bool or self.rssm_five_role_enabled and
+                (self.architecture != 'dreamer_rssm' or not self.rssm_fusion_moe_enabled
+                 or not self.combat_rssm_enabled)):
+            raise ValueError('Five-role fusion requires the existing three-RSSM shared-fusion architecture')
+        from .renderer_moe import validate_role_schema
+        validate_role_schema(self.flow_output_moe_role_schema,self.flow_output_moe_experts,self.flow_output_moe_enabled)
+        if type(self.flow_output_moe_enabled) is not bool or self.flow_output_moe_expert_width != 32:
+            raise ValueError('Renderer output MoE requires a boolean flag and expert width32')
+        if self.flow_output_moe_enabled and (self.architecture not in {'vjepa2_ac','dreamer_rssm'}
+                or self.image_size != 32 or self.renderer_codec != 'vqgan'
+                or self.renderer_mode != 'rectified_flow' or self.flow_kind != 'student'
+                or self.flow_steps != 1 or self.flow_adapter_width or self.flow_adapter_depth):
+            raise ValueError('Renderer output MoE requires native32 one-step latent student rendering')
         if type(self.flow_geometry_opacity_enabled) is not bool:
             raise ValueError('Private renderer opacity flag must be a boolean')
         if self.flow_geometry_opacity_enabled and (self.architecture not in {'vjepa2_ac','dreamer_rssm'}
@@ -378,6 +396,11 @@ class NeuralWorldModel(nn.Module):
                     codec['block_conditioning'] = True
                 if self.config.game_training_v5:
                     codec['improved_loss'] = True
+                if self.config.flow_output_moe_enabled:
+                    codec['output_moe_enabled'] = True
+                    codec['output_moe_expert_width'] = self.config.flow_output_moe_expert_width
+                    codec['output_moe_role_schema'] = self.config.flow_output_moe_role_schema
+                    codec['output_moe_experts'] = self.config.flow_output_moe_experts
             self.flow_renderer = renderer(kind=self.config.flow_kind or self.config.kind,
                 image_size=self.config.image_size, mode=self.config.renderer_mode,
                 steps=self.config.flow_steps, width=self.config.flow_width,
@@ -759,6 +782,8 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
                 parts['rssm_fusion_moe'] = sum(p.numel() for p in backend.fusion_moe.parameters())
             if getattr(backend, 'combat_rssm', None) is not None:
                 parts['combat_rssm'] = sum(p.numel() for p in backend.combat_rssm.parameters())
+            if getattr(backend, 'five_role_fusion', None) is not None:
+                parts['rssm_five_role_fusion'] = sum(p.numel() for p in backend.five_role_fusion.parameters())
         elif model.config.architecture == 'vjepa2_ac':
             parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
@@ -820,12 +845,16 @@ def load_world_checkpoint(path, device="cpu"):
     model.enemy_rssm_resize = checkpoint.get('enemy_rssm_resize')
     model.rssm_fusion_migration = checkpoint.get('rssm_fusion_migration')
     model.combat_rssm_migration = checkpoint.get('combat_rssm_migration')
+    model.rssm_five_migration = checkpoint.get('rssm_five_migration')
     if model.config.rssm_fusion_moe_enabled:
         from .renderer_student import validate_fusion_renderer_lineage
         validate_fusion_renderer_lineage(model, checkpoint['config'])
     if model.config.combat_rssm_enabled:
         from .renderer_student import validate_combat_renderer_lineage
         validate_combat_renderer_lineage(model, checkpoint['config'])
+    if model.config.rssm_five_role_enabled:
+        from .renderer_student import validate_five_role_renderer_lineage
+        validate_five_role_renderer_lineage(model, checkpoint['config'])
     return model.eval(), checkpoint
 
 
@@ -835,4 +864,7 @@ def load_sr_checkpoint(path, device="cpu"):
         raise ValueError("expected an SR checkpoint")
     model = build_upscaler(checkpoint["config"]).to(device)
     model.load_state_dict(checkpoint["model"])
+    if checkpoint['config'].get('sr_moe_enabled') or 'sr_moe_migration'in checkpoint or 'sr_moe_binding'in checkpoint:
+        from .sr_transformer_moe import validate_sr_moe_checkpoint
+        validate_sr_moe_checkpoint(model,checkpoint)
     return model.eval(), checkpoint

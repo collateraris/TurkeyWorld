@@ -63,7 +63,23 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
                  atlas_layout='round_4x2_Source_frames0_6',
                  atlas_sampling='nearest_pixel_index_ST_bilinear_gradient',
                  atlas_phase_selection='RGB_hard_argmax_ST_softmax',
-                 atlas_visibility='hard_forward_ST_sigmoid'):
+                 atlas_visibility='hard_forward_ST_sigmoid',
+                 sr_moe_enabled=False,sr_moe_role_schema='atlas_sr_five_private_transformers_v1',
+                 sr_moe_experts=5,sr_moe_width=64,sr_moe_heads=4,sr_moe_expert_hidden=128,
+                 sr_moe_grid=8,sr_moe_rgb_amplitude=1.,sr_moe_rgb_resolution=128,
+                 sr_moe_visibility_resolution=128,sr_moe_heat_resolution=32):
+        from .sr_transformer_moe import CONFIG
+        if (type(sr_moe_enabled)is not bool
+                or any(type(value)is not int for value in(sr_moe_experts,sr_moe_width,sr_moe_heads,sr_moe_expert_hidden,
+                    sr_moe_grid,sr_moe_rgb_resolution,sr_moe_visibility_resolution,sr_moe_heat_resolution))
+                or type(sr_moe_rgb_amplitude)not in(float,int)or not math.isfinite(sr_moe_rgb_amplitude)
+                or any(value!=CONFIG[name] for name,value in
+                dict(sr_moe_role_schema=sr_moe_role_schema,sr_moe_experts=sr_moe_experts,
+                    sr_moe_width=sr_moe_width,sr_moe_heads=sr_moe_heads,sr_moe_expert_hidden=sr_moe_expert_hidden,
+                    sr_moe_grid=sr_moe_grid,sr_moe_rgb_amplitude=sr_moe_rgb_amplitude,
+                    sr_moe_rgb_resolution=sr_moe_rgb_resolution,sr_moe_visibility_resolution=sr_moe_visibility_resolution,
+                    sr_moe_heat_resolution=sr_moe_heat_resolution).items())):
+            raise ValueError('SR MoE requires its explicit canonical five-role Transformer profile')
         if not (enemy_decoder_stable and enemy_decoder_visual_first and enemy_decoder_restoration):
             raise ValueError('Fixed-atlas SR requires the frozen-parent visual-first restoration profile')
         if (atlas_layout, atlas_sampling, atlas_phase_selection, atlas_visibility) != (
@@ -107,6 +123,9 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             atlas_phase_selection=atlas_phase_selection, atlas_visibility=atlas_visibility)
         for name, parameter in self.named_parameters():
             if name.startswith(UNUSED_PAINT_PREFIXES): parameter.requires_grad_(False)
+        if sr_moe_enabled:
+            from .sr_transformer_moe import enable_sr_transformer_moe
+            enable_sr_transformer_moe(self)
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -203,14 +222,21 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
         # Explicitly bypass every learned paint/seed/state-condition module.
         result = SemanticEDSRUpscaler.forward_with_aux(self, low_rgb)
         base = result['image']
+        moe = self.sr_moe(low_rgb) if hasattr(self,'sr_moe') else None
+        if moe is not None:
+            base=base+moe['base_rgb_residual'].to(base.dtype)
         values, _, applicable = project_enemy_hypothesis(hypothesis, batch=len(low_rgb), device=low_rgb.device)
         visual = self.enemy_decoder_visual(low_rgb)
         pooled = torch.cat((visual.mean((-2,-1)), visual.amax((-2,-1))), -1)
-        heat = self.enemy_decoder_heatmap(visual).float().flatten(1).softmax(-1).reshape(-1,32,32)
+        heat_logits = self.enemy_decoder_heatmap(visual).float()
+        if moe is not None:heat_logits=heat_logits+moe['heat_residual']
+        heat = heat_logits.flatten(1).softmax(-1).reshape(-1,32,32)
         axis = (torch.arange(32, device=low_rgb.device, dtype=torch.float32)+.5)/32
         yy, xx = torch.meshgrid(axis, axis, indexing='ij')
         heat_center = torch.stack(((heat*xx).sum((-2,-1)), (heat*yy).sum((-2,-1))), -1)
-        correction = self.enemy_decoder_box(pooled).float().tanh()
+        box_logits = self.enemy_decoder_box(pooled).float()
+        if moe is not None:box_logits=box_logits+moe['bbox_logit_residual']
+        correction = box_logits.tanh()
         size = ((.02+self.config['enemy_decoder_visual_size_max']*self.enemy_decoder_size(pooled).float().sigmoid())
                 * (2*correction[:,2:]).exp()).clamp(1e-4,5.)
         center = heat_center + .5*size*correction[:,:2]
@@ -231,7 +257,9 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             return torch.cat((roi.mean((-2,-1)),roi.amax((-2,-1))),-1)
         guided_summary, visual_summary = summary(proposal), summary(visual_box)
         extent = (proposal[:,2:]-proposal[:,:2]).clamp_min(1e-5)
-        delta = .15*self.enemy_decoder_box(guided_summary).float().tanh()*extent.repeat(1,2)
+        guided_box_logits=self.enemy_decoder_box(guided_summary).float()
+        if moe is not None:guided_box_logits=guided_box_logits+moe['bbox_logit_residual']
+        delta = .15*guided_box_logits.tanh()*extent.repeat(1,2)
         guided_box = proposal+delta
         guided_center = (guided_box[:,:2]+guided_box[:,2:])/2
         guided_size = (guided_box[:,2:]-guided_box[:,:2]).clamp(1e-4,5.)
@@ -239,15 +267,23 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
         visual_phase = self.enemy_decoder_animation(visual_summary).float()
         guided_phase = self.enemy_decoder_animation(guided_summary).float()
         dead_logits = self.atlas_player_dead_head(pooled).float()
+        if moe is not None:
+            visual_phase=visual_phase+moe['phase_residual'];guided_phase=guided_phase+moe['phase_residual']
+            dead_logits=dead_logits+moe['player_dead_residual']
         visual_rgba = self.fixed_atlas_rgba(visual_box,visual_phase,dead_logits)
         guided_rgba = self.fixed_atlas_rgba(guided_box,guided_phase,dead_logits)
         visible_logits = self.enemy_decoder_visible(visual).float()
+        if moe is not None:visible_logits=visible_logits+moe['visibility_residual']
         probability = visible_logits.sigmoid()
         hard_visibility = (visible_logits>=0).float()
         visibility = hard_visibility+(probability-probability.detach()) if self.training else hard_visibility
         visual_confirmation = self.enemy_decoder_visual_confirmation(visual_summary).float()
         guided_confirmation = self.enemy_decoder_confirmation(guided_summary).float()
         presence = self.enemy_decoder_global_presence(pooled).float()
+        if moe is not None:
+            visual_confirmation=visual_confirmation+moe['visual_confirmation_residual']
+            guided_confirmation=guided_confirmation+moe['guided_confirmation_residual']
+            presence=presence+moe['presence_residual']
         presence_probability = presence.sigmoid()
         agreement = torch.exp(-.5*(((proposal[:,:2]+proposal[:,2:])/2-center)
                           /(.1+extent/2)).square().sum(-1,keepdim=True))
@@ -305,4 +341,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             guided_confirmation_logits=guided_confirmation,
             guided_applicable=applicable,guided_alpha_hr=ga,
             guided_animation_logits=guided_phase,guided_animation_index=guided_phase.argmax(-1))
+        if moe is not None:
+            result.update(sr_moe=moe,sr_moe_role_schema=self.config['sr_moe_role_schema'],
+                sr_moe_inference_inputs='RGB32_with_optional_existing_predicted_hint_no_Source_labels')
         return result

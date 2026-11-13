@@ -28,9 +28,17 @@ class BaseStudentConfig:
     geometry_width: int = 192
     image_size: int = 32
     pixel_residual: bool = False
+    output_moe_enabled: bool = False
+    output_moe_expert_width: int = 8
+    output_moe_role_schema: str = 'scene_enemy_combat_v1'
+    output_moe_experts: int = 3
 
     def __post_init__(self):
+        from .renderer_moe import validate_role_schema
+        validate_role_schema(self.output_moe_role_schema,self.output_moe_experts,self.output_moe_enabled)
         if (self.image_size != 32 or self.geometry_width != 192 or not isinstance(self.pixel_residual, bool)
+                or type(self.output_moe_enabled) is not bool or self.output_moe_expert_width != 8
+                or self.output_moe_enabled and self.pixel_residual
                 or min(self.width, self.depth, self.heads) < 1 or self.width % self.heads):
             raise ValueError('Compact Base requires native32, shared192D geometry and valid attention dimensions')
 
@@ -58,8 +66,14 @@ class CompactBaseHead(nn.Module):
             self.pixel_residual = nn.Linear(width, 12)
             nn.init.zeros_(self.pixel_residual.weight)
             nn.init.zeros_(self.pixel_residual.bias)
-        if sum(value.numel() for value in self.parameters()) > 1_000_000:
-            raise ValueError('Compact Base head exceeds one million real parameters')
+        if self.config.output_moe_enabled:
+            from .renderer_moe import _new_module
+            self.output_moe = _new_module(self, width=width, output_dim=12,
+                expert_width=self.config.output_moe_expert_width, grid=16,
+                role_schema=self.config.output_moe_role_schema,experts=self.config.output_moe_experts)
+        from .renderer_moe import base_parameter_budget
+        if sum(value.numel() for value in self.parameters()) > base_parameter_budget(self.config):
+            raise ValueError('Compact Base head exceeds its explicit role-schema parameter budget')
 
     def _queries(self, state, features, geometry):
         if state.ndim != 2 or state.shape[-1] != STATE_DIM or features.shape != (len(state), 128):
@@ -86,11 +100,18 @@ class CompactBaseHead(nn.Module):
 
     def forward(self, state, features, geometry):
         # Base stays the original RGB condition; the residual never conditions Flow.
-        return self._pixels(self.rgb(self._queries(state, features, geometry))).sigmoid()
+        queries = self._queries(state, features, geometry)
+        return self._pixels(self._rgb_logits(queries, state)).sigmoid()
+
+    def _rgb_logits(self, queries, state):
+        logits = self.rgb(queries)
+        if hasattr(self, 'output_moe'):
+            logits = logits+self.output_moe(queries, state)
+        return logits
 
     def forward_with_residual(self, state, features, geometry):
         queries = self._queries(state, features, geometry)
-        base = self._pixels(self.rgb(queries)).sigmoid()
+        base = self._pixels(self._rgb_logits(queries, state)).sigmoid()
         residual = (.5*self._pixels(self.pixel_residual(queries)).tanh()
                     if self.config.pixel_residual else None)
         return base, residual
@@ -172,6 +193,12 @@ def export_base_student(teacher, head, path, *, training_steps, metrics=None, pr
         'quality_status': 'Distilled Base head; gameplay accuracy is not qualified'}
     if head.config.pixel_residual:
         payload['pixel_residual'] = pixel_residual_metadata(head)
+    from .renderer_moe import output_moe_metadata
+    moe_metadata = output_moe_metadata(head)
+    if head.config.output_moe_enabled != (moe_metadata is not None):
+        raise ValueError('Base output MoE configuration differs from its actual module')
+    if moe_metadata is not None:
+        payload['output_moe'] = moe_metadata
     if geometry_opacity_binding is None:
         from .renderer_geometry_opacity import geometry_opacity_metadata
         geometry_opacity_binding = geometry_opacity_metadata(teacher.flow_renderer, teacher)
@@ -180,7 +207,8 @@ def export_base_student(teacher, head, path, *, training_steps, metrics=None, pr
         from .renderer_geometry_opacity import validate_geometry_opacity_source
         validate_geometry_opacity_source(geometry_opacity_binding, teacher)
         payload['geometry_opacity_binding'] = deepcopy(geometry_opacity_binding)
-    if payload['head_parameters'] > 1_000_000:
+    from .renderer_moe import base_parameter_budget
+    if payload['head_parameters'] > base_parameter_budget(head.config):
         raise ValueError('Base head exceeds the requested parameter budget')
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -218,8 +246,12 @@ def prepare_base_student(teacher, path_or_payload):
     head.load_state_dict(state, strict=True)
     if head.config.pixel_residual and payload.get('pixel_residual') != pixel_residual_metadata(head):
         raise ValueError('Base pixel-residual provenance/configuration differs')
+    from .renderer_moe import output_moe_metadata
+    if payload.get('output_moe') != output_moe_metadata(head):
+        raise ValueError('Base output MoE provenance/configuration/hash differs')
     count = sum(value.numel() for value in head.parameters())
-    if payload.get('head_parameters') != count or count > 1_000_000:
+    from .renderer_moe import base_parameter_budget
+    if payload.get('head_parameters') != count or count > base_parameter_budget(head.config):
         raise ValueError('Base bundle parameter count differs from its compact configuration')
     parameter = next(teacher.parameters())
     head.to(device=parameter.device, dtype=parameter.dtype).eval().requires_grad_(False)
@@ -236,6 +268,11 @@ def load_base_student(teacher, path_or_payload):
         from .renderer_geometry_opacity import geometry_opacity_metadata
         if binding != geometry_opacity_metadata(teacher.flow_renderer, teacher):
             raise ValueError('Standalone compact Base requires its matching private renderer opacity')
+    if head.config.output_moe_enabled:
+        flow = teacher.flow_renderer
+        if (not hasattr(flow, 'output_moe')
+                or getattr(flow, '_renderer_base_identity', None) != payload['model_sha256']):
+            raise ValueError('Standalone compact Base requires its matching output-MoE RF bundle')
     teacher.base_student = head
     teacher.base_student_metadata = metadata
     teacher.base_student_bundle = payload

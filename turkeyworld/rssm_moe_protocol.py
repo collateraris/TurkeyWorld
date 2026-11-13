@@ -60,7 +60,8 @@ def moe_training_plan(state, *, source_checkpoint, source_checkpoint_sha256,
 
 def _validate_gate(gate, step):
     from .rssm_moe_budget import (validate_policy, validate_budget_advance, validate_completion,
-        validate_loss_advance, loss_gate_settings, SHORT_CAP_PROTOCOL)
+        validate_loss_advance, loss_gate_settings, SHORT_CAP_PROTOCOL, stage_requires_full_budget)
+    from .rssm_moe_batch_revision import validate_moe_batch_accounting
     start, updates = gate.get('start_optimizer_step'), gate.get('updates')
     if (type(start) is not int or type(updates) is not int or updates < 0
             or start + updates != step or gate.get('last_optimizer_step') != step
@@ -89,6 +90,8 @@ def _validate_gate(gate, step):
                 or entry.get('to_horizon') != MOE_HORIZONS[i + 1]
                 or type(entry.get('step')) is not int or not previous_step < entry['step'] <= step
                 or type(loss) not in (float, int) or not math.isfinite(loss) or loss<0
+                or type(entry.get('loss_gate_eligible', True)) is not bool
+                or not budget_advance and not entry.get('loss_gate_eligible', True)
                 or not valid_reason
                 or type(entry.get('completed_updates_at_previous_stage')) is not int
                 or entry['completed_updates_at_previous_stage'] < max(1, entry.get('qualifying_streak', 0))
@@ -97,21 +100,25 @@ def _validate_gate(gate, step):
         previous_step = entry['step']
     stage_updates = updates - sum(row['completed_updates_at_previous_stage'] for row in history)
     streak = gate.get('consecutive_below_threshold')
+    mandatory = stage_requires_full_budget(index, gate.get('advance_policy'))
+    main_examples, main_transitions = validate_moe_batch_accounting(gate, step)
     if (gate.get('stage_updates') != stage_updates or counts[str(MOE_HORIZONS[index])] != stage_updates
-            or type(streak) is not int or not 0 <= streak <= (required if index == len(MOE_HORIZONS) - 1 else required-1)
+            or type(streak) is not int or not 0 <= streak <= (required if mandatory or index == len(MOE_HORIZONS) - 1 else required-1)
             or streak > stage_updates
-            or gate.get('goal_met') is not (index == len(MOE_HORIZONS) - 1 and streak == required)
-            or gate.get('main_examples') != updates * 256
-            or gate.get('main_transitions') != sum(int(h) * n for h, n in counts.items()) * 256):
+            or gate.get('goal_met') is not (not mandatory and index == len(MOE_HORIZONS) - 1 and streak == required)
+            or gate.get('main_examples') != main_examples
+            or gate.get('main_transitions') != main_transitions):
         raise ValueError('Saved MoE streak, goal or actual transition accounting changed')
     if updates:
         loss = gate.get('last_train_loss')
+        eligible = gate.get('last_loss_gate_eligible', True)
         policy = gate.get('advance_policy') or {}
         activation = policy.get('kind') == SHORT_CAP_PROTOCOL and policy.get('updates') == 0
         if (type(loss) not in (float, int) or not math.isfinite(loss) or loss < 0
-                or not activation and (gate.get('last_gate_passed') is not (loss < threshold)
-                or loss >= threshold and streak != 0
-                or loss < threshold and not gate.get('last_stage_advanced') and streak == 0)):
+                or type(eligible) is not bool
+                or not activation and (gate.get('last_gate_passed') is not (eligible and loss < threshold)
+                or (not eligible or loss >= threshold) and streak != 0
+                or eligible and loss < threshold and not gate.get('last_stage_advanced') and streak == 0)):
             raise ValueError('Saved MoE total-loss decision changed')
     validate_completion(gate)
 
@@ -183,25 +190,31 @@ def moe_training_horizon(state):
 
 
 def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
-                      microbatch_size=64, effective_batch_size=256):
+                      microbatch_size=64, effective_batch_size=256, loss_gate_eligible=True):
     gate = state['rssm_training']['moe_training']
-    from .rssm_moe_budget import curriculum_completion, update_completion, loss_gate_settings
+    from .rssm_moe_budget import (curriculum_completion, update_completion, loss_gate_settings,
+                                 stage_requires_full_budget)
+    from .rssm_moe_batch_revision import batch_settings_for_gate, commit_moe_batch_revision
+    batch = batch_settings_for_gate(gate)
     if curriculum_completion(gate) is not None:
         raise ValueError('Completed flat-cap MoE curriculum cannot perform another optimizer commit')
     if (type(step) is not int or step != state.get('global_training_step')
             or step != gate['last_optimizer_step'] + 1
             or type(horizon) is not int or horizon != gate['current_horizon']
             or any(type(v) is not int for v in (microbatches, microbatch_size, effective_batch_size))
-            or (microbatches, microbatch_size, effective_batch_size) != (4, 64, 256)
-            or type(train_loss) not in (float, int) or not math.isfinite(train_loss) or train_loss < 0):
-        raise ValueError('MoE gate requires one finite complete64x4 total-loss optimizer commit')
+            or (microbatches, microbatch_size, effective_batch_size) !=
+                (batch['gradient_accumulation_steps'], batch['microbatch_size'], batch['effective_batch_size'])
+            or type(train_loss) not in (float, int) or not math.isfinite(train_loss) or train_loss < 0
+            or type(loss_gate_eligible) is not bool):
+        raise ValueError('MoE gate requires one finite complete pinned-batch total-loss optimizer commit')
     old = gate['stage_index']
     threshold, required = loss_gate_settings(gate)
-    passed = train_loss < threshold
+    passed = loss_gate_eligible and train_loss < threshold
     streak = min(required, gate['consecutive_below_threshold'] + 1) if passed else 0
     gate['updates'] += 1; gate['last_optimizer_step'] = step
     gate['horizon_update_counts'][str(horizon)] += 1
-    gate['main_examples'] += 256; gate['main_transitions'] += horizon * 256
+    gate['main_examples'] += effective_batch_size
+    gate['main_transitions'] += horizon * effective_batch_size
     gate['stage_updates'] += 1
     policy=gate.get('advance_policy')
     budget_passed=False
@@ -209,12 +222,15 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
         from .rssm_moe_budget import stage_budget
         policy['updates']+=1;policy['last_optimizer_step']=step
         budget_passed=gate['stage_updates']>=stage_budget(old, policy)
-    advanced = (streak == required or budget_passed) and old < len(MOE_HORIZONS) - 1
+    mandatory = stage_requires_full_budget(old, policy)
+    loss_passed = streak == required and not mandatory
+    advanced = (loss_passed or budget_passed) and old < len(MOE_HORIZONS) - 1
     if advanced:
         gate['advance_history'].append({'step': step, 'train_loss': float(train_loss),
             'from_horizon': horizon, 'to_horizon': MOE_HORIZONS[old + 1],
             'qualifying_streak': streak, 'completed_updates_at_previous_stage': gate['stage_updates'],
-            **({'advance_reason':'loss_streak' if streak==required else 'stage_budget',
+            **({'loss_gate_eligible': False} if not loss_gate_eligible else {}),
+            **({'advance_reason':'loss_streak' if loss_passed else 'stage_budget',
                 'stage_budget':stage_budget(old, policy),'advance_policy_sha256':policy['sha256']}if policy else{})})
         gate['stage_index'] += 1; gate['gate_advances'] += 1
         gate['stage_updates'] = 0; streak = 0
@@ -222,9 +238,12 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
         next_horizon=MOE_HORIZONS[gate['stage_index']], consecutive_below_threshold=streak,
         last_train_loss=float(train_loss), last_training_horizon=horizon,
         last_gate_passed=passed, last_stage_advanced=advanced,
-        goal_met=gate['stage_index'] == len(MOE_HORIZONS) - 1 and streak == required)
+        goal_met=not mandatory and gate['stage_index'] == len(MOE_HORIZONS) - 1 and streak == required)
+    if not loss_gate_eligible or 'last_loss_gate_eligible' in gate:
+        gate['last_loss_gate_eligible'] = loss_gate_eligible
     if policy is not None:
         gate['last_advance_reason']=gate['advance_history'][-1]['advance_reason'] if advanced else None
     update_completion(gate)
+    commit_moe_batch_revision(state, step=step, horizon=horizon)
     _validate_gate(gate, step)
     return gate

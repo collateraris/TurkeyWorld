@@ -2792,6 +2792,454 @@ frozen E7 codec и Atlas SR106105/local5175. Профиль NAV5152 рендер
 [profile proof](training_runs/paired_latest_20261113_private_geometry/renderer_profile_rebind.json),
 [runtime smoke](training_runs/paired_latest_20261113_private_geometry/runtime_smoke_verification.json).
 
+## H76. Последний private NPR в превью динамики
+
+Пользователь запросил последний NPR в «Что показывает модель». Свежий полный
+raw10000 экспортирован как NPR26200/Base25800 с6241 параметром private-opacity.
+Перепривязка NAV5152 к бою и строгая загрузка на world5816 сохранили все
+Base/RF/private/VQ тензоры. Revision `a85da445…` непосредственно продолжает
+Atlas revision `2535bab8…`; запись SR106105/local5175 не изменилась.
+
+Тот же run возобновлён на5816 как PID62252. До/после первого H112-превью
+1434 тензора мира,277 Adam states/options, все RNG/samplers и полный MoE gate
+совпали бит-в-бит; между snapshots выполнено0 SGD. Live HTTP, served-JS VM и PNG
+прошли36/36 проверок. Игра остаётся на фиксированном snapshot8480; обновление
+превью не подтверждает качество игры. Доказательства:
+[export/reload](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_assets/npr_private_g010000/export_verification.json),
+[same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_revision_resumes/g5816_a85da4457b85/verification.json),
+[живое превью](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/diagnostics/live_private_npr_preview_g5816_20261113T095319Z/proof.json).
+
+## H77. Сравнение траекторий на карте рядом с кадрами динамики
+
+К пяти строкам «Что показывает модель» добавлена интерактивная карта уровня.
+На ней сравниваются эталонные и предсказанные позиции, пути и направления игрока
+и врага. Ползунок выбирает переход0..H, четыре кнопки соответствуют моментам
+изображений. Расстояния указаны в клетках. Смерть, возрождение и разные жизни
+NPC отмечаются отдельно; отсутствие NPC не превращается в нулевую ошибку.
+
+Траектория, включая начальную точку, сохраняется из существующего цикла превью.
+Эталонные метки читаются после прогона: дополнительных переходов, запросов движка,
+коррекции состояний и случайных выборок нет. Пройдены15 backend/integration тестов.
+Пройдены141 Node-тест интерфейса и сборка, включая ползунок, отклонение устаревших
+данных, разрыв пути при спавне и маркер погибшего игрока.
+Реальные HTTP/HTML/SVG/PNG прошли32/32 проверки на5831/H128, включая четыре
+кнопки кадров и сохранение ползунка при опросе; [проверка страницы](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/diagnostics/live_map_drift_g5831_20261113T111923Z/proof.json).
+Тот же run возобновлён на5831/H128 как PID65836 с прежними argv и image-assets
+(NPR26200/Base25800, Atlas SR106105). Веса,277 Adam states, все RNG/samplers
+и полный curriculum совпали побитно до/после первого checkpoint с картой.
+См. [same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/map_drift_preview_restart_verification.json).
+Прежний PNG из пяти строк на том же шаге/context/H остался побитно одинаковым;
+см. [проверку кадров](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_code_restarts/g5831_a98edeb233b5/existing_preview_png_preservation.json).
+Независимая CPU-проверка сопоставила карту и все эталонные координаты с реальным
+held-out эпизодом и пересчитала129 точек/4 момента кадров. В этом одном H128-превью
+средняя XY-ошибка игрока0,60689 клетки, NPC при взаимной жизни8,9008 клетки
+на38 точках. Оба прогона возродили врага на переходе97, но в разных позициях.
+Это диагностика превью, а не проверка450 шагов; см. [аудит карты](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_code_restarts/g5831_a98edeb233b5/map_metadata_verification.json).
+Это диагностическое отображение; loss и правила игры не менялись.
+
+## H78. Пустое Source-покрытие поздней ветви и надёжные checkpoints
+
+Worker остановился в pending5864, micro4, на H144. Поздняя ветвь собственной
+памяти начинается на128 и после прогона запрашивает8×16 условных Source-меток.
+Допустимых меток в окне не осталось, а objective вызвал исключение вместо
+отчёта о пустом покрытии. В последних committed окнах отказы были по геометрии;
+на5863 четыре micro сохранили80/33/77/7 меток из128. Локальный Counter упавшего
+окна не записан, поэтому точное распределение его участников/причин неизвестно.
+
+Исправление обрабатывает только три точные recoverable ошибки собственного
+состояния: `invalid_direct_own_state_geometry`,
+`noncanonical_direct_own_state_no_repair` и `Cannot restore an entity inside a wall`;
+последняя включает сохранённую позицию тела мёртвого NPC. Неизвестные ошибки
+по-прежнему вызывают исключение. Пустое окно явно сообщает attempted/valid counts,
+причины и недоступное покрытие. Отсутствующий условный term не даёт градиента
+и не считается успешным нулём ошибки. Main XY/router и допустимые AUX-градиенты
+остаются активны. Нет Source-коррекции, исправления anchor, сброса памяти или
+изменений физики/таймеров. Пустая direct-ветвь блокирует раннюю loss-серию;
+cap20 не меняется.
+
+Durable checkpoint —5860, SHA
+`2d36ac573bd5b239e283db689a66153af904928dfc650754b484dae3149e86ad`.
+Из status/metrics5861–5863 нельзя восстановить три несохранённых состояния
+модели/Adam; строки архивированы, а не выданы за восстановленные веса.
+Pending5864 не дошёл до optimizer.step. Runner теперь атомарно заменяет один
+полный checkpoint после каждого завершённого optimizer update; preview10 и
+full validation250 остаются отдельно. Пройдены46 core checks, включая8 регрессий
+покрытия/gate, более широкий baseline84 и143 Node-теста/сборка. Dashboard явно
+показывает число пустых ветвей/недоступное покрытие рядом с MoE losses и отклоняет
+устаревшие метрики.
+
+Ограниченный read-only GPU scout от5860 занял12,67s: первые64 episode draws,
+38 combat actors, H144/context2/argmax и128 поздних запросов дали74 допустимые
+и54 geometry-invalid метки, совпав по каждому шагу с записанным5861/micro1.
+Веса, checkpoint и CPU/CUDA RNG не изменились; backward, Adam, AUX rollout и
+Source feedback отсутствовали. Это не точный replay упавшего5864.
+Восстановление с5860 запущено как PID67840. До/после initial preview save точно
+совпали все1434 тензора world,277 Adam states/options, все RNG/три sampler PCG,
+gates, argv и revision`a85`; между snapshots не было SGD. Затем первое новое
+полное5861 завершилось и атомарно сохранилось: все1434 тензора и277 Adam states
+конечны, frozen assets побитно прежние, счётчик H144 достиг10, все квоты64×4 и
+sampling receipts совпали. Loss1,7285662423635346, Player/Enemy/Combat/router и
+gradient norm точно совпали с архивной строкой5861. Началось5862. Это проверка
+первого durable update, а не качества игры;
+[доказательство первого commit](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/failure_recovery_resumes/g5860_failed5864_45182ee251cc/first_recovered_commit_verification.json).
+Доказательства:
+[аудит границы/сбоя](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/failure_recoveries/failed5864_20261113T140017Z/failed_update_consistency.json),
+[GPU scout](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/diagnostics/direct_label_failure_20261113/scout5860.json),
+[same-step recovery](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/failure_recovery_resumes/g5860_failed5864_45182ee251cc/verification.json).
+
+## H79. Микробатч16 с накоплением четырёх шагов
+
+Пользователь уменьшил микробатч динамики до16, сохранив accumulation4 и
+effective MAIN64. Protocol `rssm_moe_micro16_accum4_v1` закрепляет полный source5863,
+H144/stage12/MoE511, через `micro16_batch_revision_plan.json` (`e176b5…`).
+Прежние model/277 Adam states, RNG/private PCG и gate/серия/история сохранены.
+Прежние256-example counts сохраняют фактический старый размер; новые updates
+добавляют64 в отдельном ledger. Архитектура, память и task weights не сбрасываются.
+
+Micro combat/NPC-motion/navigation:9/4/3,10/4/2,9/4/3,10/4/2 — effective38/16/10,
+прежние59,375%/25%/15,625%. Player/router используют реальные доли, enemy weights —
+общий NPC denominator54 без NAV. Каждый micro теперь выбирает16 combat indices,
+удерживает9/10 и резервирует без обучения7/6:26 за update. Начальные PCG сохранены;
+новый размер выборки намеренно меняет последующий порядок данных. AUX16/micro
+даёт64 за update, late2/micro —8; оба потока отдельно от MAIN-долей.
+
+AUX16 сохраняет четверти4: наименее использованные spawn anchors по кругу,
+positive attacks2 near-wall/2 open, negatives3 occluded/1 other, shooting near/
+mid/far по1 плюс чередующийся genuine miss/legacy. За четыре draws target counts
+4/4/4/2/2; wall/other чередуются по фактическим miss draws. Прежние anchor/positive/
+legacy counters сохранены. CPU-тесты проверяют новое16 и точное совпадение прежних
+32/64 pairs, receipts, ledgers, summary и PCG. Source-pool/sampler identities
+остались прежними pinned; новый batch plan отдельно задаёт runtime16 sampling.
+Пройдены60 backend checks,147 Node-тестов и сборка.
+
+Изолированный GPU preflight прошёл22 проверки за150,07s на H144 во всех четырёх
+micro: MAIN64=38/16/10, AUX64 и late8, конечные положительные градиенты всех трёх
+RSSM/MoE. SGD не выполнялся, веса/277 Adam states сохранены. Production возобновлён
+с5863 как PID50676. Начальный before/after proof подтвердил точное совпадение
+всех1434 тензоров world,277 Adam states, config, всех RNG/трёх PCG и истории/серии
+H144/stage12. Изменились только batch/navigation/runtime metadata; revision
+updates остались0. Затем первое16×4 обновление5864 завершилось и сохранилось:
+MAIN64=38/16/10, AUX64 и late8, все1434 тензора world/277 Adam states конечны,
+frozen assets побитно прежние, piecewise old256/new64 counts верны. Loss составил
+1,2956592584, gradient norm38,05797, H144/stage13. Две реальные пустые direct-ветви
+были явно учтены без остановки; отсутствующее покрытие правильно заблокировало
+ранний loss gate. Stderr пуст, началось5865; см.
+[первый durable commit](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/batch_revision_resumes/g5863_e176b5d629df_9fbca9fd/first_micro16_commit_verification.json).
+Checkpoint после каждого update, cap20/ранние пять строгих TOTAL<0,5, защита gate
+при пустом покрытии и frozen NPR26200/Atlas106105 не меняются. Активация не
+подтверждает качество игры или измеренное улучшение VRAM. Доказательства:
+[batch plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro16_batch_revision_plan.json),
+[GPU preflight](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro16_gpu_preflight.json),
+[начальная активация](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/batch_revision_resumes/g5863_e176b5d629df_9fbca9fd/verification.json).
+
+## H80. Последняя нейроигра после перехода на микробатч16
+
+По запросу открыто парное окно с неизменяемыми inference snapshots в
+`training_runs/paired_latest_20261113T155600Z`: динамика5896, private NPR raw10000
+(RF26200/Base25800) и Atlas SR106105. Строгая загрузка и по два настоящих GPU-шага
+навигации/боя прошли с RSSM-памятью5232 и private opacity. PID60812 открыл окно
+1572×968 с панелями768 пикселей; нейросетевой выход1024×1024 подгоняется под панели.
+Source слева, нейроигра справа; T выбирает бой, E поворачивает вправо. Готовность
+проверена по handle окна и live status, stderr пуст. Обучение динамики продолжилось
+независимо. См. [snapshot](training_runs/paired_latest_20261113T155600Z/snapshot_receipt.json)
+и [runtime smoke](training_runs/paired_latest_20261113T155600Z/runtime_smoke_verification.json).
+
+## H81. Отдельная оценка картинки и динамики игры5896
+
+Read-only проверка использует точные игровые веса5896/RF26200/Base25800/SR106105,
+два held-out прогона450 шагов на той же карте и подстановки Source-поз только
+для рисования, с прежними собственными h/z-признаками. В обученном окне H176
+средняя XY-ошибка игрока в навигации0,14866 клетки; SSIM шести кадров0,39892,
+с точными Source-позами0,39716, у эмпирической реконструкции кодека0,86390.
+Стены отличаются уже при нулевом дрейфе на кадре0. В бою отдельно средняя ошибка
+NPC8,73953 клетки на85 допустимых точках, при первом спавне ошибка11 клеток.
+Рендер и его условия — существенное ограничение картинки; динамика врага тоже
+имеет самостоятельную ошибку. На одинаковой панели256 поз рендер регрессировал
+с SSIM0,75799 на raw8000 до0,68820 на raw10000. Предложены актуальные RSSM-признаки,
+фиксированные geometry/codec при адаптации Base/RF, эксперимент с patch1 и затем
+обновлённые пары SR. Настройки обучения/игры не менялись.
+См. [оценку](training_runs/diagnostics/render_vs_dynamics_g5896_20261113T160740Z/summary.json).
+
+## H82. MoE рендера с отдельным Transformer у каждого эксперта
+
+Пользователь попросил улучшать рендер параллельно динамике, затем явно добавил
+отдельный Transformer-блок каждому эксперту. Opt-in архитектура добавляет в Base
+и RF три мягко смешиваемые роли по экранным токенам: сцена/стены, враг и бой.
+После небольшой общей входной проекции каждый эксперт имеет собственный блок:
+Base width8/heads2/FF16, RF width32/heads4/FF64, dropout0. Общая выходная проекция
+инициализирована нулями; прежние общие Transformers и веса сохраняют функцию
+при активации. Base имеет999 939 параметров, RF7 034 500 с private geometry6241;
+новыми являются39 162 параметра в84 тензорах.
+
+Worker76384 обучает `training_runs/renderer_moe_20261113` на2000 локальных updates
+от полного private10000 parent, накопленно RF26200/Base25800. Сохранены321 прежних
+Adam states/groups, RNG и состояния трёх Source samplers; новая группа экспертов
+начинает без moments. MAIN16, far4×0,25 и geometry8×1 сохранены. Отдельный frozen
+snapshot признаков — актуальный combat-world5906: prior по прошлым RGB/state/action
+использует записанный профиль navigation/combat, статические признаки нулевые.
+World/map, E7, SR и private opacity MLP заморожены. Source-маски ролей служат
+метками сбалансированной router CE×0,01 и balancing×0,001; будущие Source-данные
+не поступают на inference.
+
+Пройдены39 CPU-тестов. Реальная GPU-проверка5906/private10000 за7,17 с подтвердила
+побитные initial Base/RF RGB и строгий export/reload, сохранение всех прежних
+тензоров/RNG, конечные ненулевые градиенты router/readout:0 optimizer updates,
+peak0,622GiB. Export использует исходный world с оригинальным codec и проверенную
+compact-codec provenance E7, без обхода lineage. Независимая проверка durable local34
+подтвердила405 конечных Adam states, сохранение frozen assets/private moments и
+точные draw clocks трёх samplers. Все84 новых тензора, включая шесть private
+Transformer-блоков, получили градиенты. Проверка наблюдала34, а не уже заменённые
+initial0/1 checkpoints. Рабочий процесс достиг113 updates
+и preview110 без ошибок. Native32 preview — каждые10, held-out validation —100.
+На одинаковой панели256 кадров с теми же признаками5906 initial→local100 RF SSIM
+вырос0,652124→0,676553, MAE снизился0,057161→0,049310; Base SSIM вырос0,63298→0,65812.
+Quality и geometry-preservation gates остаются false. Старый score10000 использовал
+признаки5152 и не является сопоставимым baseline этой фазы.
+**http://127.0.0.1:8781/** теперь показывает эту фазу. Динамика учится независимо;
+игра и её preview сохраняют NPR26200/Atlas106105 до отдельной явной смены assets.
+Quality pass и автоматическое подключение новых весов не заявлены.
+
+Доказательства: [запуск](training_runs/renderer_moe_20261113/launch_command.json),
+[frozen inputs](training_runs/renderer_moe_20261113/inputs/snapshot_receipt.json),
+[GPU warm-start](training_runs/renderer_moe_20261113/gpu_warmstart.json),
+[начальная валидация](training_runs/renderer_moe_20261113/validation/step_000000.json),
+[VAL100](training_runs/renderer_moe_20261113/validation/step_000100.json),
+[проверка durable34](training_runs/renderer_moe_20261113/diagnostics/independent_first_commits/verification.json).
+
+## H83. Пять экспертов рендера с сохранением parent routing
+
+Пользователь разделил задачи рендера на ближнюю геометрию/игрока, дальнюю
+геометрию, движение врага, бой врага и бой игрока, с отдельным Transformer у
+каждой роли в Base и RF. Предыдущий run трёх ролей завершил2000 обновлений,
+накопленно RF28200/Base27800. Его финальные RF SSIM/MAE/foreground MAE на256 кадрах
+—0,701969/0,043726/0,097023; source quality и geometry guards остались false.
+Relative experimental selection=true — отдельный критерий.
+
+Новая opt-in схема сохраняет три обученных parent gates и все прежние общие
+веса. Два новых sigmoid split разделяют сцену на near/far, врага — на
+motion/combat; копии private-блоков сохраняют начальную функцию parent.
+Канонический порядок: `near_geometry_player`, `far_geometry`, `enemy_motion`,
+`enemy_combat`, `player_combat`. У каждого эксперта один блок: Base
+width8/heads2/FF16, RF width32/heads4/FF64. Фактические размеры: Base1 001 157,
+RF7 051 654; добавлены18 372 параметра в52 тензорах. Сохранены405 прежних Adam
+states/options, сериализованные RNG и три sampler-потока; только новая группа
+начинает без moments. Inference/export использует отдельную версию2 bundle;
+старый формат трёх ролей остаётся поддержанным.
+
+Source-метки используют near<5 клеток/far≥5. Обычное оружие относится к
+near/player, вспышки, выстрелы и эффекты урона — к player combat. Весь кадр
+относится к бою только при HP0 игрока. Это detached метки обучения/проверки,
+без Source DDA на runtime. Иерархический soft routing по токенам получает
+существующие neural tokens/текущее числовое состояние. Веса CE×0,01 и
+balance×0,001 сохранены. MAIN16, far4×0,25 и geometry8×1, feature world5906,
+замороженные RSSMs/map, E7/SR и private opacity6241 не меняются.
+
+Worker38908 запустил `training_runs/renderer_moe_five_20261113` на2000 локальных
+updates параллельно динамике. Пройдены25 CPU-тестов. Реальный zero-SGD GPU
+preflight за7,72 с подтвердил точные initial Base/RF latent/RGB и строгий
+export/reload, сохранение прежних тензоров/RNG и ненулевые градиенты всех десяти
+private expert-блоков. Проверка durable local47 подтвердила рост401 активных
+старых Adam clocks на47, побитное сохранение четырёх private-opacity Adam states,
+положительные moments всех52 новых параметров, конечные веса и точные приращения
+samplers752/188/376. Initial0/1 независимо не захвачены; восстановление
+подтверждено immutable phase plan и GPU preflight. Live HTTP/VM проверка прошла
+на82/preview80: показаны десять effective role means и фактические parent/split
+means; произведение средних не подставляется вместо effective gates. Preview
+— каждые10, полная проверка —100 на256 фиксированных held-out Source-позах плюс
+geometry guard128. Начальный source quality не пройден; улучшение новой фазы и
+игровое качество не заявлены. Pointer8781 переключён на эту фазу; закреплённые
+assets игры/preview динамики сохранены.
+
+Доказательства: [запуск](training_runs/renderer_moe_five_20261113/launch_command.json),
+[phase plan](training_runs/renderer_moe_five_20261113/renderer_moe_five_phase_plan.json),
+[GPU preflight](training_runs/renderer_moe_five_20261113/gpu_warmstart.json),
+[baseline](training_runs/renderer_moe_five_20261113/validation_initial.json),
+[durable47](training_runs/renderer_moe_five_20261113/diagnostics/independent_first_commits/verification.json),
+[live UI](training_runs/renderer_moe_five_20261113/diagnostics/independent_first_commits/live_ui_proof.json).
+
+## H84. Пять экспертов динамики при трёх сохранённых RSSM
+
+Пользователь также запросил пять специализированных экспертов динамики. Новый
+opt-in адаптер идёт после обученного shared trunk трёх ролей; рекуррентные RSSM
+игрока, врага и боя сохранены. Канонические роли: `player_without_enemy`,
+`player_with_enemy_quiet`, `player_with_enemy_combat`, `enemy_motion_spawn`,
+`combat_health_hit_death`. Пять private Transformer-блоков используют
+width256/heads4/FF512 и dense soft routing. Первые три головы уточняют player
+pass-axis logits, голова врага — движение NPC/спавн, боевая — shot-target/attack
+logits. HP, попадания и смерти по-прежнему меняются через существующий structured
+transition. Нулевые новые task readouts сохраняют начальный переход; новой
+рекуррентной памяти и будущих Source-входов нет.
+
+Добавлены2 717 468 параметров в83 тензорах. Реальный GPU preflight за12,52 с на
+frozen5937 сохранил16 переходов навигации и16 боя, полную память5232,
+state/events/logits/features и strict lineage NPR26200. Реальная активация
+использовала более позднюю полную границу5939, а не этот ранний checkpoint.
+Её zero-SGD проверка сохранила1434 старых тензора,277 Adam states/четыре группы
+с прежними разными возрастами, RNG, всю RSSM training subtree и metadata
+samplers/curriculum/assets. Только новая optimizer-группа начинает без moments;
+прежние истории и исходная CLI сохранены.
+
+Worker73164 продолжил тот же run с5939/H208: cap20, микробатч16×4 и распределение
+MAIN38combat/16NPC-motion/10navigation. Закреплённые NPR26200/Base25800 и Atlas
+SR106105 не меняются; параллельный renderer пяти ролей автоматически не подключён.
+Начальная HTTP/VM проверка8765 прошла на source/current5939: пять строк экспертов
+видимы, routing недоступен до первого совпадающего completed update, RSSM и
+task-loss групп по-прежнему три. Routing diagnostics усредняют фактические
+собственные forward calls/queries; это не weighted optimizer objective и не
+свидетельство игрового качества. Старые и новые router auxiliaries используют
+существующие веса0,01/0,001.
+
+Первое полное обновление5939→5940 прошло15 независимых проверок: сохранены277
+прежних Adam states,269 активных возрастов выросли на1, восемь dormant states
+побитно прежние; все83 новых states конечны с local age1,1157 frozen тензоров
+не изменены. Обработаны четыре micro по16: MAIN38combat/16motion/10navigation
+плюс AUX64/late8. Счётчик этапа H208 вырос8→9, MoE clock587→588 без сброса.
+TOTAL —3,012795. Измеренная важность пяти экспертов —0,2 у каждого, средние
+player modes —0,204365/0,365968/0,429670 по2624 собственным forward,
+72 320 role queries и14 464 actor-ticks. Это не доли обучающей смеси.
+Новые router/player/enemy/combat readouts получили ненулевые градиенты;
+у пяти private-блоков они нулевые на первом шаге с нулевыми readouts, как
+ожидалось. Изменение61 нового тензора и ненулевые moments14 тензоров не означают,
+что private-блоки уже обучились. HTTP/VM проверка первого completed update
+прошла; улучшение навигации, боя или качества изображения не заявлено.
+
+Доказательства: [GPU preflight](training_runs/diagnostics/rssm_five_preflight_20261113/verification.json),
+[migration/start archive](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/five_role_revisions/02ec0c0c2513_20261113T175138474127Z/start.json),
+[zero-SGD сохранение](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/five_role_revisions/02ec0c0c2513_20261113T175138474127Z/verification.json),
+[initial UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/five_role_revisions/02ec0c0c2513_20261113T175138474127Z/live_initial_ui_proof.json),
+[первое полное обновление](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/five_role_revisions/02ec0c0c2513_20261113T175138474127Z/first_update.json),
+[committed routing UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/five_role_revisions/02ec0c0c2513_20261113T175138474127Z/live_first_update_ui_proof.json).
+
+## H85. Обязательные100 обновлений на H240 H368 и H450
+
+Пользователь запросил100 полных optimizer updates именно на H240, H368 и H450.
+Политика v5 отключает ранний переход по loss только на этих трёх этапах.
+Остальные H сохраняют cap20 ИЛИ пять последовательных строгих TOTAL<0,5.
+Финальный H450 завершается после100 со статусом `completed_budget`; это не quality.
+Эти100 updates ещё предстоят, а не уже выполнены. История прежних политик и
+завершённые счётчики этапов сохранены.
+
+Worker73772 продолжил ту же границу5947 с сохранением H208/stage16, MoE595 и
+серии0. Zero-SGD аудит27 проверок сохранил1517 тензоров модели,360 Adam states/
+пять групп, RNG и три sampler PCG; полный training state совпал с явно изменёнными
+policy и preview revision. Веса не сбрасывались. План —
+`stage_budget_horizon100_plan.json`, SHA
+`bb116e8c04df6b303bcf7ec999394ef7281e2ef155d22eba611d3cea28439cdd`.
+Live HTTP/VM8765 подтверждает текущие16/20, будущие mandatory100 flags,
+прежние16×4 и DYN five-role pins. UI-симуляции помечены будущими правилами,
+а не фактическим обучением. Пройдены161 Node-тест и build dashboard.
+
+Доказательства: [same-step сохранение](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/budget_horizon100_revisions/g5947_1dbef55a2120/initial_resume_verification.json),
+[live combined UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/budget_horizon100_revisions/g5947_1dbef55a2120/live_combined_ui_proof.json).
+
+## H86. Независимая валидация five-role рендера1156
+
+Read-only snapshot local1156 (RF29356/Base28956, frozen feature world5906)
+проверен на256 held-out Source-позах,128 geometry случаях и192 distance случаях;
+TRAIN-scene overlap0. Проверка заняла51,68 с без optimizer updates, сохранив все
+веса/входные файлы и работающие обучения. На основной панели RF SSIM вырос
+0,701969→0,730221, MAE снизился0,043726→0,037521, NPC foreground MAE —
+0,097023→0,092395 (142 видимых случая). Base достиг SSIM0,715937/MAE0,038201.
+Frozen codec reference —0,888866/0,021369; это эмпирическая реконструкция,
+а не доказанный предел.
+
+Absolute quality, Base preservation, geometry и distance guards остались false;
+relative experimental selection=true. На64 дальних NPC foreground MAE RF
+ухудшился0,081721→0,083856. Улучшение общего среднего не подтверждает дальних
+врагов или резкие стены. SR и автономная игра здесь не проверялись.
+[Фиксированный отчёт](training_runs/renderer_moe_five_20261113/diagnostics/validation_20261113T181806Z/summary.json).
+
+## H87. Новый five-role NPR в превью динамики по запросу
+
+Пользователь остановил renderer и явно запросил последние веса для визуализации
+динамики. Worker38908 завершён на local1409; export RF29609/Base29209 сохраняет
+пять private experts и frozen private opacity6241. Качество экспериментальное,
+не подтверждённое. SHA immutable preview bundle —
+`fcd8a86e5e9574d5d1939c33859ed3b8747aef7718c6393c1a070865d122c80f`.
+Atlas SR106105 и его точный SHA6e90… прежние. Видимая игра не менялась.
+
+Тот же restart5947 изменил ровно два CLI-значения: план бюджета выбранных
+горизонтов и preview-assets revision plan. Суффикс`_v3.json` означает третий
+выбор assets, но схема остаётся `preview_assets_revision_v2`, с цепочкой к
+прежней ревизии a85da445…. Новый SHA ревизии —
+`8d4b3ab2b67bc5738139aef4461e95a836e505f5f236dc1567cfeebec667e030`.
+Явный выбор меняет отдельный frozen rendering clone, а не веса/Adam динамики или
+её обучающие входы. Initial preview5947 выполнил208 собственных переходов,
+сохранил пять рядов и тот же read-only drift-map trace. HTTP/VM22/22 проверки
+подтвердили RF29609/Base29209/Atlas106105, five-role metadata, pins и отсутствие
+Source-future feedback. Quality promotion не заявлен.
+
+Доказательства: [export verification](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_assets/npr_moe_five_g001409/export_verification.json),
+[revision plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_assets_revision_npr_moe_five_29609_atlas_sr106105_v3.json),
+[live preview proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/budget_horizon100_revisions/g5947_1dbef55a2120/live_combined_ui_proof.json).
+
+## H88. Пять private SR-experts на обновлённых NPR-парах
+
+Пользователь запросил пять SR-experts: распознавание врага, выбор/размещение
+спрайта, дальние стены, ближние стены и эффекты игрока/оружия. У каждого отдельный
+Transformer (width64,4 heads,FF128,grid8). Новая фаза
+`sr_moe_20261113/training` сохраняет frozen AtlasSR106105 и все160 прежних Adam
+states; обучаются только81 новый тензор/343 460 параметров, всего2 311 333.
+Native RGB/visibility работают на128, heat — на32. Динамика и остановленный
+нейрорендер этим worker не обучаются.
+
+Прежние8192 TRAIN/1024 VAL пары Source128 не изменялись. NPR32 и одноступенчатые
+causal hypotheses пересобраны от мира5947 и остановленного five-role
+RF29609/Base29209. Source environment разрешён по provenance для всех9216 строк:
+553 dynamic NAV,6183 dynamic combat и2480 static combat. Статические hypotheses
+нулевые/invalid. Будущие Source-изображения, HR и маски служат только метками,
+не условиями NPR features или предсказанных hypotheses. Новый private sampler
+начинает с seed173/draw0; sampler parent сохранён как история, а не выдан за
+тот же clock нового распределения.
+
+Настоящий GPU warmstart пройден, включая три отброшенных SGD-шага и положительные
+градиенты всех пяти новых experts. Запущен production worker43404.
+HTTP/served-JavaScript VM/PNG проверка прошла21/21 на local1005, fullVAL1000 и
+preview1005: точные asset/data pins, frozen parent, пять измеренных gate values,
+четыре строки preview и настоящие current train/weighted NPR validation loss.
+Прежний сервер8779 не перезапускался. В нём нет нового загрузчика полной
+VAL-истории, поэтому клиент добавляет только последнюю строго проверенную
+report loss и явно сообщает об ограничении; MAE/SSIM и reference scores не
+подставляются в loss. Reference0 лёгкого preview подписан отдельно от fullVAL1000.
+
+Строгая цель — actual NPR SSIM>0,91 и MAE255<2,5 — пока не пройдена. Routing means
+и завершённый бюджет не подтверждают специализацию или качество игры. Игра и
+превью динамики сохраняют AtlasSR106105; автоматического promotion не было.
+Доказательства:
+[environment inventory](training_runs/sr_moe_20261113/diagnostics/source_environment_inventory.json),
+[GPU warmstart](training_runs/sr_moe_20261113/gpu_warmstart.json),
+[живая UI-проверка](training_runs/sr_moe_20261113/diagnostics/live_ui/verification.json).
+
+## H89. Микробатч32 с одним шагом накопления
+
+Пользователь изменил динамику на32×1=effective32. Единственный MAIN micro содержит
+19 combat,8 pure-NPC-motion и5 no-enemy-navigation actors, сохраняя
+59,375%/25%/15,625%. Combat AUX32 и late own-prefix4 идут отдельно от MAIN.
+Сбалансированная по событиям AUX sampling policy явно пересмотрена для32;
+прежние clocks и counters сохраняются, а не начинаются заново.
+
+Worker75404 продолжил тот же run с5958/H224/stage7. Изменилось только значение
+сохранённого `--batch-revision-plan`. SHA нового плана
+`fa8017e91e294e71cd56c7c6f815932805980917864b8f796ed11ec4240960a6`
+закрепляет точный parent micro16 plan. Same-step проверка прошла22/22 без SGD:
+сохранены1517 model tensors,360 Adam states/пять групп, все RNG и три sampler
+streams, ожидаемые gate/protocol/config и неизменяемые inputs. История256→64
+остаётся вложенной и не пересчитывается как будто batch32 был всегда.
+
+Настоящий update5959 завершил один flat micro из32 примеров, продвинув
+H224/stage7→8. HTTP/JavaScript VM проверки прошли15/15 до SGD и после commit:
+MAIN19/8/5, отдельные AUX32/late4, batch32×1 и рекурсивные исторические counters.
+UI принимает метрики одного micro, не выдумывая накопление из четырёх строк.
+До первого commit показывался план, а прежние64-example measurements не
+подставлялись в фактические счётчики нового batch.
+
+Обязательные100 updates на H240/H368/H450, остальные H20 ИЛИ пять строгих
+TOTAL<0,5 подряд, три RSSM/пять experts и frozen RF29609/Base29209/AtlasSR106105
+не менялись. Смена batch сама по себе не доказывает улучшение качества.
+Доказательства:
+[same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/initial_resume_verification.json),
+[проверка UI первого update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/micro32_revisions/g5958_c7331a75b66d/live_first_update_ui_proof.json).
+
 ## Изменения целей, batch и единиц данных
 
 | Что менялось | Последовательность из чата / итог |

@@ -99,8 +99,9 @@ class AttackPositiveSamplerTests(unittest.TestCase):
                 self.assertEqual(float(source['states'][-1, 4]), 0.)
             group = chosen.attack_groups['positive_open']
             self.assertEqual(group[group[:, 0] == episode].tolist(), [[episode, 1]])
-            with self.assertRaises(ValueError): chosen.sample(16, np.random.default_rng(173))
-            self.assertEqual(chosen.draws, 0)
+            self.assertEqual(len(chosen.sample(16, np.random.default_rng(173))), 16)
+            self.assertEqual(chosen.draws, 16)
+            self.assertEqual(chosen.last_sample['runtime_batch_size'],16)
 
     def test_explicit_upgrade_retains_old_ledger_four_micros_and_rng_resume_exact(self):
         with TemporaryDirectory() as folder:

@@ -94,13 +94,19 @@ def _summary(rows,selected):
                        ('alpha_frames','alpha_iou_mean'),('visibility_frames','visibility_iou_mean')):
         result[count]=sum(row.get(name)is not None for row in chosen)
     result['source_visible_zero_label_alpha']=sum(row.get('source_visible_zero_label_alpha',0)for row in chosen)
+    for name in sorted(set().union(*(row.keys() for row in chosen)) if chosen else ()):
+        if name.startswith(('near_wall_', 'far_wall_')):
+            values=[row[name] for row in chosen if row.get(name) is not None]
+            result[name]=float(np.mean(values)) if values else None
+            result[name+'_frames']=len(values)
     if 'empty_composite_fpr'not in result and 'empty_layer_false_positive_rate'in result:
         result['empty_composite_fpr']=result['empty_layer_false_positive_rate']
     return result
 
 
 @torch.no_grad()
-def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,baseline_report=None):
+def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,baseline_report=None,
+                           objective_fn=None,objective_weights=None,objective_protocol=None,extra_metrics_fn=None):
     if type(step)is not int or step<0 or type(batch_size)is not int or batch_size<1:
         raise ValueError('Atlas validation needs a completed nonnegative step and positive batch')
     panel=list(map(int,panel))
@@ -120,7 +126,9 @@ def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,basel
     needed={index for pair in temporal['pairs']for index in(pair['previous_index'],pair['current_index'])}
     metadata=[];rows={name:[]for name in MODELS};cases={}
     images={name:{}for name in MODELS};targets={};masks={}
-    objective_sum=0.;components={name:{'raw':0.,'weighted':0.,'weight':weight}for name,weight in LOSS_WEIGHTS.items()}
+    active_weights=LOSS_WEIGHTS if objective_weights is None else objective_weights
+    active_protocol=PROTOCOL if objective_protocol is None else objective_protocol
+    objective_sum=0.;components={name:{'raw':0.,'weighted':0.,'weight':weight}for name,weight in active_weights.items()}
     private=deepcopy(data.sampler_state());modes=[(m,m.training)for net in networks.values()for m in net.modules()]
     hashes={name:_hash_tensors(net.state_dict())for name,net in networks.items()}
     try:
@@ -152,8 +160,14 @@ def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,basel
                     values=_rows(output['image'],target,mask,batch['hr_background'],batch['mask_lr'],output)
                     extras=_extras(output,batch)
                     for row,extra in zip(values,extras):row.update(extra)
+                    if extra_metrics_fn is not None:
+                        extra_rows=extra_metrics_fn(net,output,batch)
+                        if len(extra_rows)!=len(values):raise ValueError('Extra SR validation metrics have wrong support')
+                        for row,extra in zip(values,extra_rows):row.update(extra)
                     if name=='atlas':
-                        loss,metrics=atlas_enemy_loss(output,batch,label_renderer=model.render_label_atlas)
+                        if objective_fn is None:
+                            loss,metrics=atlas_enemy_loss(output,batch,label_renderer=model.render_label_atlas)
+                        else:loss,metrics=objective_fn(output,batch,label_renderer=model.render_label_atlas)
                         objective_sum+=float(loss)*len(ids)
                         for component,total in components.items():
                             total['raw']+=metrics[component]*len(ids)
@@ -173,7 +187,7 @@ def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,basel
         cohorts={cohort:_summary(value,selected)for cohort,selected in cohorts.items()})for name,value in rows.items()}
     models['atlas']['summary'].update(reconstruction_loss=objective_sum/len(panel),reconstruction_frames=len(panel))
     temporal['arms']={name:_temporal_summary(temporal['pairs'],images[name],targets,masks)for name in MODELS}
-    report=dict(kind=KIND,objective_protocol=PROTOCOL,step=step,frames=len(panel),input_kind='npr_rgb',
+    report=dict(kind=KIND,objective_protocol=active_protocol,step=step,frames=len(panel),input_kind='npr_rgb',
         source_held_out=True,world_rollout=False,source_input_allowed_for_sr=False,
         source_targets_are_labels_only=True,source_future_as_input=False,
         inference_input='actual_NPR_RGB32_with_optional_causal_RSSM_hint_and_embedded_fixed_atlas',
@@ -187,7 +201,7 @@ def evaluate_atlas_enemy_sr(model,reference,data,panel,*,step,batch_size=8,basel
         visibility_iou_scope='binary_NN_visibility_vs_actual_Source_visible_mask_positive_frames',
         empty_composite_alpha_threshold=.05,
         preview_cases={role:case['row_index']for role,case in cases.items()},
-        validation_objective=dict(protocol=PROTOCOL,loss=objective_sum/len(panel),frames=len(panel),
+        validation_objective=dict(protocol=active_protocol,loss=objective_sum/len(panel),frames=len(panel),
             input_kind='npr_rgb',source_held_out=True,batch_size=batch_size,
             aggregation='image_count_weighted_mean_of_actual_batch_objectives',
             loss_scope='atlas_heads_and_final_composite_only_reference_loss_not_comparable',

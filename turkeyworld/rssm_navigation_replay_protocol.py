@@ -38,16 +38,45 @@ def navigation_replay_plan(state,*,source_checkpoint,navigation_root,enemy_motio
         enemy_motion_train_directory=str(Path(enemy_motion_root).resolve()/'full_game/rgb/train'))
 
 
-def _validate_record(record,step):
+def _replay_totals(record,step,gate=None):
+    revision = None if gate is None else gate.get('batch_revision')
+    if revision is None:
+        updates=step-record['source_optimizer_step']
+        return dict(updates=updates,navigation_main_actors=updates*40,
+            enemy_motion_main_actors=updates*64,combat_main_actors=updates*152,
+            discarded_combat_rng_draws=updates*104)
+    from .rssm_moe_batch_revision import batch_settings_for_gate
+    settings=batch_settings_for_gate(gate)
+    baseline=revision.get('source_navigation_replay_revision')
+    if (not isinstance(baseline,dict)
+            or digest_json(baseline)!=revision.get('source_navigation_replay_revision_sha256')
+            or any(record.get(key)!=baseline.get(key)for key in ('kind','sha256',
+                'source_optimizer_step','source_moe_updates','source_checkpoint_sha256',
+                'source_gate_sha256','navigation_manifest_sha256','enemy_motion_manifest_sha256'))):
+        raise ValueError('Micro16 replay baseline differs from its original pinned navigation revision')
+    _validate_record(baseline,revision['source_optimizer_step'],revision['source_gate'])
+    updates=step-revision['source_optimizer_step']
+    if (type(updates)is not int or updates<0 or revision.get('updates')!=updates
+            or revision.get('last_optimizer_step')!=step):
+        raise ValueError('Micro16 replay and batch optimizer clocks diverged')
+    result={'updates':baseline['updates']+updates}
+    for name,setting in (('navigation_main_actors','navigation_main_actors_per_update'),
+        ('enemy_motion_main_actors','enemy_motion_main_actors_per_update'),
+        ('combat_main_actors','combat_main_actors_per_update'),
+        ('discarded_combat_rng_draws','discarded_combat_rng_draws_per_update')):
+        result[name]=baseline[name]+updates*settings[setting]
+    return result
+
+
+def _validate_record(record,step,gate=None):
     updates=step-record['source_optimizer_step']
+    expected=_replay_totals(record,step,gate)
     if (type(record.get('updates'))is not int or updates<0 or record['updates']!=updates
+            or record['updates']!=expected['updates']
             or record.get('last_optimizer_step')!=step
-            or record.get('navigation_main_actors')!=updates*40
-            or record.get('combat_main_actors')!=updates*152
-            or record.get('enemy_motion_main_actors')!=updates*64
-            or record.get('discarded_combat_rng_draws')!=updates*104
-            or record.get('sampler_state',{}).get('draws')!=updates*40
-            or record.get('enemy_sampler_state',{}).get('draws')!=updates*64):
+            or any(record.get(key)!=value for key,value in expected.items())
+            or record.get('sampler_state',{}).get('draws')!=expected['navigation_main_actors']
+            or record.get('enemy_sampler_state',{}).get('draws')!=expected['enemy_motion_main_actors']):
         raise ValueError('Navigation replay complete optimizer/draw ledger changed')
 
 
@@ -90,7 +119,7 @@ def bind_navigation_replay(state,plan,*,path,sha256,loaded_checkpoint_sha256):
             or record.get('navigation_manifest_sha256')!=plan['navigation_manifest_sha256']
             or record.get('enemy_motion_manifest_sha256')!=plan['enemy_motion_manifest_sha256']):
         raise ValueError('Navigation replay saved revision identity changed')
-    _validate_record(record,step)
+    _validate_record(record,step,gate)
     if gate['updates']!=record['source_moe_updates']+record['updates']:
         raise ValueError('Navigation replay and original MoE optimizer clocks diverged')
     state.setdefault('training_protocol',{})['navigation_replay']=dict(protocol=PROTOCOL,plan_sha256=sha256,**deepcopy(SETTINGS))
@@ -103,45 +132,59 @@ class NavigationReplaySampler:
     actors=10
     state_field='sampler_state'
 
-    def __init__(self,data,record):
+    def __init__(self,data,record,*,batch_settings=None):
         if getattr(data,'split',None)!='train' or not data.episodes:
             raise ValueError('Navigation replay samples TRAIN episodes only')
         self.data=data;self.rng=np.random.default_rng()
+        # Keep the old strict restoration rule by default. A pinned smaller
+        # complete update may add five NAV/eight NPC draws to the old ledger.
+        self.complete_draw_quantum=self.actors
+        if batch_settings is not None:
+            from math import gcd
+            key=('navigation_main_actors_per_update' if self.state_field=='sampler_state'
+                 else 'enemy_motion_main_actors_per_update')
+            self.complete_draw_quantum=gcd(self.actors,batch_settings[key])
         self.restore_state(record[self.state_field])
 
     def state_dict(self):
         return dict(protocol=PROTOCOL,draws=self.draws,rng=deepcopy(self.rng.bit_generator.state))
 
     def restore_state(self,state):
-        if state.get('protocol')!=PROTOCOL or type(state.get('draws'))is not int or state['draws']<0 or state['draws']%self.actors:
+        self._restore_state(state,require_complete=True)
+
+    def _restore_state(self,state,*,require_complete):
+        if (state.get('protocol')!=PROTOCOL or type(state.get('draws'))is not int or state['draws']<0
+                or require_complete and state['draws']%self.complete_draw_quantum):
             raise ValueError('Navigation sampler complete ten-actor draw ledger changed')
         private=np.random.default_rng()
         try:private.bit_generator.state=deepcopy(state['rng'])
         except (KeyError,TypeError,ValueError)as error:raise ValueError('Navigation sampler PCG changed')from error
         self.rng.bit_generator.state=deepcopy(private.bit_generator.state);self.draws=state['draws']
 
-    def batch(self,*,context,horizon):
-        if context not in(1,2)or horizon not in MOE_HORIZONS:
+    def batch(self,*,context,horizon,actors=None):
+        count=self.actors if actors is None else actors
+        if (context not in(1,2)or horizon not in MOE_HORIZONS
+                or type(count)is not int or not 1<=count<=self.actors):
             raise ValueError('Navigation replay must use the current MoE context/horizon')
         length=context+horizon
         eligible=[i for i,e in enumerate(self.data.episodes)if len(e['frames'])>=length]
         if not eligible:raise ValueError('No complete no-enemy TRAIN navigation tape fits this stage')
         before=self.state_dict()
         try:
-            ids=self.rng.choice(eligible,size=self.actors)
+            ids=self.rng.choice(eligible,size=count)
             pairs=np.asarray([[int(i),int(self.rng.integers(len(self.data.episodes[int(i)]['frames'])-length+1))]for i in ids],dtype=np.int64)
-            batch=self.data.batch(self.actors,context=context,horizon=horizon,indices=pairs)
-            self.validate_batch(batch)
-            self.draws+=self.actors
-            return batch,dict(protocol=PROTOCOL,actors=self.actors,pairs=pairs.tolist(),context=context,horizon=horizon,
+            batch=self.data.batch(count,context=context,horizon=horizon,indices=pairs)
+            self.validate_batch(batch,actors=count)
+            self.draws+=count
+            return batch,dict(protocol=PROTOCOL,actors=count,pairs=pairs.tolist(),context=context,horizon=horizon,
                 navigation_only=self.actors==10,private_pcg_draws=self.draws,source_future_feedback=False)
         except BaseException:
-            self.restore_state(before);raise
+            self._restore_state(before,require_complete=False);raise
 
 
-    def validate_batch(self,batch):
+    def validate_batch(self,batch,*,actors=None):
         states=batch['states'];actions=batch['actions']
-        if (len(states)!=self.actors or bool((states[...,12:14]!=0).any())
+        if (len(states)!=(self.actors if actors is None else actors) or bool((states[...,12:14]!=0).any())
                 or bool((actions[...,3]!=0).any())or not bool(torch.isfinite(states).all())):
             raise ValueError('Navigation replay requires genuine no-enemy/no-fire Source labels')
 
@@ -150,9 +193,9 @@ class EnemyMotionReplaySampler(NavigationReplaySampler):
     actors=16
     state_field='enemy_sampler_state'
 
-    def validate_batch(self,batch):
+    def validate_batch(self,batch,*,actors=None):
         states=batch['states'];actions=batch['actions']
-        if (len(states)!=self.actors or not bool(((states[...,12]>0)&(states[...,13]>=.5)).all())
+        if (len(states)!=(self.actors if actors is None else actors) or not bool(((states[...,12]>0)&(states[...,13]>=.5)).all())
                 or bool((actions[...,3]!=0).any())or not bool(torch.isfinite(states).all())):
             raise ValueError('Enemy-motion replay requires genuine live-NPC/no-fire Source labels')
 
@@ -160,21 +203,30 @@ class EnemyMotionReplaySampler(NavigationReplaySampler):
 def commit_navigation_replay(state,*,step,sampler_state,enemy_sampler_state,micro_rows):
     record=state['rssm_training']['navigation_replay_revision']
     gate=state['rssm_training']['moe_training']
+    from .rssm_moe_batch_revision import batch_settings_for_gate
+    settings=batch_settings_for_gate(gate)
+    layouts=settings['micro_layouts']
+    nav_count=settings['navigation_main_actors_per_update']
+    enemy_count=settings['enemy_motion_main_actors_per_update']
     if (step!=state['global_training_step']or step!=record['last_optimizer_step']+1
             or gate['last_optimizer_step']!=step or gate['updates']!=record['source_moe_updates']+record['updates']+1
-            or len(micro_rows)!=4 or any(r.get('main_navigation_actor_count')!=10
-                or r.get('main_combat_actor_count')!=38 or r.get('main_enemy_motion_actor_count')!=16
-                or r.get('main_discarded_combat_rng_count')!=26 for r in micro_rows)
-            or sampler_state.get('protocol')!=PROTOCOL or sampler_state.get('draws')!=record['navigation_main_actors']+40
-            or enemy_sampler_state.get('protocol')!=PROTOCOL or enemy_sampler_state.get('draws')!=record['enemy_motion_main_actors']+64):
-        raise ValueError('Navigation replay commit needs exactly four completed38+16+10 microbatches')
+            or len(micro_rows)!=settings['gradient_accumulation_steps'] or any(r.get('main_navigation_actor_count')!=layout['navigation']
+                or r.get('main_combat_actor_count')!=layout['combat'] or r.get('main_enemy_motion_actor_count')!=layout['enemy_motion']
+                or r.get('main_discarded_combat_rng_count')!=settings['combat_rng_draws_per_microbatch']-layout['combat']
+                for r,layout in zip(micro_rows,layouts))
+            or sampler_state.get('protocol')!=PROTOCOL or sampler_state.get('draws')!=record['navigation_main_actors']+nav_count
+            or enemy_sampler_state.get('protocol')!=PROTOCOL or enemy_sampler_state.get('draws')!=record['enemy_motion_main_actors']+enemy_count):
+        raise ValueError('Navigation replay commit needs all completed pinned main-cohort microbatches')
     private=np.random.default_rng()
     try:
         private.bit_generator.state=deepcopy(sampler_state['rng'])
         private.bit_generator.state=deepcopy(enemy_sampler_state['rng'])
     except (KeyError,TypeError,ValueError)as error:raise ValueError('Navigation replay committed PCG changed')from error
     record.update(last_optimizer_step=step,updates=record['updates']+1,
-        navigation_main_actors=record['navigation_main_actors']+40,combat_main_actors=record['combat_main_actors']+152,enemy_motion_main_actors=record['enemy_motion_main_actors']+64,
-        discarded_combat_rng_draws=record['discarded_combat_rng_draws']+104,sampler_state=deepcopy(sampler_state),enemy_sampler_state=deepcopy(enemy_sampler_state))
-    _validate_record(record,step)
+        navigation_main_actors=record['navigation_main_actors']+nav_count,
+        combat_main_actors=record['combat_main_actors']+settings['combat_main_actors_per_update'],
+        enemy_motion_main_actors=record['enemy_motion_main_actors']+enemy_count,
+        discarded_combat_rng_draws=record['discarded_combat_rng_draws']+settings['discarded_combat_rng_draws_per_update'],
+        sampler_state=deepcopy(sampler_state),enemy_sampler_state=deepcopy(enemy_sampler_state))
+    _validate_record(record,step,gate)
     return record

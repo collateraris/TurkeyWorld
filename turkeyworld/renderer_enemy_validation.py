@@ -60,7 +60,7 @@ def candidate_assessment(report,baseline,*,empty_mae_tolerance=.005,empty_ssim_t
 
 def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None,
                            require_base_preservation=False,preservation_cohorts=None,base_anchor=None,
-                           small_enemy_rebalance=False,far_wall_supervision=False):
+                           small_enemy_rebalance=False,far_wall_supervision=False,conditions_fn=None):
     if far_wall_supervision and not small_enemy_rebalance:
         raise ValueError('Far-depth validation requires the native-area renderer protocol')
     parts={key:[] for key in ('base','rgb','source','mask','background','codec_reference','dynamic',
@@ -70,7 +70,7 @@ def evaluate_enemy_renderer(model,data,panel,*,step=0,batch_size=8,baseline=None
         for first in range(0,len(panel),batch_size):
             ids=panel[first:first+batch_size]
             batch=data.batch(len(ids),indices=ids)
-            conditions=enemy_conditions(model,batch)
+            conditions=(conditions_fn or enemy_conditions)(model,batch)
             base,rgb,endpoint=refinement_forward(model,conditions,detach_base=True)
             # Diagnostic reference only: Source RGB never enters RF conditions.
             codec=model.flow_renderer.codec
