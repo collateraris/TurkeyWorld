@@ -177,6 +177,14 @@ class RSSMCombatTraining(RSSMTraining):
             if not player_revision['baseline_complete']:
                 from .rssm_player_navigation_revision import mark_player_navigation_baseline
                 mark_player_navigation_baseline(self.state,step=step)
+        motion_revision=getattr(self,'motion_correction_revision',None)
+        if motion_revision is not None:
+            report['motion_correction_revision']=dict(protocol=motion_revision['protocol'],
+                plan_sha256=motion_revision['sha256'],updates=motion_revision['updates'],
+                source_step=motion_revision['source_optimizer_step'])
+            if not motion_revision['baseline_complete']:
+                from .rssm_motion_correction_revision import mark_motion_correction_baseline
+                mark_motion_correction_baseline(self.state,step=step)
         training = self.state['rssm_training']
         training['quality_streak'] = training['quality_streak']+1 if report['passed'] else 0
         training.update(last_validation_step=step, last_validation_passed=report['passed'],

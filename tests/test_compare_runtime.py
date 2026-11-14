@@ -176,7 +176,7 @@ class CompareRuntimeTests(unittest.TestCase):
         self.assertEqual((source_frame.shape,frame.shape),((64,64,3),(32,32,3)))
 
     def test_exact450_horizon_remains_visible_and_requires_explicit_reset(self):
-        pair=PairedRuntime(NeuralStub(),source_size=32,source_factory=SourceStub,render_pose=PoseRenderer())
+        pair=PairedRuntime(NeuralStub(),source_size=32,source_factory=SourceStub,render_pose=PoseRenderer(),horizon=450)
         for _ in range(450): pair.step([0,0,0,0])
         self.assertTrue(pair.finished)
         self.assertEqual(pair.status()['steps'],450)
@@ -189,6 +189,29 @@ class CompareRuntimeTests(unittest.TestCase):
         np.testing.assert_array_equal(pair.neural_frame,held_frames[1])
         pair.reset();pair.step([0,0,0,0])
         self.assertEqual((pair.steps,pair.source.steps,pair.neural.steps),(1,1,1))
+
+    def test_default180_trial_holds_at_six_seconds_without_correcting_own_states(self):
+        pair,neural,_=self.paired()
+        self.assertEqual(pair.horizon,180)
+        for _ in range(179):pair.step([1,0,0,0])
+        self.assertFalse(pair.finished)
+        pair.step([1,0,0,0])
+        self.assertTrue(pair.finished)
+        self.assertEqual((pair.steps,pair.source.steps,neural.steps),(180,180,180))
+        self.assertEqual(pair.simulated_seconds,6.)
+        self.assertGreater(pair.xy_drift_tiles,0)
+        state,memory=neural.state.clone(),neural.memory.clone()
+        frames=pair.source_frame.copy(),pair.neural_frame.copy()
+        with self.assertRaisesRegex(RuntimeError,'complete'):pair.step([1,0,0,0])
+        self.assertTrue(torch.equal(neural.state,state)and torch.equal(neural.memory,memory))
+        np.testing.assert_array_equal(pair.source_frame,frames[0])
+        np.testing.assert_array_equal(pair.neural_frame,frames[1])
+        self.assertEqual(pair.status()['engine_corrections'],0)
+        pair.reset()
+        self.assertFalse(pair.finished)
+        self.assertEqual((pair.steps,pair.source.steps,neural.steps),(0,0,0))
+        self.assertTrue(torch.equal(neural.state,neural.initial_state))
+        self.assertTrue(torch.equal(neural.memory,neural.initial_memory))
 
     def test_initial_state_map_and_cached_observation_mismatches_rejected(self):
         for field in ('initial_state','initial_map','initial_rgb'):

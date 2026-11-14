@@ -22,6 +22,7 @@ from .rssm_objectives import _batch_data, _observed_count, _initialize, _valid_r
 from .rssm_moe_protocol import MOE_PROTOCOL, MOE_HORIZONS, SETTINGS
 from .rssm_player_geometry_objectives import(prepare_player_geometry,player_geometry_terms,add_player_geometry_metrics,
     player_navigation_tbptt,capture_player_chunks)
+from .rssm_npc_geometry_objectives import prepare_npc_geometry,npc_geometry_terms,add_npc_geometry_metrics
 
 
 COMBAT_COMPONENTS = ('combat_events', 'combat_target', 'combat_attack',
@@ -179,7 +180,8 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
                           coordinate_gradient_protocol=COORDINATE_GRADIENT_PROTOCOL,
                           check_gradients=True, main_player_weight=1., main_router_weight=1., main_enemy_weight=1.,
                           auxiliary_actor_limit=64, late_own_prefix_actors=8,
-                          player_navigation_protocol=None,player_contact_callback=None):
+                          player_navigation_protocol=None,player_contact_callback=None,
+                          npc_navigation_protocol=None):
     """Backpropagate three tasks plus router regularization; never step Adam.
 
     Router losses are per-step Bx3 means, divided by full H before adding TBPTT
@@ -213,6 +215,8 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
     player_mask, enemy_mask = _source_masks(previous_source, target)
     geometry=prepare_player_geometry(previous_source,target,grid,player_navigation_protocol=player_navigation_protocol)
     geometry_metrics={};main_player_xy=main_player_wall=0.
+    npc_geometry=prepare_npc_geometry(previous_source,target,grid,npc_navigation_protocol=npc_navigation_protocol)
+    npc_geometry_metrics={};main_enemy_xy=main_enemy_wall=0.
     masks = {'player': player_mask, 'enemy': enemy_mask}
     denominator = {name: (2 * mask.sum()).clamp_min(1) for name, mask in masks.items()}
     totals = dict.fromkeys(('player', 'enemy', 'combat', 'router_role', 'router_balance'), 0.)
@@ -224,7 +228,7 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
         if first:
             current, memory = current.detach(), memory.detach()
         chunk_state,chunk_memory=current,memory
-        predictions,role,balance,captures=[],[],[],[]
+        predictions,role,balance,captures,respawns=[],[],[],[],[]
         with autocast():
             for tick in range(first, last):
                 if player_contact_callback is not None and tick%16==0 and horizon-tick>=4:
@@ -241,16 +245,23 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
                 result = integrate_coordinate_gradients(current, result, coordinate)
                 current, memory = result['state'], result['memory']
                 predictions.append(current)
+                if npc_geometry is not None:respawns.append(result['respawn_flags'])
             predicted=torch.stack(predictions,1)
             capture_player_chunks(player_contact_callback,captures,predicted,actions,grid,first=first)
             errors = _xy_errors(predicted, target[:, first:last])
             parts = {name: (value * masks[name][:, first:last]).sum() / denominator[name]
                      for name, value in errors.items()}
             main_player_xy+=float(parts['player'].detach())
+            main_enemy_xy+=float(parts['enemy'].detach())
             if geometry is not None:
                 wall,wall_metrics=player_geometry_terms(predicted,chunk_state,geometry,first=first)
                 parts['player']=parts['player']+wall;main_player_wall+=float(wall.detach())
                 add_player_geometry_metrics(geometry_metrics,wall_metrics)
+            if npc_geometry is not None:
+                wall,wall_metrics=npc_geometry_terms(predicted,chunk_state,npc_geometry,first=first,
+                    predicted_respawns=torch.stack(respawns,1))
+                parts['enemy']=parts['enemy']+wall;main_enemy_wall+=float(wall.detach())
+                add_npc_geometry_metrics(npc_geometry_metrics,wall_metrics)
             parts['player'] = parts['player'] * main_player_weight
             parts['enemy'] = parts['enemy'] * main_enemy_weight
             parts['router_role'] = main_router_weight * (SETTINGS['router_role_weight'] * sum(role))
@@ -309,6 +320,11 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
         metrics.update(moe_main_player_xy_loss=main_player_weight*main_player_xy,
             moe_main_player_wall_loss=main_player_weight*main_player_wall,
             moe_player_geometry=geometry_metrics,player_geometry_active=True,moe_main_tbptt=tbptt)
+    if npc_geometry is not None:
+        metrics.update(moe_main_enemy_xy_loss=main_enemy_weight*main_enemy_xy,
+            moe_main_npc_wall_loss=main_enemy_weight*main_enemy_wall,
+            moe_npc_geometry=npc_geometry_metrics,npc_geometry_active=True,
+            npc_navigation_objective_protocol=npc_navigation_protocol['protocol'])
     for name in COMBAT_COMPONENTS:
         metrics['moe_'+name+'_loss'] = auxiliary[name]+SETTINGS['late_own_prefix_weight']*late[name]
     metrics['loss_groups'] = summarize_moe_metrics([metrics])

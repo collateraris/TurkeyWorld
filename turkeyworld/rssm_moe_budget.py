@@ -16,6 +16,7 @@ FLAT_PROTOCOLS = (FLAT_CAP_PROTOCOL, SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOC
 
 
 def loss_gate_settings(gate, horizon=None):
+    if gate.get('main_ladder_revision')is not None:return 1.,10
     policy = gate.get('advance_policy') or {}
     if policy.get('kind') == H450_GOAL_PROTOCOL:
         return (1.,10) if (gate.get('current_horizon') if horizon is None else horizon)==450 else (.5,5)
@@ -64,6 +65,8 @@ def _targeted_settings_valid(value):
 
 def curriculum_completion(gate):
     """Flat policies terminate the final stage; legacy v2 remains continuous."""
+    if gate.get('main_ladder_revision')is not None:
+        return 'completed_loss_gate'if gate.get('goal_met')is True else None
     policy = gate.get('advance_policy')
     if isinstance(policy,dict) and policy.get('kind')==H450_GOAL_PROTOCOL:
         return 'completed_loss_gate' if gate.get('final_horizon_goal',{}).get('goal_met') is True else None

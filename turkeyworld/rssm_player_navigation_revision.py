@@ -54,6 +54,10 @@ def player_navigation_settings(*,tbptt=64,microbatch_size=32):
 
 def player_navigation_protocol(settings):
     """Validate a canonical objective independently of mutable UI metadata."""
+    if isinstance(settings,dict)and 'main_ladder_override'in settings:
+        from .rssm_main_ladder_revision import validate_runtime_player_settings
+        if validate_runtime_player_settings(settings):return FULL_HORIZON_PROTOCOL
+        raise ValueError('MAIN ladder player settings differ from their explicit runtime override')
     for tbptt,batch,protocol in((64,32,PROTOCOL),(450,16,FULL_HORIZON_PROTOCOL)):
         if digest(settings)==digest(player_navigation_settings(tbptt=tbptt,microbatch_size=batch)):
             return protocol

@@ -26,6 +26,8 @@ from .rssm_contact_branches import capture_contact_candidate
 from .rssm_coordinate_gradients import COORDINATE_GRADIENT_PROTOCOL,integrate_coordinate_gradients
 from .rssm_kinematic_losses import KINEMATIC_PROTOCOL_V1,prepare_kinematic_supervision
 from .rssm_objectives import _batch_data,_initialize,_valid_result
+from .rssm_player_local_motion import(PLAYER_LOCAL_MOTION_PROTOCOL,
+    normalize_player_local_motion_protocol,source_player_motion_step,player_motion_supervised_terms)
 from .runtime_checks import circle_is_clear,segment_is_clear
 from .training_pipeline import atomic_json
 
@@ -196,8 +198,11 @@ def _source_branch(row,horizon,dt):
     return dict(row,labels=labels,cohort=cohort,horizon=len(actions))
 
 
-def select_player_contact_branches(candidates,*,horizon,simulation_hz=30.):
+def select_player_contact_branches(candidates,*,horizon,simulation_hz=30.,player_local_motion_protocol=None):
     if horizon not in HORIZONS:raise ValueError('Contact horizon must be4/8/16/32')
+    local=normalize_player_local_motion_protocol(player_local_motion_protocol)
+    if local is not None:
+        return _select_player_local_branches(candidates,horizon=horizon,simulation_hz=simulation_hz,protocol=local)
     rows,first_wall=_flatten(candidates);skips=Counter();probed=[]
     def priority(row):
         event=row['item'].get('source_event_offsets')
@@ -238,6 +243,96 @@ def select_player_contact_branches(candidates,*,horizon,simulation_hz=30.):
         axis_outcome_coverage_complete=all(any(r['cohort']==name for r in selected)for name in COHORTS[:4]))
 
 
+def _player_axis_hint(row,dt):
+    """Map-only sampling hint; the actual label is still checked by Source."""
+    from .structured_state import player_command_delta
+    state=row['state_numpy'];actions=row['item']['actions']
+    if not actions.shape[1]:return 'partial'
+    control=actions[row['actor'],0].detach().float().cpu()
+    command=player_command_delta(torch.from_numpy(state[None]),control[None],dt=dt)[0].numpy()*16
+    active=np.abs(command)>=16e-5
+    if not active.all():return 'partial'
+    old=state[:2]*16;grid=row['map_numpy'];elbow=old.copy();elbow[0]+=command[0]
+    x_free=circle_is_clear(grid,elbow,.2)
+    if not x_free:elbow[0]=old[0]
+    end=elbow.copy();end[1]+=command[1]
+    y_free=circle_is_clear(grid,end,.2)
+    return ('both_free'if x_free and y_free else'x_free_y_blocked'if x_free else
+            'x_blocked_y_free'if y_free else'both_blocked')
+
+
+def _select_player_local_branches(candidates,*,horizon,simulation_hz,protocol):
+    rows,first_wall=_flatten(candidates);dt=1/simulation_hz;skips=Counter()
+    preferred=tuple(protocol['preferred_outcomes'])+('both_blocked','partial')
+    def priority(row):
+        gap=row['first_wall_step']-row['step']if row['pre_wall']else 1000000
+        return(not row['pre_wall'],gap,row['item']['actions'].shape[1]<horizon,
+               row['step'],row['item']['stream'],row['actor'])
+    def ordered(pool):
+        buckets={name:[]for name in preferred}
+        for row in sorted(pool,key=priority):
+            try:hint=_player_axis_hint(row,dt)
+            except(ValueError,RuntimeError):hint='partial'
+            buckets[hint].append(row)
+        result=[]
+        while any(buckets.values()):
+            for name in preferred:
+                if buckets[name]:result.append(buckets[name].pop(0))
+        return result
+    quiet=[r for r in rows if r['item']['stream']=='enemy_motion'and r['step']>0]
+    others=[r for r in rows if not(r['item']['stream']=='enemy_motion'and r['step']>0)]
+    quiet_budget=min(len(quiet),protocol['quiet_source_probe_budget'])
+    other_budget=min(len(others),protocol['max_source_probes']-quiet_budget)
+    quiet_budget=min(len(quiet),protocol['max_source_probes']-other_budget)
+    probed=[];attempts=0;quiet_probes=0;ignored_npc=0
+    for pool,budget,quiet_pool in((quiet,quiet_budget,True),(others,other_budget,False)):
+        for row in ordered(pool)[:budget]:
+            attempts+=1;quiet_probes+=int(quiet_pool)
+            try:
+                if not row['item']['actions'].shape[1]:raise ValueError('empty_player_motion_controls')
+                action=row['item']['actions'][row['actor'],0].detach().float().cpu().numpy()
+                label=source_player_motion_step(row['state_numpy'],action,row['map_numpy'],dt=dt)
+                masks=_cohorts(torch.from_numpy(label['previous'][None]),torch.from_numpy(label['target'][None]),
+                    torch.from_numpy(action[None]),dt)
+                cohort=next((name for name in preferred if masks[name].any()),'partial')
+                probed.append(dict(row,cohort=cohort,horizon=min(horizon,row['item']['actions'].shape[1]),
+                    selection_player_label=label))
+                ignored_npc+=int(label['own_NPC_body_invalid'])
+            except ValueError as error:skips[str(error)]+=1
+    selected=[];used_keys=set()
+    def add(pool,count):
+        for _ in range(count):
+            available=[r for r in pool if not any(r is old for old in selected)]
+            if not available:break
+            present={r['cohort']for r in selected}
+            # Capture near the first observed own wall, then preserve both
+            # sliding orientations/free motion and prefer distinct own actors.
+            row=min(available,key=lambda r:(not r['pre_wall'],r['cohort']in present,
+                preferred.index(r['cohort']),r['key']in used_keys,priority(r)))
+            selected.append(row);used_keys.add(row['key'])
+    legal_quiet=[r for r in probed if r['item']['stream']=='enemy_motion'and r['step']>0]
+    add(legal_quiet,protocol['quiet_nonzero_prefix_branches'])
+    quiet_reserved=len(selected)
+    add(probed,protocol['max_contact_branches']-len(selected))
+    quiet_selected=sum(r['item']['stream']=='enemy_motion'and r['step']>0 for r in selected)
+    return selected,dict(source_probes=attempts,legal_source_probes=len(probed),source_skip_counts=dict(skips),
+        first_wall_actor_count=len(first_wall),selected_cohort_counts=dict(Counter(r['cohort']for r in selected)),
+        selected_prefix_steps=[r['step']for r in selected],selected_branch_horizons=[r['horizon']for r in selected],
+        selected_streams=[r['item']['stream']for r in selected],
+        selected_profiles=[r['item']['navigation_only']for r in selected],
+        selected_pre_wall_count=sum(r['pre_wall']for r in selected),
+        axis_outcome_coverage_complete=all(any(r['cohort']==name for r in selected)for name in COHORTS[:4]),
+        preferred_axis_outcome_coverage_complete=all(any(r['cohort']==name for r in selected)for name in protocol['preferred_outcomes']),
+        player_local_motion_protocol=protocol['protocol'],player_only_Source_labels=True,
+        quiet_nonzero_source_probes=quiet_probes,quiet_nonzero_legal_probes=len(legal_quiet),
+        quiet_nonzero_requested=protocol['quiet_nonzero_prefix_branches'],quiet_nonzero_selected=quiet_selected,
+        quiet_nonzero_reserved=quiet_reserved,
+        quiet_nonzero_shortfall=max(0,protocol['quiet_nonzero_prefix_branches']-quiet_selected),
+        quiet_nonzero_missing_reason=('no_legal_nonzero_own_quiet_prefix'if quiet_selected<protocol['quiet_nonzero_prefix_branches']else None),
+        selection_player_labels_despite_invalid_NPC=ignored_npc,
+        quiet_nonzero_distinct_actors=len({r['key']for r in selected if r['item']['stream']=='enemy_motion'and r['step']>0}))
+
+
 def _scout(model,batch,amp):
     states,frames,actions,_,grid=_batch_data(batch,1)
     if actions.shape!=(4,32,4)or bool((states[...,12:14]!=0).any()):
@@ -263,10 +358,15 @@ def _scout(model,batch,amp):
     return candidates
 
 
-def contact_replay_backward(model,batch,*,candidates=None,horizon=16,weight=.25,amp=None,check_gradients=True):
+def contact_replay_backward(model,batch,*,candidates=None,horizon=16,weight=.25,amp=None,check_gradients=True,
+                            player_local_motion_protocol=None):
     """Add only player gradients, without an optimizer step or state correction."""
     if horizon not in HORIZONS or type(weight)not in(int,float)or not math.isfinite(weight)or weight<0:
         raise ValueError('Player contact replay needs finite weight and4/8/16/32 horizon')
+    local=normalize_player_local_motion_protocol(player_local_motion_protocol)
+    if local is not None:
+        return _player_local_contact_backward(model,batch,candidates=candidates,horizon=horizon,weight=weight,
+            amp=amp,check_gradients=check_gradients,protocol=local)
     scout=_scout(model,batch,amp)
     chosen,selection=select_player_contact_branches([*(candidates or []),*scout],horizon=horizon,
         simulation_hz=model.config.simulation_hz)
@@ -357,4 +457,104 @@ def contact_replay_backward(model,batch,*,candidates=None,horizon=16,weight=.25,
         direct_source_skip_counts=dict(skips),axis_group_counts=groups,axis_velocity_mae_cells_per_second=velocity_mae,
         false_stop_axes=false_stops,missed_block_axes=missed_blocks,backward_calls=1,
         xy_offsets_tiles_mean={str(key):sum(values)/len(values)for key,values in offset_errors.items()})
+    return metrics
+
+
+def _player_local_contact_backward(model,batch,*,candidates,horizon,weight,amp,check_gradients,protocol):
+    """Recover own player motion without fabricating a no-NPC future tape."""
+    scout=_scout(model,batch,amp)
+    chosen,selection=select_player_contact_branches([*(candidates or []),*scout],horizon=horizon,
+        simulation_hz=model.config.simulation_hz,player_local_motion_protocol=protocol)
+    metrics=dict(protocol='rssm_player_short_contact_replay_v2',player_contact_loss=0.,
+        player_contact_horizon=horizon,scout_forward_transitions=128,branches=len(chosen),
+        state_resets_after_prefix=0,memory_resets_after_prefix=0,prior_initial_memory_preserved=True,
+        new_observed_rgb_frames_after_prefix=0,source_future_feedback=False,Source_labels_after_own_rollout=True,
+        optimizer_steps=0,renderer_calls=0,tbptt=TBPTT,player_contact_tbptt=TBPTT,
+        player_local_motion_settings=deepcopy(protocol),**selection)
+    if not chosen:return metrics
+    autocast=nullcontext if amp is None else amp;dt=1/model.config.simulation_hz
+    branch_counts=Counter(row['cohort']for row in chosen);records=[]
+    # Finish every own rollout before consulting direct Source movement labels.
+    # The full original NPC state and actual h/z remain neural inputs.
+    for branch,row in enumerate(chosen):
+        actor=row['actor'];item=row['item'];length=row['horizon']
+        current=item['state'][actor:actor+1].detach();memory=item['memory'][actor:actor+1].detach()
+        grid=item['map'][actor:actor+1].detach();actions=item['actions'][actor:actor+1,:length].detach()
+        branch_weight=1/(len(branch_counts)*branch_counts[row['cohort']])
+        with environment_profile(model,navigation_only=item['navigation_only']),autocast():
+            with torch.no_grad():features=model.encode_map(grid).detach()
+            shape=tuple(memory.shape)
+            for tick in range(length):
+                old=current.detach()
+                raw=model.transition(old,actions[:,tick],features,memory)
+                _valid_result(raw,shape,'Player-only own recovery branch')
+                if raw.get('player_pass_logits')is None:raise ValueError('Player recovery requires axis-pass logits')
+                records.append(dict(branch=branch,tick=tick,weight=branch_weight,previous=old,
+                    prediction=raw['state'],pass_logits=raw['player_pass_logits'],
+                    action=actions[:,tick],grid=grid))
+                integrated=integrate_coordinate_gradients(current,raw,COORDINATE_GRADIENT_PROTOCOL)
+                current,memory=integrated['state'],integrated['memory']
+    direct=[];skips=Counter()
+    for record in records:
+        old=record['previous'][0].detach().float().cpu().numpy()
+        control=record['action'][0].detach().float().cpu().numpy()
+        grid=record['grid'][0].detach().cpu().numpy()
+        try:
+            label=source_player_motion_step(old,control,grid,dt=dt)
+            direct.append((record,label))
+        except ValueError as error:skips[str(error)]+=1
+    metrics.update(forward_transitions=len(records),direct_source_attempts=len(records),
+        direct_source_valid=len(direct),direct_source_skip_counts=dict(skips),
+        direct_Source_scope='exact_single_player_movement_step',
+        direct_labels_despite_invalid_NPC=sum(int(label['own_NPC_body_invalid'])for _,label in direct),
+        xy_loss_semantics='contiguous_integrated_exact_local_delta_error',
+        fabricated_no_NPC_future_trajectory=False,xy_offsets_tiles_mean={})
+    if not direct:
+        metrics.update(backward_calls=0,axis_group_counts={},false_stop_axes=0,missed_block_axes=0)
+        return metrics
+    device=records[0]['previous'].device;dtype=records[0]['previous'].dtype
+    old=torch.cat([r['previous']for r,_ in direct]).detach()
+    prediction=torch.cat([r['prediction']for r,_ in direct])
+    actions=torch.cat([r['action']for r,_ in direct]).detach()
+    logits=torch.cat([r['pass_logits']for r,_ in direct])
+    target=torch.as_tensor(np.stack([label['target']for _,label in direct]),device=device,dtype=dtype).detach()
+    local,diagnostics=player_motion_supervised_terms(old,prediction,actions,target,logits,
+        player_local_motion_protocol=protocol,simulation_hz=model.config.simulation_hz)
+    # Accumulate one-step displacement residuals only over contiguous valid
+    # own ticks. Invalid/dead player steps break the chain instead of obtaining
+    # an invented Source target. No label is fed back into the neural trajectory.
+    by_branch=defaultdict(list)
+    for index,(record,label)in enumerate(direct):by_branch[record['branch']].append((index,record))
+    zero=prediction.sum()*0;trajectory=zero;sample_weights=[];offsets=defaultdict(list)
+    residual=(prediction[:,:2]-old[:,:2]-(target[:,:2]-old[:,:2]))*16
+    for branch,items in by_branch.items():
+        segments=[];segment=[];last_tick=None
+        for index,record in items:
+            if last_tick is not None and record['tick']!=last_tick+1:
+                segments.append(segment);segment=[]
+            segment.append(index);last_tick=record['tick']
+        if segment:segments.append(segment)
+        branch_weight=items[0][1]['weight'];count=len(items)
+        for segment in segments:
+            cumulative=residual[segment].cumsum(0)
+            trajectory=trajectory+branch_weight*F.smooth_l1_loss(cumulative,torch.zeros_like(cumulative),reduction='sum')/(2*count)
+            for offset in HORIZONS:
+                if offset<=len(segment):offsets[offset].append(float(cumulative[offset-1].detach().norm()))
+    for record,_ in direct:sample_weights.append(record['weight']/len(by_branch[record['branch']]))
+    grids=torch.cat([record['grid']for record,_ in direct]).detach()
+    config={**CONTACT_PROTOCOL_V2,'wall_margin_tiles':.02}
+    wall=swept_player_wall_loss(old[:,None,:2],prediction[:,None,:2],old[:,None,:2],target[:,None,:2],
+        grids,torch.as_tensor(sample_weights,device=device,dtype=dtype)[:,None],contact_protocol=config)
+    loss=weight*(trajectory+wall+sum(local.values()))
+    if not bool(torch.isfinite(loss)):raise FloatingPointError('Nonfinite player local recovery objective')
+    loss.backward()
+    if check_gradients:finite_gradient_norm(model.named_parameters(),context='Player local motion recovery')
+    metrics.update(player_contact_loss=float(loss.detach()),xy_loss=float(trajectory.detach()),wall_loss=float(wall.detach()),
+        axis_bce_loss=float(local['pass_bce'].detach()),axis_velocity_loss=float(local['axis_velocity'].detach()),
+        free_progress_loss=float(local['free_progress'].detach()),weight=float(weight),backward_calls=1,
+        axis_group_counts=diagnostics['axis_group_counts'],
+        axis_velocity_mae_cells_per_second=diagnostics['axis_velocity_mae_cells_per_second'],
+        false_stop_axes=diagnostics['false_stop_axes'],missed_block_axes=diagnostics['missed_block_axes'],
+        player_local_motion=diagnostics,
+        player_local_cumulative_residual_tiles_mean={str(k):sum(v)/len(v)for k,v in offsets.items()})
     return metrics

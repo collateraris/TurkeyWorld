@@ -12,6 +12,15 @@ MOE_STAGE_HORIZONS = (4,8,16,*range(32,449,16),450)
 def stage_preview_spec(state):
     """Read the active gate stage, never an inherited replay/next-H field."""
     training = state.get('rssm_training', {})
+    motion=training.get('motion_only_revision')
+    if motion is not None:
+        from .rssm_motion_only_revision import validate_motion_only
+        revision=validate_motion_only(state);gate=revision['gate'];horizon=gate['current_horizon']
+        return dict(gated=True,moe=True,motion_only=True,horizon=horizon,context=1,
+            display_offsets=np.rint(np.linspace(1,horizon,4)).astype(int).tolist(),
+            stage_index=gate['stage_index'],
+            plan_sha256=training.get('moe_training',{}).get('sha256'),
+            motion_only_plan_sha256=revision['sha256'],motion_only_round_index=gate['round_index'])
     moe=training.get('moe_training')
     if moe is not None:
         if not isinstance(moe,dict)or type(moe.get('current_horizon'))is not int or moe['current_horizon']not in MOE_STAGE_HORIZONS:

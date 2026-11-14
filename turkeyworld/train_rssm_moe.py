@@ -121,6 +121,27 @@ def merge_player_contact_metrics(row,contact,*,plan_sha256,player_navigation_pro
     return result
 
 
+def merge_motion_correction_metrics(row,enemy,*,plan_sha256):
+    """Add the already-backpropagated own-state NPC objective exactly once."""
+    from .rssm_motion_correction_revision import PROTOCOL
+    value=enemy.get('enemy_local_loss')
+    if type(value)not in(int,float)or not np.isfinite(value)or value<0:
+        raise ValueError('Own-state NPC loss must be finite and nonnegative')
+    result=copy.deepcopy(row)
+    result.update({key:value for key,value in enemy.items()if key.startswith('enemy_local_')})
+    result['enemy_local_recovery']=copy.deepcopy(enemy)
+    result['moe_enemy_local_loss']=value
+    result['moe_enemy_loss']+=value
+    result['train_loss']=sum(result[key]for key in('moe_player_loss','moe_enemy_loss','moe_combat_loss','moe_router_loss'))
+    result['train_loss_without_kl_floor']=result['train_loss']
+    # The historical player/contact ledger keeps its own v2 tag. Only the
+    # complete objective receives v3, so old complete rows remain historical.
+    result.update(objective_formula_revision=PROTOCOL,motion_correction_loss_revision=PROTOCOL,
+        motion_correction_plan_sha256=plan_sha256)
+    result['loss_groups']=summarize_moe_metrics([result])
+    return result
+
+
 class RSSMMoETraining(RSSMCombatTraining):
     def _data(self, directory, cache_mb=32):
         return StagedSequenceData(directory, self.device, mode='stream', cache_bytes=cache_mb*1024**2)
@@ -202,6 +223,17 @@ class RSSMMoETraining(RSSMCombatTraining):
             self.state.setdefault('model_parameters',{}).update(spawn_report['model_parameter_counts'])
         elif getattr(args,'spawn_conditioning_plan',None)is not None:
             raise ValueError('A spawn plan cannot enable an unmigrated checkpoint')
+        # New curricula validate all legacy plans against the immutable source
+        # contracts, then restore their actual live counters and private RNGs.
+        actual_run_state=self.state
+        ladder_path=getattr(args,'main_ladder_plan',None)
+        self.main_ladder_plan=self.main_ladder_revision=None
+        if ladder_path is not None:
+            from .rssm_main_ladder_revision import legacy_binding_state
+            self.main_ladder_plan=json.loads(ladder_path.read_text(encoding='utf-8'))
+            self.state=legacy_binding_state(self.state,self.main_ladder_plan)
+        elif self.state['rssm_training']['moe_training'].get('main_ladder_revision')is not None:
+            raise ValueError('Saved MAIN18 ladder requires its immutable continuation plan')
         self.plan_sha = _digest(args.moe_plan)
         plan = json.loads(args.moe_plan.read_text(encoding='utf-8'))
         self.moe = bind_moe_training(self.state, plan, path=args.moe_plan,
@@ -278,6 +310,29 @@ class RSSMMoETraining(RSSMCombatTraining):
                 path=player_path,sha256=_digest(player_path),loaded_checkpoint_sha256=loaded_sha)
         elif self.state['rssm_training'].get('player_navigation_revision')is not None:
             raise ValueError('Saved player contact/quiet navigation revision requires its immutable plan')
+        self.motion_correction_revision=self.motion_correction_plan=None
+        motion_path=getattr(args,'motion_correction_plan',None)
+        if motion_path is not None:
+            from .rssm_motion_correction_revision import bind_motion_correction_revision
+            self.motion_correction_plan=json.loads(motion_path.read_text(encoding='utf-8'))
+            self.motion_correction_revision=bind_motion_correction_revision(self.state,self.motion_correction_plan,
+                path=motion_path,sha256=_digest(motion_path),loaded_checkpoint_sha256=loaded_sha)
+        elif self.state['rssm_training'].get('motion_correction_revision')is not None:
+            raise ValueError('Saved own-state player/NPC objective requires its immutable motion plan')
+        if self.main_ladder_plan is not None:
+            from .rssm_main_ladder_revision import bind_main_ladder_revision
+            self.state=actual_run_state
+            self.main_ladder_revision=bind_main_ladder_revision(self.state,self.main_ladder_plan,
+                path=ladder_path,sha256=_digest(ladder_path),loaded_checkpoint_sha256=loaded_sha)
+            q=self.state['rssm_training'];self.moe=q['moe_training']
+            self.batch_revision=self.moe['batch_revision']
+            self.stage_budget_policy=self.moe['advance_policy']
+            self.navigation_replay_revision=q['navigation_replay_revision']
+            self.player_navigation_revision=q['player_navigation_revision']
+            self.motion_correction_revision=q['motion_correction_revision']
+            if self.combat_memory_revision is not None:self.combat_memory_revision=q['combat_rssm_revision']
+            if self.respawn_timing_revision is not None:self.respawn_timing_revision=q['respawn_timing_revision']
+            batch_settings=moe_batch_settings(self.state)
         if self.moe['updates'] == 0:
             if self.state.get('rssm_validation') is not None:
                 self.state.setdefault('validation_history', []).append(copy.deepcopy(self.state['rssm_validation']))
@@ -385,6 +440,12 @@ class RSSMMoETraining(RSSMCombatTraining):
         if player_protocol is not None:
             self.state['training_protocol'].update(tbptt=player_protocol['tbptt'],
                 active_objective_formula_revision=self.player_navigation_revision['protocol'])
+        motion_protocol=self.motion_correction_plan['settings']if self.motion_correction_revision is not None else None
+        if motion_protocol is not None:
+            self.state['training_protocol']['active_objective_formula_revision']=self.motion_correction_revision['protocol']
+        if self.main_ladder_revision is not None:
+            from .rssm_main_ladder_revision import publish_contract
+            publish_contract(self.state)
         self.state['rssm_training'].update(phase='combat',
             phase_label='MoE: навигация игрока, движение врага и бой',
             dynamics_trainable=policy['dynamics_trainable'], validation_every=250,
@@ -398,6 +459,16 @@ class RSSMMoETraining(RSSMCombatTraining):
             self.validate(model)
             mark_player_navigation_baseline(self.state,step=self.state['global_training_step'])
             self.save(model,optimizer,metadata)
+        if self.motion_correction_revision is not None and not self.motion_correction_revision['baseline_complete']:
+            from .rssm_motion_correction_revision import mark_motion_correction_baseline
+            self.validate(model)
+            mark_motion_correction_baseline(self.state,step=self.state['global_training_step'])
+            self.save(model,optimizer,metadata)
+        if self.main_ladder_revision is not None and not self.main_ladder_revision['baseline_complete']:
+            from .rssm_main_ladder_revision import mark_main_ladder_baseline
+            self.validate(model)
+            mark_main_ladder_baseline(self.state,step=self.state['global_training_step'])
+            self.save(model,optimizer,metadata)
         started_updates = self.moe['updates']
         while not args.updates or self.moe['updates'] - started_updates < args.updates:
             if self.finish_completed_curriculum(model, optimizer, metadata):
@@ -407,6 +478,11 @@ class RSSMMoETraining(RSSMCombatTraining):
                 self.save(model, optimizer, metadata)
                 return
             horizon = moe_training_horizon(self.state)
+            if self.main_ladder_revision is not None:
+                from .rssm_main_ladder_revision import runtime_player_settings,publish_contract
+                player_protocol=runtime_player_settings(self.player_navigation_plan['settings'],
+                    horizon=horizon,plan_sha256=self.main_ladder_revision['sha256'])
+                publish_contract(self.state)
             step = self.state['global_training_step'] + 1
             context = 1 + (self.moe['updates']//16) % 2
             mode = SETTINGS['latent_cycle'][self.moe['updates'] % len(SETTINGS['latent_cycle'])]
@@ -420,12 +496,16 @@ class RSSMMoETraining(RSSMCombatTraining):
             rows, samples = [], []
             update_started = time.perf_counter()
             for micro in range(self.accumulation):
-                contact_candidates=[]
+                contact_candidates=[];enemy_candidates=[]
                 def contact_collector(stream,navigation_only):
                     def capture(first,state,memory,actions,grid,prediction):
                         from .rssm_player_contact_replay import capture_player_contact_candidate
                         contact_candidates.append(capture_player_contact_candidate(first,state,memory,actions,grid,
                             prediction,navigation_only=navigation_only,stream=stream))
+                        if motion_protocol is not None and not navigation_only:
+                            from .rssm_enemy_local_recovery import capture_enemy_local_candidate
+                            enemy_candidates.append(capture_enemy_local_candidate(first,state,memory,actions,grid,
+                                prediction,stream=stream))
                     return capture
                 layout = microbatch_layout(self.state, micro)
                 draws = layout['combat_rng_draws']
@@ -452,6 +532,7 @@ class RSSMMoETraining(RSSMCombatTraining):
                     auxiliary_actor_limit=auxiliary_batch_size, late_own_prefix_actors=late_actor_count,
                     **({'chunk_size':player_protocol['tbptt'],'player_navigation_protocol':player_protocol,
                         'player_contact_callback':contact_collector('combat',False)}if player_protocol is not None else{}),
+                    **({'npc_navigation_protocol':motion_protocol['npc_navigation']}if motion_protocol is not None else{}),
                     **({'main_player_weight':layout['main_player_weight'],
                         'main_router_weight':layout['main_router_weight'],
                         'main_enemy_weight':layout['main_enemy_weight']}
@@ -472,7 +553,8 @@ class RSSMMoETraining(RSSMCombatTraining):
                         router_weight=layout['enemy_motion_router_weight'],
                         **({'player_weight':layout['enemy_motion']/sum(layout[key]for key in('combat','navigation','enemy_motion')),
                             'player_navigation_protocol':player_protocol,
-                            'player_contact_callback':contact_collector('enemy_motion',False)}if player_protocol is not None else{}))
+                            'player_contact_callback':contact_collector('enemy_motion',False)}if player_protocol is not None else{}),
+                        **({'npc_navigation_protocol':motion_protocol['npc_navigation']}if motion_protocol is not None else{}))
                     row=merge_main_replay_metrics(row,nav,motion,
                         plan_sha256=self.navigation_replay_revision['sha256'], layout=layout,
                         auxiliary_batch_size=auxiliary_batch_size, late_actor_count=late_actor_count,
@@ -485,12 +567,26 @@ class RSSMMoETraining(RSSMCombatTraining):
                     from .rssm_player_navigation_revision import HORIZONS
                     contact_batch,contact_receipt=player_contact_sampler.batch(actors=player_protocol['contact']['actors_per_microbatch'])
                     contact_horizon=HORIZONS[self.player_navigation_revision['updates']%len(HORIZONS)]
+                    if motion_protocol is not None:
+                        from .rssm_motion_correction_revision import local_motion_horizons
+                        contact_horizon,enemy_horizon=local_motion_horizons(self.motion_correction_revision['updates'])
+                    if self.main_ladder_revision is not None:
+                        contact_horizon=min(contact_horizon,horizon)
+                        enemy_horizon=min(enemy_horizon,horizon)
                     contact=contact_replay_backward(model,contact_batch,candidates=contact_candidates,
-                        horizon=contact_horizon,weight=player_protocol['contact']['weight'])
+                        horizon=contact_horizon,weight=player_protocol['contact']['weight'],
+                        **({'player_local_motion_protocol':motion_protocol['player_local']}if motion_protocol is not None else{}))
                     row=merge_player_contact_metrics(row,contact,plan_sha256=self.player_navigation_revision['sha256'],
                         player_navigation_protocol=player_protocol)
                     row['player_contact_sampling']=contact_receipt
                     del contact_batch
+                if motion_protocol is not None:
+                    from .rssm_enemy_local_recovery import enemy_local_recovery_backward
+                    enemy_local=enemy_local_recovery_backward(model,candidates=enemy_candidates,
+                        horizon=enemy_horizon,protocol=motion_protocol['enemy_local'])
+                    row=merge_motion_correction_metrics(row,enemy_local,plan_sha256=self.motion_correction_revision['sha256'])
+                    row.update(player_local_horizon=contact_horizon,enemy_local_horizon=enemy_horizon,
+                        local_horizon_schedule=motion_protocol['local_horizon_schedule'])
                 rows.append(row)
                 del batch, auxiliary
             average_accumulated_gradients(model.parameters(), self.accumulation)
@@ -518,6 +614,8 @@ class RSSMMoETraining(RSSMCombatTraining):
                 diagnostic_updates=min(diagnostic_updates,step-spawn_report['source_step']-1)
             if self.player_navigation_revision is not None:
                 diagnostic_updates=min(diagnostic_updates,self.player_navigation_revision['updates'])
+            if self.motion_correction_revision is not None:
+                diagnostic_updates=min(diagnostic_updates,self.motion_correction_revision['updates'])
             if diagnostic_updates < 3:
                 gradient_groups = {}
                 for label, prefix in {
@@ -594,6 +692,13 @@ class RSSMMoETraining(RSSMCombatTraining):
                 metrics.update(player_navigation_loss_revision=revision['protocol'],
                     player_navigation_plan_sha256=revision['sha256'],player_navigation_updates=revision['updates'],
                     player_navigation_tbptt=player_protocol['tbptt'])
+            if self.motion_correction_revision is not None:
+                from .rssm_motion_correction_revision import commit_motion_correction_revision
+                motion=commit_motion_correction_revision(self.state,step=step,metrics=metrics)
+                metrics.update(motion_correction_updates=motion['updates'])
+            if self.main_ladder_revision is not None:
+                from .rssm_main_ladder_revision import validate_continued_ledgers
+                validate_continued_ledgers(self.state)
             sampler_states[str(auxiliary_horizon)] = sampler.state_dict()
             metrics.update(step=step, global_training_step=step, timestamp=now(), main_horizon=horizon,
                 moe_training_plan_sha256=self.plan_sha,
@@ -607,7 +712,7 @@ class RSSMMoETraining(RSSMCombatTraining):
                     'stage_advance_reason':gate.get('last_advance_reason'),
                     'stage_budget_policy_updates':self.stage_budget_policy['updates'],
                     'stage_budget_exhausted':gate.get('budget_exhausted', False),
-                    'moe_curriculum_completed':gate.get('curriculum_completed', False)}if self.stage_budget_policy else{}),
+                    'moe_curriculum_completed':gate.get('curriculum_completed', False)}if self.stage_budget_policy and self.main_ladder_revision is None else{}),
                 rssm_phase='combat', component_phase='combat', stage='rssm_combat_dynamics',
                 microbatch_size=self.microbatch, gradient_accumulation_steps=self.accumulation,
                 effective_batch_size=effective_batch, completed_microbatches=self.accumulation,
@@ -619,6 +724,18 @@ class RSSMMoETraining(RSSMCombatTraining):
             self.state.update(current=step, loss=metrics['train_loss'], latest_metrics=metrics,
                 loss_groups=metrics['loss_groups'], status='running',
                 message='Simultaneous player navigation, enemy navigation and combat')
+            if self.main_ladder_revision is not None:
+                from .rssm_main_ladder_revision import PROTOCOL as MAIN_LADDER_PROTOCOL
+                metrics.update(objective_formula_revision=MAIN_LADDER_PROTOCOL,
+                    main_ladder_loss_revision=MAIN_LADDER_PROTOCOL,
+                    main_ladder_plan_sha256=self.main_ladder_revision['sha256'],
+                    main_ladder_updates=self.main_ladder_revision['updates'],
+                    main_ladder_stage_index=self.main_ladder_revision['stage_index'],
+                    main_ladder_stage_updates=self.main_ladder_revision['stage_updates'],
+                    main_ladder_stage_streak=self.main_ladder_revision['stage_streak'],
+                    main_ladder_tbptt=horizon,stage_budget=None,completed_stage_budget=None,
+                    stage_advance_reason=gate['last_advance_reason'],budget_can_qualify_gameplay=False,
+                    stage_budget_exhausted=False,moe_curriculum_completed=gate['goal_met'])
             if gate.get('final_horizon_goal') is not None:
                 metrics['h450_total_loss_goal']=copy.deepcopy(gate['final_horizon_goal'])
                 self.state['h450_total_loss_goal']=copy.deepcopy(gate['final_horizon_goal'])
@@ -666,6 +783,8 @@ def main(argv=None):
     parser.add_argument('--navigation-replay-plan',type=Path)
     parser.add_argument('--enemy-motion-data-root',type=Path)
     parser.add_argument('--player-navigation-plan',type=Path)
+    parser.add_argument('--motion-correction-plan',type=Path)
+    parser.add_argument('--main-ladder-plan',type=Path)
     parser.add_argument('--seed', type=int, default=173)
     parser.add_argument('--updates', type=int, default=0)
     args = parser.parse_args(argv)

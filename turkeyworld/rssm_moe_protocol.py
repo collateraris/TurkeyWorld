@@ -59,6 +59,10 @@ def moe_training_plan(state, *, source_checkpoint, source_checkpoint_sha256,
 
 
 def _validate_gate(gate, step):
+    if gate.get('main_ladder_revision')is not None:
+        from .rssm_main_ladder_revision import validate_gate
+        validate_gate(gate,step)
+        return
     from .rssm_moe_budget import (validate_policy, validate_budget_advance, validate_completion,
         validate_loss_advance, loss_gate_settings, SHORT_CAP_PROTOCOL, H450_GOAL_PROTOCOL, stage_requires_full_budget)
     from .rssm_moe_batch_revision import validate_moe_batch_accounting
@@ -194,6 +198,11 @@ def moe_training_horizon(state):
 def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
                       microbatch_size=64, effective_batch_size=256, loss_gate_eligible=True):
     gate = state['rssm_training']['moe_training']
+    if gate.get('main_ladder_revision')is not None:
+        from .rssm_main_ladder_revision import commit_main_ladder_update
+        return commit_main_ladder_update(state,step=step,horizon=horizon,train_loss=train_loss,
+            microbatches=microbatches,microbatch_size=microbatch_size,effective_batch_size=effective_batch_size,
+            loss_gate_eligible=loss_gate_eligible)
     from .rssm_moe_budget import (curriculum_completion, update_completion, loss_gate_settings,
                                  stage_requires_full_budget, H450_GOAL_PROTOCOL)
     from .rssm_moe_batch_revision import batch_settings_for_gate, commit_moe_batch_revision

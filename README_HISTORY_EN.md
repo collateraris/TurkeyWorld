@@ -3870,6 +3870,480 @@ Drift improvement after the new training has not yet been measured.
 [physical validation](turkeyworld/rssm_player_navigation_validation.py),
 [read-only boundary proof](training_runs/diagnostic_tools/verify_player_navigation_revision_20261114.py).
 
+## H104. Own-state local player and enemy motion
+
+The user requested free-axis, invalid-NPC and enemy-speed fixes after the
+6519–6632 audit. **H450/TBPTT450, MAIN16=4combat+8quiet+4NAV**, all weights/Adam/
+RNG/samplers and **TOTAL strictly<1 ten times consecutively** remain. The
+cancelled0.3 threshold was never applied.
+
+`rssm_player_enemy_local_motion_repair_v3` supplies exact one-movement-step
+Player Source labels even with an invalid NPC, provided the live player body
+is legal. NPCs are disabled only in the label query; NN state/hz are not
+corrected. Free/blocked/partial masses2/1/1 and free-progress loss counter false
+stops. Up to two contact branches reserve nonzero quiet prefixes; shortfalls
+are explicit. Direct labels follow neural rollouts.
+
+NPC own-memory H4/8/16/32 branches prefer2combat/2quiet and initial/nonzero
+prefixes. Own-aligned local supervision is weighted
+0.5×(vector+speed+0.25direction+0.1own-prefixXY). NPC circle/swept X→Y loss uses
+radius0.25/weight0.25/radius² and Source lifetime masks retaining ownmissing.
+Respawn motion skips swept/localvelocity only; global SourceXY is retained.
+Recorded quiet velocity/direction are diagnostic. Local horizons use a16-update
+Latin-square schedule independent of latentcycle. Gameplay receives no Source correction.
+
+Source **6647**, SHA256 `fa36be6385f3cd9d1b97d57b0a1498fa4563b4e3ca4e083293928a092e806f82`.
+Plan SHA256 `0eeee76f7c9fc8fd13cf2748db27d04298da8cb6ded2a660b13ab14151ab4902`.
+Discarded GPU15/15:132.44s/update,9.22085GiB allocated/9.45703 reserved.
+Production **PID54052**,2026-11-14 **19:07:59MSK**. Initial22/22 preservation
+verified1599 tensor entries,442 Adam states/seven groups,1156 frozen entries
+and all old clocks. Fresh450 baseline completed before SGD; first production
+update **6648** passed31/31. New TOTAL has a separate curve and is not directly
+comparable with the former objective. Validation250/preview10 remain; quality
+improvement is not yet claimed.
+
+[Plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_correction_plan.json),
+[GPU](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_correction_revisions/g6647_fa36be6385f3/gpu_probe.json),
+[preservation](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_correction_revisions/g6647_fa36be6385f3/initial_verification.json),
+[first update](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_correction_revisions/g6647_fa36be6385f3/first_verification.json).
+
+## H105. RGB-only learned enemy SR with a frozen background
+
+The user requested that SR reconstruct enemy appearance neurally instead of
+replacing a silhouette with fixed sprite pixels. A separate3000-update trial
+was implemented as `neural_enemy_restoration_sr`: frozen Semantic EDSR plus the
+copied five-expert RGB residual form the background, while a new full-frame
+U-Net/PixelShuffle decoder predicts native128 RGB and alpha from RGB32 only.
+There are **2,162,020 trainable parameters /58 parameter tensors** and
+**2,010,828 frozen parameters**. Source masks cannot hide RGB errors through the
+predicted alpha: appearance and opacity have separate direct losses. Source
+RGB, masks, distance and animation are labels only; inference needs no GT,
+RSSM, map, sprite, atlas buffers or atlas file. Atlas is used only by the
+separate frozen reference arm; both arms receive matching RGB inputs without
+a hypothesis hint.
+
+The parent is the completed image-chain **BEST FULL SR, local2600/global110705**,
+SHA256 `dea6376208b1ee3f72202df4e0f9d7d76b1499807730a1dccb5454b376dd8f79`.
+All183 copied background tensors are bit exact; a CPU check measured maximum
+background difference0 against the old pre-composite RGB. The new standalone
+checkpoint contains no atlas pixels. Its optimizer is fresh Adam for the new
+58 tensors; no reuse of the old Atlas Adam is claimed. The actual final RF3/Q/
+decoder cache supplies **8192 TRAIN/1024 VAL** frames without a hypothesis
+sidecar. Sampling balances HR-visible/empty frames, near/mid/far and available
+hit/death animation phases. Validation uses the parent's exact256 held-out
+indices, with a separate data/panel fingerprint. Preview15, validation100,
+batch8 and full atomic model/Adam/sampler/RNG saves after every update are used.
+
+The first disposable CLI startup stalled before a plan or SGD was produced.
+Only that isolated probe was cancelled. Initializing CUDA and setting two CPU
+threads before the trainer/keep-awake work allowed the replacement GPU trial
+to complete **three discarded updates and9/9 checks**, including all58 Adam
+states at step3,24 sampler draws, unchanged frozen background, no atlas in the
+new model and finite standalone reload. The CLI now establishes that runtime
+order before KeepAwake/preparation. After initial validation, its stage label
+switches to actual decoder training; the live UI also corrects the earlier
+stale initial-validation label.
+
+Production **PID4636** runs in `training_runs/sr_neural_enemy_20261114`, monitored
+at **http://127.0.0.1:8786/**. Plan SHA256
+`4fb82988acfd45c3e75dc636fc506162ef90171fabdaad15260cd8bba8ec85df`.
+Dynamics continues independently under H104; no automatic game promotion occurs.
+
+The **step200** same-panel comparison is an early snapshot, not completion:
+
+| Metric | Learned RGB/alpha | Frozen Atlas, RGB-only input |
+|---|---:|---:|
+| Whole-image SSIM |0.78133|0.77747|
+| Whole-image MAE, normalized RGB |0.03669|0.03361|
+| Foreground MAE,205 visible frames |0.12983|0.15095|
+| Visible alpha IoU |0.09934|0.31895|
+| Empty soft-mask leakage,51 frames |40/51|0/51|
+
+The leakage check asks whether **any** predicted alpha pixel exceeds0.05;
+78.4% does not mean that78.4% of empty images contain a fully painted enemy.
+Foreground reconstruction and SSIM improved in this snapshot, while overall
+MAE and mask precision/overlap still need work. SSIM>0.91 and MAE255<2.5 have
+not passed, nor has gameplay quality. No conclusion of final success is drawn
+from the frozen weapon/background or the3000-update budget.
+
+[Plan](training_runs/sr_neural_enemy_20261114/training_plan.json),
+[GPU verification](training_runs/sr_neural_enemy_20261114/gpu_probe_verification.json),
+[step200](training_runs/sr_neural_enemy_20261114/validation/step_000200.json),
+[model](turkeyworld/neural_enemy_restoration_sr.py),
+[trainer](turkeyworld/train_neural_enemy_restoration_sr.py).
+
+## H106. Foreground-only SR correction with complete-state continuation
+
+The user requested a fix for the learned enemy layer's colored patches. V1
+was stopped at a complete optimizer boundary at **absolute step2308**; its
+original directory and loss history remain intact. A four-case forward check
+showed that the frozen background already depicted recognizable enemies, while
+the newly learned RGBA layer covered them with brown paint. Near/mid/far and
+empty examples had maximum alpha approximately0.9989/0.9975/0.9932/0.9879.
+This identifies excess paint by the learned layer; it does not establish the
+quality of the new correction. The frozen wall blur remains a separate limit.
+
+The new explicit loss protocol is
+`neural_enemy_restoration_foreground_v2`; V1 stays available unchanged. Source
+foreground RGB, boundaries and SSIM directly supervise raw RGB and the composite.
+Both sides use the same detached frozen background outside Source foreground,
+so background color errors cannot reward the enemy head for painting an opaque
+patch. Alpha has separate positive/negative BCE and Dice, plus hard-negative
+BCE on the **worst32 actual background pixels per image**. Full and hard-pixel
+background preservation and empty-frame image-change penalties remain active.
+Predicted opacity cannot hide the direct appearance loss. Whole-Source-image
+errors are retained as diagnostics, not V2 background-reconstruction gradients.
+The architecture, frozen background, RGB-only inference and no-sprite contract
+remain unchanged; Source masks are loss/validation labels only.
+
+The correction uses a separate run,
+`training_runs/sr_neural_enemy_corrected_20261114`, with **3000 additional updates**,
+absolute **2308→5308**, batch8, phase preview15 and phase validation100. The source
+checkpoint is pinned at SHA256
+`3c9731cf5450da1d312d33bef718ad192770e3c5af5d74eb608bd23f0d963de5`;
+its source plan is
+`4fb82988acfd45c3e75dc636fc506162ef90171fabdaad15260cd8bba8ec85df`.
+All weights, **58 Adam states**, process RNG and private sampler are continued,
+with no optimizer reset. Source sampler draws are18464, not0. The initial full
+checkpoint is written before the new baseline validation. The old best remains
+archived in `resume_source.previous_best`; it is not compared to a V2 loss. A
+new best ledger begins from the V2 baseline on the same source weights and
+same256 held-out images from the8192 TRAIN/1024 VAL cache.
+
+The dashboard at **http://127.0.0.1:8786/** distinguishes phase progress0→3000
+from the absolute step, rejects old-protocol training rows and shows the source
+baseline only as validation. Validation checks protocol, source/panel identity
+and matched Atlas reference. Empty-mask diagnostics now distinguish any soft
+pixel≥0.05 from dense pixels≥0.5, with dense pixel count, maximum/top64 alpha
+and top64 image change relative to the frozen background. These are leakage
+measurements with explicit empty-frame support, not a count of complete enemies.
+
+CPU checks passed **34 restoration tests,9 trainer tests and238 dashboard tests**;
+the dashboard Worker build also passed. A separate three-update discarded GPU
+probe reached absolute2311 and passed **21/21 complete-checkpoint checks**:
+initial weights, all58 Adam states, RNG and sampler matched source2308; only
+the learned head changed on the first update, while all183 frozen background
+tensors stayed bit exact. Production **PID6004** then started the new3000-update
+phase; its own first update also passed21/21 continuation checks. The dashboard
+pointer was switched only after the new baseline and first-update proof passed.
+
+On the same256 validation images, the **first100 correction updates** measured:
+
+| Metric | Source2308, V2 baseline | Absolute2408, phase100 |
+|---|---:|---:|
+| V2 validation loss |1.54835|0.98976|
+| Whole-image SSIM |0.77939|0.78634|
+| Foreground MAE,205 visible frames |0.13501|0.12691|
+| Enemy ROI SSIM |0.21472|0.29744|
+| Mask precision / recall |0.70463 /0.79605|0.93422 /0.54477|
+| Visible alpha IoU |0.44161|0.25201|
+| Empty frames with any alpha≥0.05 |28/51|26/51|
+| Empty frames with any alpha≥0.5 |21/51|1/51|
+| Dense alpha pixels across51 empty frames |5104|7|
+| Raw RGB foreground MAE |0.14111|0.14239|
+
+The next two checks give a more complete picture of the same held-out panel:
+
+| Metric | Source2308 | Phase100 | Phase200, absolute2508 | Phase300, absolute2608 |
+|---|---:|---:|---:|---:|
+| Whole-image SSIM |0.77939|0.78634|0.78697|0.78439|
+| Foreground MAE |0.13501|0.12691|0.12644|0.12855|
+| Enemy ROI SSIM |0.21472|0.29744|0.29883|0.28928|
+| Raw RGB foreground SSIM |0.30223|0.29687|0.30181|0.30395|
+| Mask recall |0.79605|0.54477|0.51968|0.59127|
+| Far-enemy mask recall |0.90856|0.02876|0.12267|0.17655|
+| Dense empty frames |21/51|1/51|1/51|2/51|
+| Dense alpha pixels across51 empty frames |5104|7|12|73|
+
+False opaque paint remains substantially reduced across all three checks.
+Enemy reconstruction is incomplete: far-enemy recall partially recovers after
+phase100, but remains far below source, and whole-image SSIM is not monotonic.
+At300, raw RGB foreground SSIM slightly exceeds source while visible-mask
+recall remains lower. These are early trade-offs, not proof that the enemy is
+accurately reconstructed. The image-quality and gameplay goals have not passed;
+there is no automatic promotion to the game.
+
+[Pinned source receipt](training_runs/sr_neural_enemy_corrected_20261114/source_receipt.json),
+[four-case diagnosis](training_runs/sr_neural_enemy_corrected_20261114/frozen_background_diagnosis.png),
+[production continuation proof](training_runs/sr_neural_enemy_corrected_20261114/continuation_verification.json),
+[V2 baseline](training_runs/sr_neural_enemy_corrected_20261114/validation/step_002308.json),
+[phase100 validation](training_runs/sr_neural_enemy_corrected_20261114/validation/step_002408.json),
+[phase200 validation](training_runs/sr_neural_enemy_corrected_20261114/validation/step_002508.json),
+[phase300 validation](training_runs/sr_neural_enemy_corrected_20261114/validation/step_002608.json),
+[objective](turkeyworld/neural_enemy_restoration_objectives.py),
+[continuation checks](turkeyworld/neural_enemy_restoration_continuation.py),
+[validation](turkeyworld/neural_enemy_restoration_validation.py).
+
+## H107. SR V3: details, animations and matched background validation
+
+V2 completed all3000 additional updates at absolute5308. Its loss-best is also
+the final checkpoint: SSIM0.78651, foreground MAE0.12517, ROI SSIM0.30196,
+raw RGB foreground SSIM0.33562, mask precision/recall0.93027/0.58807. Relative
+to source2308, dense false alpha pixels on51 empty images fell5104→321 and
+dense-error frames21→4, while recall fell from0.79605. This fixed much of the
+paint but did not complete enemy reconstruction or the image/gameplay goals.
+
+The user authorized targeted continued training. V3 uses
+`neural_enemy_restoration_detail_v3`, **PID56288**, in
+`training_runs/sr_neural_enemy_detail_20261114`, at **http://127.0.0.1:8786/**.
+Its3000-update phase continues **5308→8308**, batch8, preview15 and validation100.
+Source SHA256 is
+`48c35544bc473d8ff1a8c5d30c7bec72038ce823cdfe917d0b4819c1ee620b69`;
+plan SHA256 is
+`ad5458ce22826d140c50c38c15a2027a51987b19e6b5a0661b2f9f970a329082`.
+The same58 Adam states, all weights, sampler and process RNG continue without
+reset; the new model still takes only RGB32, with the same2,162,020 trainable
+parameters and2,010,828 frozen background parameters. No new architecture,
+Atlas pixels, RSSM input, GAN or Source inference hint was added.
+
+An actual no-SGD gradient audit at source5308 measured excessive mask pressure
+relative to RGB. Fixed group scales are **mask0.5/direct RGB4**, with composite
+foreground and preservation groups unchanged. The death-cohort mask/RGB trunk
+gradient-norm ratio changed from approximately18.2 to2.63 in the audit. These
+are measured training gradients, not image-quality improvements. V3 also adds
+positive-alpha consistency, hard-positive alpha BCE, the worst32 foreground RGB
+pixels, and direct RGB/edge/SSIM supervision on aspect-preserving native/32/64
+enemy crops. Predicted alpha still cannot hide raw RGB errors; both comparison
+sides use the same detached frozen background outside Source foreground.
+Weights are fixed, with no EMA normalization and no Source-background painting
+gradient. V1/V2 loss implementations and historical curves remain separate.
+
+The main held-out panel remains the same256 images from8192 TRAIN/1024 VAL.
+A CPU audit found845 visible/179 empty VAL images, including28 attacks,
+184 hurt,20 early deaths and40 late deaths. The additional fixed panel uses
+**120 unique VAL images: all28 attacks,32 hurt, all20 early deaths and all40
+late deaths**. Its fingerprint is
+`f937c3dd727afa8016eaa95d78a6a22af748d5f0dfceaa82e14e8fd9a0ccb146`.
+These labels are never used as TRAIN. Each death phase has only5 far cases,
+so its far-distance support is reported explicitly rather than treated as
+robust generalization. Additional-panel scores do not alter the main256 loss.
+
+V3 adds a matched **frozen-background-only** arm directly from the same forward
+output, without an additional network call. Preview retains Source/NPR/Atlas/
+learned output and appends the frozen background as its fifth row. The background
+already depicts some enemies; its alpha/detector metrics are unavailable, not
+evidence of a perfect detector. A separate guarded visual-best ledger averages
+near/mid/far raw RGB SSIM, ROI SSIM and mask F1. A candidate cannot worsen the
+source's dense-empty counts/pixels, raw RGB SSIM, ROI SSIM or recall; precision
+has0.03 tolerance. This selection is separate from loss-best and is not gameplay
+qualification or automatic deployment.
+
+Both the three-update discarded GPU probe and the production continuation
+passed **21/21 conservation checks**. CPU objectives25/25, validation11/11 and
+the combined dashboard246/246 tests passed. The first same-panel readings are:
+
+| Metric | V3 source5308 | Phase100,5408 | Phase200,5508 | Frozen background only |
+|---|---:|---:|---:|---:|
+| Whole-image SSIM |0.78651|0.78515|0.78632|0.79109|
+| Foreground MAE |0.12517|0.12753|0.12696|0.12483|
+| Enemy ROI SSIM |0.30196|0.29662|0.30017|0.33675|
+| Raw RGB foreground SSIM |0.33562|0.33777|0.33720|—|
+| Mask precision / recall |0.93027 /0.58807|0.88824 /0.66095|0.89369 /0.61331|—|
+| Dense-empty frames / pixels |4/51 /321|3/51 /395|4/51 /545|—|
+
+Raw appearance improves slightly and recall increases, while the composite
+has not improved and still trails the actual frozen background. The guarded
+visual-best remains source5308 at this snapshot. This ongoing phase is not a
+quality success; its formula is kept stable while evidence accumulates.
+
+[Plan](training_runs/sr_neural_enemy_detail_20261114/training_plan.json),
+[gradient audit](training_runs/sr_neural_enemy_corrected_20261114/gradient_attribution_5308_detail_v3.json),
+[continuation proof](training_runs/sr_neural_enemy_detail_20261114/continuation_verification.json),
+[baseline](training_runs/sr_neural_enemy_detail_20261114/validation/step_005308.json),
+[phase100](training_runs/sr_neural_enemy_detail_20261114/validation/step_005408.json),
+[phase200](training_runs/sr_neural_enemy_detail_20261114/validation/step_005508.json),
+[visual selection](training_runs/sr_neural_enemy_detail_20261114/visual_best.json).
+
+## H108. MAIN18 full-BPTT ladder with a strict TOTAL loss gate
+
+The user requested shorter MAIN stages with full credit through each current
+trajectory, then changed the effective batch to **18×1=18**, evenly divided
+into **6 combat,6 quiet enemy-motion and6 no-enemy navigation actors**. The prior
+local-motion run was stopped at the complete optimizer boundary **6686**. Its
+full source is pinned at SHA256
+`d02888a4318b92bae08cd103336ea018522f1a7045a755bfc58c8f6b1962c6f6`.
+The prepared plan SHA256 is
+`290d86e4ad6c85b1bd028b2190befb725d7acaa3e145245e27f6597751665480`.
+The old active worker PID54052 stopped. After GPU checks, production worker
+PID47660 launched through the early-CUDA bootstrap. A genuine physical450
+baseline at6686 completed before the first real SGD6687, which trained
+H16/full-BPTT16 with actual MAIN18=6/6/6.
+
+The new immutable `rssm_main18_full_bptt_loss_ladder_v1` plan preserves the old
+player, motion, batch and policy plans as exact source history. A fresh stage
+clock starts at **16,48,80,112,144,176,208,240,272,304,336,368,400,432,450**.
+Every stage advances only after **raw TOTAL strictly<1 on10 consecutive complete
+optimizer updates**; equality resets its streak. There is **no stage update cap**,
+no mandatory long update and no reuse of earlier stages' qualifying streaks.
+Source-support checks, EMA, component losses and validation are not substitutes
+for the raw TOTAL criterion. The final H450 criterion remains<1×10 and terminates
+only after its own ten qualifying updates, without claiming gameplay quality.
+
+MAIN Player/NPC/Combat graphs retain memory and integrated coordinate gradients
+through **all current H transitions**, with a single BPTT chunk H, from16 ticks
+(0.53seconds) to450 (15seconds). Player/router actor weights become1/3 per stream;
+NPC actor means use6/12 combat and6/12 quiet. Historical B16 exposure is retained
+verbatim; new exposure counts18 actors and18×H transitions per completed update.
+Navigation and quiet samplers continue their private PCGs with6 new draws each;
+combat makes18 episode draws, keeps6 and records12 discarded draws. AUX16,
+late-prefix2, contact4 and enemy-local4 stay separate. Existing local Latin-square
+horizons are capped at the current MAIN H, so H16 does not hide an H32 gradient
+branch. Unavailable long own-prefix quotas remain reported as shortfalls.
+
+All weights,442 Adam states/seven named groups, original sampler states/RNG and
+frozen renderer assets continued without reset. The new formula
+and MAIN mix have a separate loss identity; old totals are historical. A fresh
+physical baseline precedes SGD; independent physical validation stays450 steps
+every250 updates, while image/map preview shows the current training H. Resuming
+requires the same new plan via `--main-ladder-plan` plus all prior immutable plans.
+
+CPU validation passed **156 core tests**, including genuine full-memory gradient
+checks and the complete15-stage qualifying path; **9 operational guard tests**
+also passed. The dashboard's combined246 tests/build passed. Actual GPU checks
+then passed: the complete three-stream H450/MAIN18/full-BPTT capacity update
+used **7.358GiB** peak allocation and **208.512seconds**. This disposable probe
+did not become a production H450 commit. Production initial conservation
+passed **29/29** checks, and its first complete H16 update passed **38/38**.
+The active training loop starts H16 and advances only by its uncapped<1×10 gate;
+the old H450/B16 capacity result was not substituted for this B18 measurement.
+
+[New plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/main_ladder_plan.json),
+[source receipt](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/main_ladder_revisions/g6686_d02888a4318b/source_receipt.json),
+[curriculum](turkeyworld/rssm_main_ladder_revision.py),
+[conservation verifier](training_runs/diagnostic_tools/verify_main_ladder_20261114.py),
+[guarded operations](training_runs/diagnostic_tools/activate_main_ladder_20261114.py).
+
+The unactivated draft plan's copied denominator label was corrected from16 to18
+without changing numeric actor weights. A second preparation check exposed
+integer anchor-count keys becoming strings in JSON. The new plan/digest now
+canonicalize JSON, while raw source sampler dictionaries remain typed in the
+pickle checkpoint; resume validates old contracts using that raw snapshot.
+An integer-key/PCG pickle-resume test passes. Unused drafts are archived rather
+than rewriting any activated historical plan.
+
+## H109. Preferred frozen SR background with a new RGB detail branch
+
+After V3 completed at **8308**, the user preferred its bottom, frozen-background
+row and requested added detail. On the same256-frame panel, V3 composite SSIM
+was **0.78724546**, versus **0.79109207** for that exact background. The base is
+unchanged throughout V3; pinned source5308 therefore supplies the same preferred
+weights, SHA256 `d22e704e6a919f362deb9b5d37bf86c03931c89e27745a9165cc6af97a6e39d3`.
+The completed V3 optimizer/run is preserved; a later stop marker had no training
+effect because the run had already finished.
+
+`background_detail_sr_v1` creates a separate architecture: **2,010,828 frozen
+base parameters** plus **526,131 new RGB residual parameters/42 tensors**.
+The copied Semantic/EDSR/RGB-MoE base is exact. Its new zero output head makes
+initial display equal the preferred base bit for bit; there is no alpha gate,
+sprite insertion, old RGB/alpha head, Atlas asset or RSSM inference input.
+The bounded `0.25*tanh` correction can restore color/shape and detail; soft
+low-frequency/base and residual penalties discourage broad repainting, without
+forcing a high-pass-only image. Source foreground/background/edge/SSIM targets
+are training labels only. Background edges include sky and gun, not just walls.
+
+This isolated `training_runs/sr_background_detail_20261114` experiment has fresh
+Adam for the new42 tensors and a fresh private sampler, **local0→3000**, batch8.
+Source5308 is provenance, not reused Adam history or the new optimizer clock.
+The same8192 TRAIN/1024 VAL paired NPR32→Source128 corpus,256-frame main panel
+and120-frame animation receipt remain pinned; the latter covers28 attack,
+32 hurt,20 early-death and40 late-death visible frames. Both measured arms come
+from a single forward: preferred base and base with learned details.
+Preview every15 shows four Russian-labelled rows: Source/NPR/preferred base/new
+result. Full validation every100 measures NPC/background errors, contours,
+ROI SSIM, background edges, low-frequency change and localized empty-frame
+paint. Alpha/Atlas metrics are absent rather than invented zeroes.
+
+The visual selector accepts only nondecreasing overall/visible-enemy ROI SSIM
+and nonincreasing Source MAE on empty frames versus the exact preferred base.
+It ranks eligible weights by mean overall/foreground-ROI SSIM, separately from
+objective-best. Missing support is not a pass. No automatic gameplay promotion
+or quality claim follows the3000-update budget. The separate SSIM>0.91 and
+MAE255<2.5 image target still needs measurement.
+
+The immutable new plan SHA256 is
+`63111f0aeca33c54532aa0902c251086b361c22691c7a6c18883342e33430294`;
+its preparation verified the copied preferred base and exact zero initial output.
+The21 background-detail CPU tests and250 dashboard tests/build passed.
+The actual three-update GPU probe passed **22/22** checks. Production
+**PID53936** started at **18:42:45UTC**, with **20/20** preservation checks;
+http://127.0.0.1:8786/ now serves this run. Frozen base tensors remain bit exact.
+The first new weights matched replay within1e-7, maximum difference1.87865e-8
+in one weight; source indices, loss and samplers matched. This floating-point
+tolerance is stated separately from the base's exact preservation.
+
+At VAL1400, overall SSIM is **0.79117162** versus base **0.79109207**;
+enemy ROI SSIM is **0.33629846** versus **0.33674788**. Mean image correction
+is only0.00057081 on[0,1], while base Source MAE is0.03074407. This is a small
+pixel-error change, not demonstrated recovery of enemy detail. The visual guard
+retains the baseline; no image/gameplay qualification or promotion is claimed.
+A separate read-only gradient audit is examining whether preservation terms
+anchor the residual near identity, without changing the active training code.
+Existing V1/V2/V3 and MAIN18 UI contracts remain covered. See
+[GPU proof](training_runs/sr_background_detail_20261114/gpu_probe.json),
+[production proof](training_runs/sr_background_detail_20261114/production_verification.json),
+[plan](training_runs/sr_background_detail_20261114/training_plan.json),
+[model](turkeyworld/background_detail_sr.py),
+[loss](turkeyworld/background_detail_objectives.py),
+[held-out comparison](turkeyworld/background_detail_sr_validation.py),
+[trainer](turkeyworld/train_background_detail_sr.py).
+
+## H110. Frozen current SR, new private preview assets and continued MAIN18
+
+The user requested freezing the current upscaler, using it with the latest
+renderer in dynamics' “What the model shows”, opening the comparison game,
+and then continuing dynamics. The background-detail SR had already completed
+all **3000** updates. Its current full checkpoint was copied read-only to
+[`sr_frozen_step_003000.pt`](training_runs/sr_background_detail_20261114/frozen/sr_frozen_step_003000.pt),
+SHA256 `c7912165e80d555f9b09c521a3d0b6c46ac3915d1ff879fbdd35d815385dc388`.
+The [freeze manifest](training_runs/sr_background_detail_20261114/frozen/freeze_manifest.json)
+records current-last selection, source5308,526131 new parameters and2010828 frozen
+base parameters. All SR workers are stopped/completed. This explicit user selection
+does not override the measured quality conclusion: final overall SSIM0.79118875
+barely exceeds base0.79109207, while enemy ROI0.33601918 is below base0.33674788;
+the automatic visual-best still retains the initial base.
+
+Dynamics stopped at the complete **6745** boundary, SHA256
+`3fa021fa458d8be2adaeae4991e7bb715fa345e0cf0400d526d871b340a11e7d`.
+Its MAIN18 ladder retained source6686,59 completed updates, H16/stage59 and streak0.
+The new explicit direct-child preview revision v5 selects the final format8
+**RF3/NPR32317 + Base31709 + decoder4125**, renderer SHA256
+`40f9373125c038a200b4386c25a375fa2c32d6902447a9f8b2b8cfa1e70985b6`,
+and the frozen **background-detail SR3000**. It has no restorer, alpha or Atlas
+replacement. The selected-plan SHA256 is
+`cd1d32d868255245471908221b0f634595b12a20ee65f2128f5e2d6ccf5e5492`;
+the v5 revision SHA256 is
+`ddf8f9e4ddced88b0af58d3ccb1dd4153d810b7a04108522f23aa2b314c0c5d2`.
+Previous asset plans and the MAIN18 plan/source genealogy remain unchanged.
+
+An explicit RF3 image profile builds a fresh **raw training-model clone** and
+loads the complete image chain once. Original Combat/RSSM renderer-lineage
+validators remain strict; the code does not load a new chain onto an already
+modified old preview clone. Current dynamics weights are copied into that
+private clone on each preview. Source frames/states remain targets only.
+The actual preview6745 contains the same current-H16 trajectory in five rows,
+neural SR and bilinear output, plus its map drift. Its caption identifies
+**3 Euler steps**, NPR32317/Base31709/decoder4125/SR3000.
+
+The asset-only resume passed **25/25** same-step checks at6745: all1599 model
+tensors,442 Adam states/seven groups, three serialized RNG streams, complete
+typed training/sampler ledgers and MAIN18 stage/streak counters were preserved
+before SGD. No physical450 baseline was repeated, no H or streak reset, and
+no training image assets or old plans were replaced. Worker **PID53264** continued
+training; its first complete **6746** update retained H16 with stage60/streak0,
+the same18×1=18 and6/6/6 actor mix, and the original uncapped TOTAL<1×10 gate.
+
+The Source/neural comparison window **PID47036** actually launched at
+**19:09:43UTC**, using the same RF3 and frozen SR, with1024 neural display.
+The user closed it after about177seconds. The last trial recorded44 simulated
+transitions and the session had5 resets, including T combat switching; this was
+not a successful autonomous450-step test. It was not reopened. Dynamics training
+continues; image/gameplay quality is not declared passed.
+
+[v5 revision](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_assets_revision_npr32317_decoder4125_sr_detail3000_v5.json),
+[same-step preservation proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/preview_asset_revisions/g6745_3fa021fa458d/image_chain_resume_verification.json),
+[game smoke](training_runs/play_frozen_bg_rf3_g6745_20261114/runtime_smoke_verification.json),
+[game report](training_runs/play_frozen_bg_rf3_g6745_20261114/report.json).
+
 ## Changes to goals, batches and data units
 
 | What changed | Chat sequence / outcome |
@@ -3926,6 +4400,220 @@ the working tree.
 | 10.11 19:36 | `f042c64` | renderer →dynamics →joint plan |
 | 11.11 00:41 | `69a086c` | distil render |
 | 11.11 09:58 | `25be7a4` | JEPA →DreamerV3 |
+
+## H111. Dreamer-style actor–critic inside the frozen learned environment
+
+The user requested an actor–critic that learns inside the learned world. A new
+isolated learner, `training_runs/dreamer_actor_critic_20261114`, was implemented
+and actually started as **PID6176**, initially pinning world step **6852**. Its
+policy starts with **100 reward/continuation warmup updates**. This is an
+activation record, not a claim that the policy has learned navigation or combat.
+
+After58 completed learner updates, a routine same-plan checkpoint continuation
+started **PID22856**. Its preservation receipt passed **9/9 checks**: policy and
+reward-head tensors, named Adam histories, Torch/CUDA RNG, both replay samplers
+and Python RNG were retained exactly; the pinned world stayed at6852. The initial
+PID6176 is historical. No policy counter or warmup clock was restarted.
+
+The saved production history subsequently records the first actor/critic update
+at **101**, after the100-update head warmup, on the same world6852. The retained
+Source report at **100** uses four starts and32 transitions; it precedes that
+first actor update and is a baseline, not evidence of policy improvement.
+Its separate head panel still missed **18/18 real deaths**, with0 false deaths
+among558 alive window measurements. Frozen-model checks passed and gameplay
+qualification remained false. A real Edge page capture at128 confirms the UI
+displayed actor/critic learning, without equating those later losses with VAL100.
+
+The final observed activation snapshot was **126 learner updates/26 actor
+updates**, PID22856 running on world6852. VAL100 Source returns were learned0.58,
+random0.58 and scripted0.60; this pre-actor baseline establishes no learned-policy
+advantage. Its head reward MAE was0.03676786 and continuation Brier0.06505723,
+despite the0/18 death recall. A separate discarded refresh probe passed **8/8**
+checks for world6852→6862 without SGD or changes to policy/reward-head tensors.
+No online Source collector is implemented: policy learning currently benefits
+the manual game indirectly through diagnostics, rather than taking its controls
+or automatically adding new training episodes.
+
+The user then explicitly requested stopping the policy learner. It stopped
+gracefully at **200 learner updates/100 actor updates**, after completing its
+validation boundary; native status is `stopped` and PID22856 has exited. The full
+checkpoint200 was retained, SHA256
+`bf59f0e0ea177abd55b01b54f828450db463ad5fc24d1fe9f83836668c03c45b`.
+The policy remains stopped. Main dynamics PID53264 continued running at observed
+step6869 with its existing training settings. See the
+[user-stop receipt](training_runs/dreamer_actor_critic_20261114/user_stop_receipt.json).
+
+The main dynamics worker **PID53264** continues its existing MAIN18 curriculum:
+six navigation, six quiet-enemy and six combat actors, full current-H BPTT and
+the uncapped TOTAL<1 ten-consecutive-update gate. Its validation interval remains
+250. The policy learner freezes a separate complete world snapshot and all image
+models; it neither writes gradients into that snapshot nor controls the user's
+manual game. Policy imagination preserves all three RSSMs' prior h/z memories
+and predicted state20, without future Source frames or engine corrections.
+Each policy update starts from **18 MAIN replay seeds,6/6/6**, and imagines
+**15 transitions**. The actor factorizes movement, strafe and turn into three
+choices each, plus binary fire:54 possible joint actions from11 logits.
+
+Reward and continuation heads learn from recorded Source TRAIN transitions.
+Their objective mixes **80% MAIN replay and20% separate short-event replay**;
+the short stream has its own saved RNG and supplies real player-death examples
+without changing the18 policy-start distribution. The existing short corpus
+contains **73 TRAIN deaths and18 held-out VAL deaths**, all genuine HP0.08→0
+transitions, with separate seeds/content and no dead padding. Each terminal clip
+has18 transitions; an H16 window starting at2 includes its death at transition17.
+Head validation pairs each of the18 VAL death windows with a low-HP, still-alive
+window from the same episode. Those36 diagnostic windows contain576 measured
+transitions but only324 unique transitions; they are not a population prevalence
+estimate. A15-second data cutoff is not labeled player death.
+
+The explicit Dreamer-style math uses REINFORCE for sampled discrete actions,
+entropy3e-4, gamma332/333, lambda0.95,255-bin raw-space symexp two-hot values,
+online stop-gradient bootstrap, a slow-value regularizer and0.98/0.02 target EMA.
+Return scaling uses5th/95th percentile EMA at rate0.01 with scale floor1. The
+compact game-specific actor/critic heads use512 units rather than claiming the
+reference architecture. Serialized game-specific supports bound predicted reward
+to **±2** and critic values to **±700**; raw-target clipping counters are reported.
+Official defaults and the support adaptation are distinguished in the plan.
+See the [official DreamerV3 implementation](https://github.com/danijar/dreamerv3)
+and [reference configuration](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/configs.yaml).
+
+Two discarded GPU probes actually completed: `probe_v2` ran four learner updates,
+including three actor/critic updates at batch3; `probe_main18` repeated four
+updates/three actor updates at the production batch18. Both preserved the frozen
+world and passed gradient isolation checks. Their real Source policy validation
+used **four starts and an8-transition horizon**, separately from the36-window
+reward/continuation panel. At probe step4, death recall was **0**, with false-death
+rate0: continuation remained underfit. These probes establish executable updates
+and honest validation, not policy skill or a gameplay quality pass.
+The MAIN18 probe also resumed its complete checkpoint and reached step8/seven
+actor updates with fresh Source and head-validation reports and no training error.
+
+The implementation checks passed **44 Python CPU tests in total**, including
+the4 policy-validation/page-server tests, plus **6 JavaScript/DOM UI tests**.
+The policy's production Source
+validation is configured for **32 transitions every100 learner updates**; the
+existing dynamics validation schedule is unchanged. The policy page is
+[localhost:8787](http://127.0.0.1:8787/), with its server PID9100; the dynamics page
+remains [localhost:8765](http://127.0.0.1:8765/). Local training artifacts are
+ignored by Git and do not promise checkpoint availability in a clean clone.
+
+[policy training plan](training_runs/dreamer_actor_critic_20261114/training_plan.json),
+[production launch](training_runs/dreamer_actor_critic_20261114/launch.json),
+[same-plan resume proof](training_runs/dreamer_actor_critic_20261114/resume_verification.json),
+[production Source baseline100](training_runs/dreamer_actor_critic_20261114/validation/step_000100.json),
+[production head validation100](training_runs/dreamer_actor_critic_20261114/validation/reward_step_000100.json),
+[actual page capture128](training_runs/dreamer_actor_critic_20261114/diagnostics/ui_cpu/policy_8787.png),
+[discarded world-refresh proof](training_runs/dreamer_actor_critic_20261114/diagnostics/refresh_probe.json),
+[batch3 probe](training_runs/dreamer_actor_critic_probe_v2_20261114/status.json),
+[MAIN18 probe](training_runs/dreamer_actor_critic_probe_main18_20261114/status.json),
+[probe Source validation](training_runs/dreamer_actor_critic_probe_main18_20261114/validation/step_000004.json),
+[probe death/alive head validation](training_runs/dreamer_actor_critic_probe_main18_20261114/validation/reward_step_000004.json).
+
+## H112. Serial Source collection, motion only world and policy rounds
+
+15 November2026, Moscow time; run directories retain their14 November start
+names. The user requested motion-only dynamics and a real repeating cycle:
+policy controls Source, RSSM learns from those new trajectories, then policy
+learns in the updated RSSM. This explicitly supersedes the earlier standalone
+policy stop only for the serial cycle; H111's stop at200 learner/100 actor
+updates remains a correct historical event. Human game controls are unchanged.
+
+The new protocols are `dreamer_motion_Source_world_policy_cycle_v1` for the
+controller and `rssm_motion_only_main16_v1` for dynamics. MAIN16 is exactly
+**8 no-enemy navigation +8 quiet NPC-motion**; Combat loss, combat MAIN/AUX/late,
+combat RNG draws and independent contact draws are0. Player uses1/2 NAV+1/2
+quiet; Enemy uses the quiet actors only. All three RSSM memories and their
+existing Transformer/MoE architecture remain. Pure combat readouts are frozen;
+shared combat memory may receive motion gradients. Short recovery uses actual
+MAIN own-state/h/z prefixes rather than extra independent fragments.
+
+The final user-approved ladder is **[16,48,80,112,144,180]**, **30 complete Adam
+updates on each H**, **180 world updates per round**. Full BPTT spans current H,
+reaching the **6-second /180-transition** target at30Hz. There is no TOTAL
+threshold, streak or early advance. Ending H180/30 marks a completed world
+phase, not a quality pass; the next outer round restarts H16 but preserves
+cumulative weights/Adam/sampler history. Earlier H450/MAIN18 gates are archived
+without reinterpreting their counters or old loss units.
+
+The exact preserved world source is **6873**, SHA256
+`531405a5721d6236fdedd2f5b42a667df5c12aef6ee46604935ca56f0251070c`.
+The full pre-SGD conservation proof passed for **1599 model tensors, all442
+named Adam states/seven groups, every moment/scalar, CPU RNG, all CUDA RNG states
+(one device),
+global PCG, raw private Source samplers and typed parent ledgers**. The new
+revision owns its8+8 sampler clocks and stage/round counters; old MoE, player,
+enemy-motion/contact and combat lineage remains opaque history. VAL pins the
+original held-out corpora/panels for **180 transitions**; old450 reports remain
+historical diagnostics. Future Source states/images never correct imagined or
+free RSSM trajectories.
+
+Collection actually completed **32 independent real Source TRAIN episodes**:
+16 navigation +16 quiet enemy, each180 transitions, **5760 transitions** in
+**48.606 seconds of collection wall time**. Firing was masked, exploration
+ε=0.30, Source state repairs0; policy/world parameter hashes stayed exact.
+The collector used pinned policy **200/100 actor updates** and world6873.
+Each world8-actor cohort samples **4 original +4 newest Source episodes**;
+earlier appended corpora are retained as provenance, not substituted for the
+original half. VAL remains separate and unchanged.
+
+After each180-update world round, policy explicitly refreshes to that complete
+checkpoint, performs **20 head-only reward/continue recalibration updates**,
+then **50 actual actor/critic updates**, with world and image assets frozen.
+Policy MAIN18 remains6 NAV/6 quiet/6 combat; each NAV/quiet group includes
+3 newest Source +3 original starts. Imagined horizon remains15 prior-only
+transitions. The next collection uses the updated policy. Heads-only work is
+excluded from the actor-update counter and does not change DYN16.
+
+Preflight passed **13 checks**. Full disposable cycle smoke performed one real
+world update **6873→6874** with Source appended, then explicitly rebound policy
+and reached **222 learner/102 actor updates** (20 head updates +2 actor updates).
+Those smoke checkpoints were not promoted. Actual capacity probes with Adam
+measured **H16:8.34s /1.91GiB** and **H180:70.82s /4.51GiB** peak allocation.
+Approximately **2 hours per world round** is only a rough scaling estimate,
+excluding variable collection/policy/validation overhead and any time needed
+to reach quality.
+
+Production controller **PID22908** and dynamics child **PID52828** started.
+At **6903**, production completed **exactly30 H16 updates** and switched to
+**H48/stage0/30**; policy is waiting for this world round. The subsequent actual
+live UI check at6908 showed H48/stage5/30 and35 new updates. It accepted the real
+boundary row30 as trainedH16/currentH48, retained35 current-plan chart rows,
+and displayed the6903/H48 RF3/SR preview and map without a stage mismatch.
+The cycle root is
+`training_runs/dreamer_motion_cycle_20261114`. Run/resume uses
+`python -m turkeyworld.dreamer_motion_cycle`; an explicit
+`--resume-after-user-stop` archives cycle/world/policy stop markers before
+resuming. Create **`training_runs/dreamer_motion_cycle_20261114/stop.request`**
+to stop the whole cycle safely. Ordinary restarts never clear a user's stop
+or automatically restart stopped children. Original stop flags were archived
+once in `retired_initial_flags` when this newly authorized cycle began.
+
+The dynamics page remains [localhost:8765](http://127.0.0.1:8765/), with a serial
+cycle card; policy remains [localhost:8787](http://127.0.0.1:8787/).
+On actual smoke6874 JSON plus its actual metrics file, Node verified the new
+identity, loss-row pins, MAIN8+8, stage1/30 and Combat OFF. Its TOTAL **0.2836225**
+used the new formula and does not establish improvement over old combat TOTAL.
+Cached preview6873 remained correctly labelled: **RF3/NPR32317, Base31709,
+decoder4125, frozen SR3000**, five rows and the same current-H16 map drift.
+All image workers remain stopped/completed. The paired runtime/default launcher
+budget is now180;19 CPU tests cover that change. The historical launcher still
+assumes Atlas SR, so these checks do not claim a newly launched modern-asset
+game window. No game window was reopened. Dashboard verification passed
+**259 Node tests**; the full-state proof helper passed4 CPU tests including15
+negative mutation cases, and the validation-pin helper passed8 CPU tests.
+
+[Controller launch](training_runs/dreamer_motion_cycle_20261114/controller_launch.json),
+[cycle plan](training_runs/dreamer_motion_cycle_20261114/cycle_plan.json),
+[13-check preflight](training_runs/dreamer_motion_cycle_20261114/preflight.json),
+[Source receipt](training_runs/dreamer_motion_cycle_20261114/cycles/cycle_000000/source/collection_receipt.json),
+[world source pin](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_only_source.json),
+[complete initial conservation](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_only_full_boundary_verification.json),
+[motion plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_only_plan.json),
+[fixed VAL plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_only_validation_plan.json),
+[discarded world smoke](training_runs/motion_cycle_smoke_world_20261114/status.json),
+[discarded policy smoke](training_runs/motion_cycle_smoke_policy_20261114/status.json).
+These are local, mostly ignored training artifacts; budget completion and
+improved imagined reward do not certify Source gameplay quality.
 
 ## Continuing this journal
 

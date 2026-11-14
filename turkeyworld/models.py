@@ -761,6 +761,12 @@ def build_upscaler(config=None, **overrides):
     if architecture == 'semantic_edsr':
         from .semantic_sr import SemanticEDSRUpscaler
         return SemanticEDSRUpscaler(**values)
+    if architecture == 'neural_enemy_restoration_sr':
+        from .neural_enemy_restoration_sr import NeuralEnemyRestorationSR
+        return NeuralEnemyRestorationSR(**values)
+    if architecture == 'background_detail_sr':
+        from .background_detail_sr import BackgroundDetailSR
+        return BackgroundDetailSR(**values)
     if architecture == 'enemy_decoder_edsr':
         from .enemy_decoder_sr import EnemyDecoderEDSRUpscaler
         if values.get('enemy_decoder_restoration') and 'restoration_blend_scale'not in values:

@@ -202,6 +202,9 @@ def batch_settings_for_plan(plan):
 
 
 def batch_settings_for_gate(gate):
+    if gate.get('main_ladder_revision')is not None:
+        from .rssm_main_ladder_revision import batch_settings
+        return batch_settings()
     record = gate.get('batch_revision')
     if record is None:
         if gate.get('batch_protocol') is not None:
@@ -215,6 +218,10 @@ def batch_settings_for_gate(gate):
 
 def validate_moe_batch_accounting(gate, step):
     """Return expected examples/transitions, including the immutable old segment."""
+    if gate.get('main_ladder_revision')is not None:
+        from .rssm_main_ladder_revision import validate_gate
+        validate_gate(gate,step)
+        return gate['main_examples'],gate['main_transitions']
     settings = batch_settings_for_gate(gate)
     record = gate.get('batch_revision')
     if record is None:

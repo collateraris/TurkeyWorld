@@ -3,7 +3,8 @@
 The Source side waits for every neural update. This GUI never advances either
 side independently or corrects neural rollout states automatically. T is an
 explicit navigation/combat scene event. Opening is paused, and completing the
-450-step trial holds the window until restart/quit.
+default 180-step (6-second) trial holds the window until restart/quit. An explicit
+--steps can select a longer diagnostic, including the legacy 450-step trial.
 """
 from __future__ import annotations
 
@@ -33,9 +34,13 @@ def arguments(argv=None):
                         help='neural shares only the player camera; NPCs, health and combat remain RSSM predictions.')
     parser.add_argument('--initial-environment', choices=('navigation', 'combat'), default='navigation',
                         help='Start without enemies for navigation; T toggles one-enemy combat.')
+    parser.add_argument('--steps', type=int, default=180,
+                        help='Positive paired transition count; default 180 is 6 simulated seconds. Use 450 for the legacy 15-second diagnostic.')
     parser.add_argument('--session-dir', type=Path,
                         default=Path('training_runs')/('compare_play_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')))
     gui, remaining = parser.parse_known_args(argv)
+    if gui.steps < 1:
+        parser.error('--steps must be positive')
     neural = runtime_arguments(remaining)
     if gui.panel_size and not 128 <= gui.panel_size <= 2048:
         parser.error('--panel-size must be0 or128..2048')
@@ -43,9 +48,7 @@ def arguments(argv=None):
         parser.error('Comparison requires --sr --display-size1024 --smooth; omit --two-stage-upscale')
     if neural.headless:
         parser.error('Comparison opens one visible window; omit --headless')
-    if neural.steps not in (0, 450):
-        parser.error('The paired trial is450 steps /15 simulated seconds')
-    neural.steps = 450
+    neural.steps = gui.steps
     # PairedRuntime renders the cached initial pose without consuming a tick.
     # No discarded warmup transitions belong to either trial's reported clock.
     neural.warmup = 0

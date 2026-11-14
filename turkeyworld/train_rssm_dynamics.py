@@ -224,6 +224,9 @@ class RSSMTraining:
         offset_label = ', '.join(str(offset) for offset in offsets)
         renderer_label=('NPR '+str(pinned.get('renderer_training_steps',pinned['renderer_refinement_updates']))
             +' (phase '+str(pinned['renderer_refinement_updates'])+')')if pinned else ''
+        renderer_solver_steps=pinned.get('renderer_solver_steps',1)if pinned else 1
+        image_chain_label=(' / Base '+str(pinned['base_training_steps'])
+            +' / decoder '+str(pinned['decoder_refinement_updates'])+' / RGB detail SR')if pinned and pinned.get('inference_profile') else ''
         def rgb(value):
             return value.detach().float().clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         preview = {'context': rgb(batch['context_frames'][0]),
@@ -236,15 +239,20 @@ class RSSMTraining:
                 'loss_gated_curriculum_plan_sha256': None if spec.get('moe') else spec.get('plan_sha256'),
                 **({'moe_training_plan_sha256':spec.get('plan_sha256'),
                     'moe_training_stage_index':spec.get('stage_index')}if spec.get('moe')else {}),
+                **({'motion_only_plan_sha256':spec['motion_only_plan_sha256'],
+                    'motion_only_round_index':spec['motion_only_round_index'],
+                    'motion_only_horizon':horizon,
+                    'training_target_game_steps':180}if spec.get('motion_only')else {}),
                 'loss_gated_stage_index': None if spec.get('moe')else spec.get('stage_index'),
                 'kind': 'rssm_free_autoregressive_future', 'model_kind': 'RSSM',
                 'component_phase': self.state['rssm_training']['phase'],
                 'renderer_checkpoint': str(renderer_checkpoint),
                 'sr_checkpoint': self._preview_sr_checkpoint,
                 'preview_assets': pinned,
+                'renderer_solver_steps': renderer_solver_steps,
                 'generated_at': now(), 'source_held_out': True, 'split': 'val',
                 'future_source_feedback': False, 'generated_finite': bool(torch.isfinite(generated).all()),
-                'caption': 'RSSM: собственная траектория H'+str(horizon)+'; показаны offsets '+offset_label+'; замороженный нейрорендер, один Euler шаг'+(' · '+renderer_label+' / SR '+str(pinned['sr_training_steps']) if pinned else ''),
+                'caption': 'RSSM: собственная траектория H'+str(horizon)+'; показаны offsets '+offset_label+'; замороженный нейрорендер, '+('один Euler шаг'if renderer_solver_steps==1 else str(renderer_solver_steps)+' шага Euler')+(' · '+renderer_label+' / SR '+str(pinned['sr_training_steps'])+image_chain_label if pinned else ''),
                 'row_labels': {'context': 'CONTEXT: '+str(context)+' observed frame(s) | RSSM',
                     'source': 'SOURCE: target-only offsets '+offset_label,
                     'generated': 'RSSM MODEL: free H'+str(horizon)+' | offsets '+offset_label+' | frozen renderer'+(' | '+renderer_label+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}

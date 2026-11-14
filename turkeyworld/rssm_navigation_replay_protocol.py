@@ -39,6 +39,9 @@ def navigation_replay_plan(state,*,source_checkpoint,navigation_root,enemy_motio
 
 
 def _replay_totals(record,step,gate=None):
+    if gate is not None and gate.get('main_ladder_revision')is not None:
+        from .rssm_main_ladder_revision import replay_totals
+        return replay_totals(record,step,gate)
     revision = None if gate is None else gate.get('batch_revision')
     if revision is None:
         updates=step-record['source_optimizer_step']

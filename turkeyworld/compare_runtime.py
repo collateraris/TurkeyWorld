@@ -30,7 +30,7 @@ class PairedRuntime:
     explicitly a renderer diagnostic: Source poses condition a second render,
     while the RSSM trajectory and memory continue independently and unchanged.
     """
-    def __init__(self, neural, *, seed=None, source_size=256, horizon=450,
+    def __init__(self, neural, *, seed=None, source_size=256, horizon=180,
                  source_factory=Game, render_pose=None, shared_camera_entities='source'):
         if (not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1
                 or not isinstance(source_size, int) or isinstance(source_size, bool)

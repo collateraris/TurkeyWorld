@@ -22,6 +22,10 @@ def player_geometry_protocol():return deepcopy(PLAYER_GEOMETRY_PROTOCOL)
 def player_navigation_tbptt(protocol):
     if protocol is not None and not isinstance(protocol,dict):raise ValueError('Player navigation protocol must be a mapping')
     value=16 if protocol is None else protocol.get('tbptt',16)
+    if protocol is not None and 'main_ladder_override'in protocol:
+        from .rssm_main_ladder_revision import validate_runtime_player_settings
+        if validate_runtime_player_settings(protocol):return value
+        raise ValueError('MAIN ladder full-BPTT settings differ from the explicit runtime contract')
     if type(value)is not int or value not in(16,64,450):raise ValueError('Player navigation TBPTT must be explicit16/64/450')
     return value
 

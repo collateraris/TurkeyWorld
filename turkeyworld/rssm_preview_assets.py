@@ -148,6 +148,10 @@ def synchronize_preview_dynamics(client, model):
 
 def prepare_preview_assets(model, plan, device, *, clone_factory=None):
     """Transactionally build a frozen inference clone; never attach to training."""
+    if plan.get('inference_profile') is not None:
+        from .rssm_preview_image_chain import PROFILE,prepare_image_chain_preview_assets
+        if plan['inference_profile']!=PROFILE:raise ValueError('Unknown explicit preview inference profile')
+        return prepare_image_chain_preview_assets(model,plan,device,clone_factory=clone_factory)
     from .models import NeuralWorldModel, WorldModelConfig, load_sr_checkpoint
     from .renderer_student import _hash_tensors, load_renderer_student
     device = torch.device(device)
