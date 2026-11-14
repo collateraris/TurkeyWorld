@@ -9,13 +9,16 @@ BUDGET_PROTOCOL = 'rssm_moe_loss_or_stage_budget_v2'
 FLAT_CAP_PROTOCOL = 'rssm_moe_flat_stage_cap_v3'
 SHORT_CAP_PROTOCOL = 'rssm_moe_flat_stage_cap_v4'
 TARGETED_HORIZON_PROTOCOL = 'rssm_moe_targeted_horizon_budget_v5'
+H450_GOAL_PROTOCOL = 'rssm_moe_h450_total_loss_goal_v6'
 MANDATORY_HORIZON_UPDATES = {'240': 100, '368': 100, '450': 100}
 CAP100_PROTOCOL = FLAT_CAP_PROTOCOL  # Existing preparation callers may keep this alias.
-FLAT_PROTOCOLS = (FLAT_CAP_PROTOCOL, SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOCOL)
+FLAT_PROTOCOLS = (FLAT_CAP_PROTOCOL, SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOCOL, H450_GOAL_PROTOCOL)
 
 
-def loss_gate_settings(gate):
+def loss_gate_settings(gate, horizon=None):
     policy = gate.get('advance_policy') or {}
+    if policy.get('kind') == H450_GOAL_PROTOCOL:
+        return (1.,10) if (gate.get('current_horizon') if horizon is None else horizon)==450 else (.5,5)
     if policy.get('kind') in (SHORT_CAP_PROTOCOL, TARGETED_HORIZON_PROTOCOL):
         return policy['threshold'], policy['required_consecutive_passes']
     return .25, 10
@@ -24,6 +27,10 @@ def loss_gate_settings(gate):
 def stage_budget(index, policy=None):
     if type(index) is not int or not 0 <= index <= 30:
         raise ValueError('MoE stage index must be zero-based0..30')
+    if policy is not None and policy.get('kind') == H450_GOAL_PROTOCOL:
+        if index==30:return None
+        from .rssm_moe_protocol import MOE_HORIZONS
+        return policy['mandatory_horizon_updates'].get(str(MOE_HORIZONS[index]),policy['budget_base'])
     if policy is not None and policy.get('kind') == TARGETED_HORIZON_PROTOCOL:
         from .rssm_moe_protocol import MOE_HORIZONS
         return policy['mandatory_horizon_updates'].get(str(MOE_HORIZONS[index]), policy['budget_base'])
@@ -35,7 +42,7 @@ def stage_budget(index, policy=None):
 def stage_requires_full_budget(index, policy=None):
     if type(index) is not int or not 0 <= index <= 30:
         raise ValueError('MoE stage index must be zero-based0..30')
-    if not policy or policy.get('kind') != TARGETED_HORIZON_PROTOCOL:
+    if not policy or policy.get('kind') not in (TARGETED_HORIZON_PROTOCOL,H450_GOAL_PROTOCOL):
         return False
     from .rssm_moe_protocol import MOE_HORIZONS
     return str(MOE_HORIZONS[index]) in policy['mandatory_horizon_updates']
@@ -58,6 +65,8 @@ def _targeted_settings_valid(value):
 def curriculum_completion(gate):
     """Flat policies terminate the final stage; legacy v2 remains continuous."""
     policy = gate.get('advance_policy')
+    if isinstance(policy,dict) and policy.get('kind')==H450_GOAL_PROTOCOL:
+        return 'completed_loss_gate' if gate.get('final_horizon_goal',{}).get('goal_met') is True else None
     if not isinstance(policy, dict) or policy.get('kind') not in FLAT_PROTOCOLS:
         return None
     if gate.get('goal_met') and not stage_requires_full_budget(gate['stage_index'], policy):
@@ -71,7 +80,7 @@ def update_completion(gate):
     policy = gate.get('advance_policy')
     if not isinstance(policy, dict) or policy.get('kind') not in FLAT_PROTOCOLS:
         return
-    if policy['kind'] == TARGETED_HORIZON_PROTOCOL:
+    if policy['kind'] in (TARGETED_HORIZON_PROTOCOL,H450_GOAL_PROTOCOL):
         mandatory = stage_requires_full_budget(gate['stage_index'], policy)
         gate.update(effective_stage_budget=stage_budget(gate['stage_index'], policy),
                     mandatory_stage_budget=mandatory, loss_streak_can_advance=not mandatory)
@@ -84,6 +93,10 @@ def update_completion(gate):
 
 def validate_completion(gate):
     policy = gate.get('advance_policy')
+    if isinstance(policy,dict) and policy.get('kind')==H450_GOAL_PROTOCOL:
+        from .rssm_moe_h450_policy import validate_h450_completion
+        validate_h450_completion(gate)
+        return
     if not isinstance(policy, dict) or policy.get('kind') not in FLAT_PROTOCOLS:
         return
     completion = curriculum_completion(gate)
@@ -106,6 +119,10 @@ def validate_completion(gate):
 def validate_policy(gate, step):
     policy = gate.get('advance_policy')
     if policy is None:return
+    if isinstance(policy,dict) and policy.get('kind')==H450_GOAL_PROTOCOL:
+        from .rssm_moe_h450_policy import validate_h450_policy
+        validate_h450_policy(gate,step)
+        return
     if (not isinstance(policy,dict) or policy.get('kind') not in (BUDGET_PROTOCOL, *FLAT_PROTOCOLS)
             or (policy.get('kind') == CAP100_PROTOCOL and
                 (type(policy.get('budget_base')) is not int or policy['budget_base'] not in (50, 100)
@@ -173,8 +190,8 @@ def validate_loss_advance(gate, entry):
     if policy.get('kind') in FLAT_PROTOCOLS and entry.get('advance_policy_sha256') != policy.get('sha256'):
         previous = policy['source_gate']
         return entry in previous.get('advance_history', []) and validate_loss_advance(previous, entry)
-    threshold, required = loss_gate_settings(gate)
-    if policy.get('kind') == TARGETED_HORIZON_PROTOCOL:
+    threshold, required = loss_gate_settings(gate,horizon=entry.get('from_horizon'))
+    if policy.get('kind') in (TARGETED_HORIZON_PROTOCOL,H450_GOAL_PROTOCOL):
         from .rssm_moe_protocol import MOE_HORIZONS
         if entry.get('from_horizon') in MOE_HORIZONS and stage_requires_full_budget(
                 MOE_HORIZONS.index(entry['from_horizon']), policy):
@@ -253,7 +270,16 @@ def targeted_horizon_plan(state, *, source_checkpoint):
     return plan
 
 
+def h450_loss_goal_plan(state, *, source_checkpoint):
+    from .rssm_moe_h450_policy import h450_loss_goal_plan as make_plan
+    return make_plan(state,source_checkpoint=source_checkpoint)
+
+
 def bind_budget_policy(state, plan, *, path, sha256, loaded_checkpoint_sha256):
+    if plan.get('kind')==H450_GOAL_PROTOCOL:
+        from .rssm_moe_h450_policy import bind_h450_policy
+        return bind_h450_policy(state,plan,path=path,sha256=sha256,
+                                loaded_checkpoint_sha256=loaded_checkpoint_sha256)
     from .rssm_moe_protocol import _validate_gate, MOE_HORIZONS
     raw=json.loads(Path(path).read_text(encoding='utf-8'))
     short = plan.get('kind') == SHORT_CAP_PROTOCOL and plan.get('version') == 4

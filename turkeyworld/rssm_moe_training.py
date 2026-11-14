@@ -20,6 +20,8 @@ from .rssm_coordinate_gradients import (COORDINATE_GRADIENT_PROTOCOL,
 from .rssm_drift_only_objective import _source_masks, _xy_errors
 from .rssm_objectives import _batch_data, _observed_count, _initialize, _valid_result
 from .rssm_moe_protocol import MOE_PROTOCOL, MOE_HORIZONS, SETTINGS
+from .rssm_player_geometry_objectives import(prepare_player_geometry,player_geometry_terms,add_player_geometry_metrics,
+    player_navigation_tbptt,capture_player_chunks)
 
 
 COMBAT_COMPONENTS = ('combat_events', 'combat_target', 'combat_attack',
@@ -176,7 +178,8 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
                           amp=None, progress_callback=None,
                           coordinate_gradient_protocol=COORDINATE_GRADIENT_PROTOCOL,
                           check_gradients=True, main_player_weight=1., main_router_weight=1., main_enemy_weight=1.,
-                          auxiliary_actor_limit=64, late_own_prefix_actors=8):
+                          auxiliary_actor_limit=64, late_own_prefix_actors=8,
+                          player_navigation_protocol=None,player_contact_callback=None):
     """Backpropagate three tasks plus router regularization; never step Adam.
 
     Router losses are per-step Bx3 means, divided by full H before adding TBPTT
@@ -186,8 +189,9 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
     for name,value in (('main_player_weight',main_player_weight),('main_router_weight',main_router_weight),('main_enemy_weight',main_enemy_weight)):
         if isinstance(value,bool)or not isinstance(value,(int,float))or not math.isfinite(value)or not 0<value<=1:
             raise ValueError('MoE '+name+' must be finite in(0,1]')
-    if type(chunk_size) is not int or chunk_size != 16:
-        raise ValueError('MoE training preserves16-step TBPTT')
+    tbptt=player_navigation_tbptt(player_navigation_protocol)
+    if type(chunk_size)is not int or chunk_size!=tbptt:
+        raise ValueError('MoE chunk size must match its explicit16/64/450-step TBPTT protocol')
     if (type(auxiliary_actor_limit) is not int or auxiliary_actor_limit not in (16,32,64)
             or type(late_own_prefix_actors) is not int or late_own_prefix_actors not in (2,4,8)):
         raise ValueError('MoE branch sizes require explicit legacy64/8 or micro16 revision bounds')
@@ -207,19 +211,24 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
     current = states[:, context - 1]
     previous_source = torch.cat((current[:, None], target[:, :-1]), 1)
     player_mask, enemy_mask = _source_masks(previous_source, target)
+    geometry=prepare_player_geometry(previous_source,target,grid,player_navigation_protocol=player_navigation_protocol)
+    geometry_metrics={};main_player_xy=main_player_wall=0.
     masks = {'player': player_mask, 'enemy': enemy_mask}
     denominator = {name: (2 * mask.sum()).clamp_min(1) for name, mask in masks.items()}
     totals = dict.fromkeys(('player', 'enemy', 'combat', 'router_role', 'router_balance'), 0.)
     late_start = horizon - min(horizon, 16)
     late_prefix = None
     shape = tuple(memory.shape)
-    for first in range(0, horizon, 16):
-        last = min(horizon, first + 16)
+    for first in range(0, horizon, tbptt):
+        last = min(horizon, first + tbptt)
         if first:
             current, memory = current.detach(), memory.detach()
-        predictions, role, balance = [], [], []
+        chunk_state,chunk_memory=current,memory
+        predictions,role,balance,captures=[],[],[],[]
         with autocast():
             for tick in range(first, last):
+                if player_contact_callback is not None and tick%16==0 and horizon-tick>=4:
+                    captures.append((tick,current,memory))
                 if tick == late_start:
                     count = min(len(states), late_own_prefix_actors)
                     late_prefix = (current[:count].detach(), memory[:count].detach(),
@@ -232,9 +241,16 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
                 result = integrate_coordinate_gradients(current, result, coordinate)
                 current, memory = result['state'], result['memory']
                 predictions.append(current)
-            errors = _xy_errors(torch.stack(predictions, 1), target[:, first:last])
+            predicted=torch.stack(predictions,1)
+            capture_player_chunks(player_contact_callback,captures,predicted,actions,grid,first=first)
+            errors = _xy_errors(predicted, target[:, first:last])
             parts = {name: (value * masks[name][:, first:last]).sum() / denominator[name]
                      for name, value in errors.items()}
+            main_player_xy+=float(parts['player'].detach())
+            if geometry is not None:
+                wall,wall_metrics=player_geometry_terms(predicted,chunk_state,geometry,first=first)
+                parts['player']=parts['player']+wall;main_player_wall+=float(wall.detach())
+                add_player_geometry_metrics(geometry_metrics,wall_metrics)
             parts['player'] = parts['player'] * main_player_weight
             parts['enemy'] = parts['enemy'] * main_enemy_weight
             parts['router_role'] = main_router_weight * (SETTINGS['router_role_weight'] * sum(role))
@@ -289,6 +305,10 @@ def moe_dynamics_backward(model, batch, auxiliary_batch, *, context=1, observed_
         moe_late_direct_per_step_counts=late['direct_per_tick_counts'],
         moe_auxiliary_spawn_anchor_counts=auxiliary['direct_spawn_anchor_counts'],
         moe_late_spawn_anchor_counts=late['direct_spawn_anchor_counts'])
+    if geometry is not None:
+        metrics.update(moe_main_player_xy_loss=main_player_weight*main_player_xy,
+            moe_main_player_wall_loss=main_player_weight*main_player_wall,
+            moe_player_geometry=geometry_metrics,player_geometry_active=True,moe_main_tbptt=tbptt)
     for name in COMBAT_COMPONENTS:
         metrics['moe_'+name+'_loss'] = auxiliary[name]+SETTINGS['late_own_prefix_weight']*late[name]
     metrics['loss_groups'] = summarize_moe_metrics([metrics])
@@ -332,15 +352,19 @@ def build_moe_combat_sampler(data, horizon, *, cache_path=None):
     return sampler
 
 
-def sample_moe_combat_batch(sampler, data, rng, *, horizon, batch_size=64):
+def sample_moe_combat_batch(sampler, data, rng, *, horizon, batch_size=64,
+                            allow_micro16_continuation=False):
     """Return (ordinary Source batch, native-JSON quota/row receipt)."""
     import copy
     import json
     if (data.split != 'train' or type(batch_size) is not int or batch_size not in (16,32,64)
             or type(horizon) is not int or horizon not in MOE_HORIZONS
-            or sampler.horizon != min(horizon, 16) or sampler.context != 1):
+            or sampler.horizon != min(horizon, 16) or sampler.context != 1
+            or type(allow_micro16_continuation)is not bool
+            or allow_micro16_continuation and batch_size!=16):
         raise ValueError('MoE event quotas must cover actual16/32/64x min(currentH,16) Source tape')
-    pairs = (sampler.sample(batch_size,rng,allow_micro32_continuation=True) if batch_size==32
+    pairs = (sampler.sample(batch_size,rng,allow_micro16_continuation=True)if allow_micro16_continuation else
+             sampler.sample(batch_size,rng,allow_micro32_continuation=True) if batch_size==32
              else sampler.sample(batch_size,rng))
     batch = data.batch(batch_size, context=1, horizon=sampler.horizon, indices=pairs)
     receipt = {**copy.deepcopy(sampler.last_sample),

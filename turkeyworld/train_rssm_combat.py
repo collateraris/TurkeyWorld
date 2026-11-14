@@ -97,7 +97,7 @@ class RSSMCombatTraining(RSSMTraining):
             names = [name for name, value in model.named_parameters() if value.requires_grad]
         payload = {key: metadata[key] for key in ('rssm_migration', 'source_teacher_checkpoint','dual_rssm_migration',
             'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration', 'rssm_five_migration',
-            'rssm_five_expanded_migration') if key in metadata}
+            'rssm_five_expanded_migration','rssm_spawn_conditioning_migration') if key in metadata}
         payload.update(stage='world', state_schema=dict(STATE_SCHEMA), config=asdict(model.config),
             model=model.state_dict(), optimizer=optimizer.state_dict(), optimizer_parameter_names=names,
             training_steps=self.state['global_training_step'], global_training_step=self.state['global_training_step'],
@@ -170,6 +170,13 @@ class RSSMCombatTraining(RSSMTraining):
         if expanded_spawn is not None:
             report['combat'].update(expanded_spawn=expanded_spawn, close_wall_melee=melee)
             self.recovery_revision['baseline_complete'] = True
+        player_revision=getattr(self,'player_navigation_revision',None)
+        if player_revision is not None:
+            from .rssm_player_navigation_validation import annotate_player_navigation_validation
+            annotate_player_navigation_validation(report,player_revision,directory)
+            if not player_revision['baseline_complete']:
+                from .rssm_player_navigation_revision import mark_player_navigation_baseline
+                mark_player_navigation_baseline(self.state,step=step)
         training = self.state['rssm_training']
         training['quality_streak'] = training['quality_streak']+1 if report['passed'] else 0
         training.update(last_validation_step=step, last_validation_passed=report['passed'],
@@ -178,6 +185,12 @@ class RSSMCombatTraining(RSSMTraining):
         atomic_json(self.root/'rssm_validation_latest.json', report)
         self.state.update(rssm_validation=report, validation_progress={'status': 'complete', 'step': step})
         self.publish()
+        if player_revision is not None:
+            from .rssm_player_navigation_validation import publish_best_player_navigation
+            self.save(model,self._drift_optimizer,self._drift_metadata)
+            self.state['best_player_navigation']=publish_best_player_navigation(self.checkpoint,self.root,
+                report=report,validation_report=directory/'rssm_combat_validation.json')
+            self.publish()
         if getattr(self, 'coordinate_curriculum', None) is not None:
             from .rssm_drift_selection import drift_candidate_improves, publish_best_drift
             selector_path = self.root/'best_drift.json'

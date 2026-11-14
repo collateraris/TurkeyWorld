@@ -116,6 +116,7 @@ class WorldModelConfig:
     rssm_fusion_moe_role_bias: float = 2.
     rssm_five_role_enabled: bool = False
     rssm_five_expanded_enabled: bool = False
+    rssm_spawn_conditioning_enabled: bool = False
     combat_rssm_enabled: bool = False
     combat_rssm_deter_dim: int = 1344
     combat_rssm_hidden_dim: int = 1392
@@ -127,6 +128,10 @@ class WorldModelConfig:
     combat_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if (type(self.rssm_spawn_conditioning_enabled) is not bool or self.rssm_spawn_conditioning_enabled and
+                (self.architecture!='dreamer_rssm' or not self.endless or not self.spatial_entities
+                 or not self.spatial_combat or not self.game_training_v5 or not self.enemy_rssm_enabled)):
+            raise ValueError('Spawn conditioning requires the explicit endless spatial one-enemy RSSM profile')
         if (type(self.rssm_five_expanded_enabled)is not bool or self.rssm_five_expanded_enabled and
                 (not self.rssm_five_role_enabled or self.rssm_fusion_moe_width!=256
                  or self.rssm_fusion_moe_heads!=4 or self.rssm_fusion_moe_expert_hidden!=512)):
@@ -789,6 +794,8 @@ def parameter_counts(model: NeuralWorldModel, upscaler: SingleFrameUpscaler | No
                 parts['combat_rssm'] = sum(p.numel() for p in backend.combat_rssm.parameters())
             if getattr(backend, 'five_role_fusion', None) is not None:
                 parts['rssm_five_role_fusion'] = sum(p.numel() for p in backend.five_role_fusion.parameters())
+            if getattr(backend,'spawn_conditioning',None)is not None:
+                parts['rssm_spawn_conditioning']=sum(p.numel()for p in backend.spawn_conditioning.parameters())
         elif model.config.architecture == 'vjepa2_ac':
             parts['latent_encoder'] = sum(p.numel() for p in backend.core.encoder.parameters())
             parts['action_conditioned_predictor'] = sum(p.numel() for p in backend.core.predictor.parameters())
@@ -852,6 +859,7 @@ def load_world_checkpoint(path, device="cpu"):
     model.combat_rssm_migration = checkpoint.get('combat_rssm_migration')
     model.rssm_five_migration = checkpoint.get('rssm_five_migration')
     model.rssm_five_expanded_migration = checkpoint.get('rssm_five_expanded_migration')
+    model.rssm_spawn_conditioning_migration = checkpoint.get('rssm_spawn_conditioning_migration')
     if model.config.rssm_fusion_moe_enabled:
         from .renderer_student import validate_fusion_renderer_lineage
         validate_fusion_renderer_lineage(model, checkpoint['config'])
@@ -861,6 +869,9 @@ def load_world_checkpoint(path, device="cpu"):
     if model.config.rssm_five_role_enabled:
         from .renderer_student import validate_five_role_renderer_lineage
         validate_five_role_renderer_lineage(model, checkpoint['config'])
+    if model.config.rssm_spawn_conditioning_enabled:
+        from .renderer_student import validate_spawn_conditioning_renderer_lineage
+        validate_spawn_conditioning_renderer_lineage(model,checkpoint['config'])
     return model.eval(), checkpoint
 
 

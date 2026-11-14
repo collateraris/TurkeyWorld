@@ -3401,6 +3401,453 @@ expanded RF3 local100/накопленно29709 и SR108105: четыре соб
 [живой UI](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/live_first_ui_verification.json),
 [последующие градиенты](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/expanded_expert_revisions/g6022_874260e9df60/private_transformer_gradients.json).
 
+## H94. Независимая валидация expanded RF3 на local854
+
+14 ноября независимо проверен immutable snapshot854/RF30463/Base29209 на
+прежних fixed Source-панелях: main256, geometry128, native-area guard256 и
+distance192. Это native32 GT-pose запросы с frozen5906 causal past-prior/static-zero
+features, а не текущая автономная динамика, SR или450-шаговая игра. Проверка
+целостности пройдена:0 SGD, нет пересечения с TRAIN-сценами, model/input files,
+samplers и global RNG не изменились.
+
+На main256 initial RF3→854 улучшил SSIM0,729578→0,741267,
+MAE0,037757→0,036027 и NPC foreground MAE0,104547→0,092844 (142 видимых).
+Исходный RF1 reference —0,735882/0,036579/0,094481; это отдельный solver.
+Absolute image quality и relative selection всё ещё не пройдены. Шесть из60
+geometry checks ухудшились относительно initial RF3: near<2 corner,
+8–12 cross-boundary contrast и12+ wall/face/height/contrast. Улучшение общих
+метрик не отменяет эти ошибки. Optional18-frame HP0 supplement пропущен:
+индексы отдельного dataset не прошли строгую проверку fingerprint.
+Model/game assets не переносились. Доказательства:
+[summary](training_runs/renderer_rf_expanded_20261113/diagnostics/validation_20261113T214803Z/summary.json),
+[сложные стены](training_runs/renderer_rf_expanded_20261113/diagnostics/validation_20261113T214803Z/worst_wall_boundary_cases.png).
+
+## H95. Дообучение только декодера на парах RF и Source кодов
+
+Пользователь разрешил обучать только decoder/post_quant_conv:528 403 параметра,
+62 тензора и fresh Adam. Frozen RF3 остановлен на1108/накопленно30717; Base29209,
+original world5906, encoder/quantizer/codebook, normalization и noise прежние.
+Каждые8 Source queries дают8 RFQ и8 SourceQ (16 decoder examples, loss50/50).
+Старый декодер — отдельный frozen reference. Новый format3 вкладывает строгий
+RF3 parent и заменяет только полный D/postquant; часы RF не увеличиваются,
+decoder updates отдельные. GPU export/reload прошёл25/25 без SGD после трёх
+отброшенных warm updates:62 D тензора и обе RGB-ветки изменились, RF z/EQ codes
+и всё вне D сохранено; fresh format3 загрузился точно. Новому D не приписывается
+прежняя codec qualification.
+
+Worker49828 обучает `decoder_rf_adaptation_20261114` на8782: бюджет2000,
+preview10/VAL100. Initial четыре ветви и geometry128 оцениваются отдельно.
+На fixed256 VAL100 RF old→new SSIM0,741410→0,741162, MAE0,036166→0,036655,
+foreground0,095424→0,097506; Source old→new SSIM0,888866→0,887124,
+MAE0,021369→0,021874, foreground0,079946→0,081209. Source-preservation не прошла
+geometry, RF-improvement — foreground/geometry; quality остаётся false.
+Обучение продолжается, динамика и image pins игры/превью не менялись.
+Эта native32 GT-pose оценка не измеряет SR или автономный gameplay. Доказательства:
+[GPU proof](training_runs/decoder_rf_adaptation_20261114/gpu_bundle_verification.json),
+[VAL100](training_runs/decoder_rf_adaptation_20261114/validation/step_000100.json).
+
+## H96. Conditional restorer поверх замороженных RF3 и декодера
+
+Пользователь разрешил отдельный learned restorer с дополнительными текущими
+state/map hints. В нём247 539 параметров/65 тензоров, два attention-блока width64,
+4 heads и FF128. Входы — RF3 quantized16×8×8 codes, decoded RGB32, текущий
+state20 и известные raw16×16 material IDs. Runtime не получает Source image,
+mask, raycast или engine oracle. Нулевая последняя conv сохраняет initial RGB.
+Обучается только restorer; RF30717/local1108, Base29209, world5906, E/Q/codebook,
+decoder/postquant1725 и все parent assets заморожены.8 aligned Source queries
+дают8 RF-code+8 Source-code examples с50/50 loss и fresh Adam на65 тензорах.
+
+Строгий format4 вкладывает прежний format3 decoder parent, закрепляя полный
+config/state/hash нового модуля и отдельный restorer counter. Runtime sample-hook
+работает после RF3→denormalization→Q→decode с тем же текущим state/raw map;
+обычный Source-code codec.decode автоматически restorer не вызывает.
+Пройдены четыре новых integration tests и26 прямых legacy regressions.
+GPU warmup сделал три отброшенных SGD updates;13 проверок подтвердили frozen
+parents, strict reload, sample-hook parity и state/map sensitivity. Warm Adam
+не перенесён. Новые веса явно unqualified, автоматического promotion нет.
+
+Worker51048 и страница8784 запустили `conditional_restorer_20261114`: бюджет2000,
+preview10/VAL100. Живой UI прошёл28/28 на150/VAL100/preview150.
+Fixed256 RF old→new MAE0,036398→0,036157, NPC0,092377→0,092163 и boundary
+0,096184→0,095980 изменились слабо; SSIM0,743660→0,743649 почти прежний.
+Source preservation пройдена, но улучшение NPC меньше0,0005; RF improvement и
+absolute quality остаются false. Восстановление объектов пока не доказано.
+Scope — native32 GT-pose рендер, не SR/автономная игра. Публичный запуск —
+`python -m turkeyworld.train_conditional_restorer`; для resume нужен полный
+training checkpoint, а не только игровой format4 export.
+[GPU proof](training_runs/conditional_restorer_20261114/gpu_bundle_verification.json),
+[VAL100](training_runs/conditional_restorer_20261114/validation/step_000100.json).
+
+## H97. Conditional restorer около 2 млн параметров и цель SSIM
+
+Пользователь запросил около двух миллионов параметров restorer и обучение до
+строгого held-out SSIM > 0,85 для RF-кодов с restorer. Обученный модуль из
+247 539 параметров / 65 тензоров остановлен на шаге 1389. Расширение сохраняет
+всю эту ветку под `legacy.*`, её объекты параметров и все 65 моментов, настроек
+и возрастов Adam. Отдельная ветка `expansion.*` использует width 224, heads 8,
+FF288 и два attention-блока. Её 1 750 259 реальных нейросетевых параметров дают
+всего **1 997 798 обучаемых параметров / 130 тензоров**. Для 65 новых тензоров
+создаются свежие состояния optimizer; фиктивных параметров ради размера нет.
+
+Новая ветка исправляет обученный legacy RGB по тем же квантованным кодам,
+текущему state и raw map материалов. Нулевой RGB-выход точно сохраняет функцию
+обученного родителя при подключении; затем обучаются обе ветки restorer. RF3 на
+накопленном шаге 30717 / локальном 1108, Base 29209, world 5906, весь кодек и
+decoder/post-quant шага 1725 заморожены. Runtime не получает Source RGB, целевую
+маску, raycast или oracle окклюзии. Строгий format4 использует явный dispatch
+расширенной архитектуры, полного config/state/hash; прежние конфигурации 247k
+и обученные экспорты продолжают загружаться без изменения.
+
+Пройдены шесть новых архитектурных тестов и общий набор из 35 conditional tests:
+побитное сохранение обученного RGB, FP16/modes/RNG, прежнего Adam, градиенты всех
+65 добавленных тензоров после открытия нулевого выхода, строгая загрузка обеих
+версий и отклонение подмены. Три отброшенных GPU-обновления занимали в среднем
+0,8124 секунды при peak 0,457 GiB. Реальные GPU-проверки reload и миграции
+пройдены **14/14**. В пробе возраста старых/новых Adam стали 1392/3; production
+стартует с исходных моментов шага 1389 и свежих новых состояний, а не с Adam пробы.
+
+Production worker **49844** запустил
+`training_runs/conditional_restorer_2m_20261114`; прежняя страница
+**http://127.0.0.1:8784/** теперь показывает эту фазу. Работа подтверждена на
+локальном шаге 15 / накопленном restorer 1404. Начальная полная validation на
+тех же 256 закреплённых held-out Source queries дала RF-Q/restorer SSIM
+**0,7440760333**; цель пока не достигнута. Фиксированного бюджета обновлений нет:
+остановка только при `models.rf_new.summary.ssim_mean > 0.85` на этой полной
+панели. Равенство, preview, Source-Q reconstruction, train loss и счётчик updates
+не заменяют запрошенную метрику. Best training checkpoints и inference exports
+сохраняют максимальный проверенный RF-image SSIM. Прочие Source/NPC/geometry
+guards остаются видимыми; достижение этой цели изображения не подтвердит качество
+автономной игры.
+
+В update используются 8 согласованных Source queries: 8 RF-code и 8 Source-code
+результатов с равными весами loss. Preview остаётся каждые 10 обновлений, полная
+validation — каждые 100. Публичный запуск —
+`python -m turkeyworld.train_conditional_restorer_2m`, без `--steps`; для resume
+нужны полный restorer checkpoint и неизменяемые inputs. Динамика обучается
+отдельно; assets рендера игры и динамики не подменялись.
+
+[Receipt входных снимков](training_runs/conditional_restorer_2m_20261114/inputs/snapshot_receipt.json),
+[отброшенная GPU-проба](training_runs/conditional_restorer_2m_20261114/gpu_preflight/gpu_warmstart.json),
+[строгий GPU proof](training_runs/conditional_restorer_2m_20261114/gpu_bundle_verification.json),
+[начальная полная validation](training_runs/conditional_restorer_2m_20261114/validation_initial.json).
+
+## H98. H450 до десяти TOTAL loss меньше единицы без лимита
+
+Пользователь изменил только правило завершения финального этапа динамики.
+Новый immutable план `rssm_moe_h450_total_loss_goal_v6` сохраняет лестницу из
+31 этапа, 100 обязательных обновлений на H240/H368 и правило прочих нефинальных
+этапов: 20 обновлений либо пять строгих TOTAL loss < 0,5 подряд. У H450 теперь
+**нет лимита updates**: он завершается только после **10 последовательных
+committed обновлений optimizer с сырым TOTAL train loss < 1**. Значение 1 или
+больше сбрасывает серию. Прежняя остановка H450 после 100 обновлений отключена;
+EMA, preview и validation-метрики не подставляются вместо полного loss
+завершённого training update.
+
+Активация в том же запуске на **6132 / H304 / 1 обновлении этапа** изменила
+только `--stage-budget-plan` на `stage_budget_h450_loss_goal_plan.json`.
+Веса модели, именованный Adam, все RNG, три sampler streams, expanded-five
+архитектура, batch 32×1, прежние счётчики/серия/история и все старые policy-файлы
+сохранены. Оба image asset остались закреплены. Пройдены десять policy-тестов,
+включая H450 после 100 updates, строгий reset/10 проходов, resume внутри финальной
+серии и переключение порога H448→H450. Начальный same-step proof прошёл
+**18 проверок**, без optimizer update между снимками; живой UI прошёл 18 проверок.
+Worker **43976** продолжил ту же фазу и проверен работающим на шаге 6136.
+Это цель train loss, а не подтверждение качества игры.
+
+[Immutable активация и same-step proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/budget_final_loss_revisions/g6132_f68598358e2d/initial_verification.json),
+[v6 budget plan](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/stage_budget_h450_loss_goal_plan.json).
+
+## H99. Restorer на семь миллионов параметров с сохранением обучения 2M
+
+Затем пользователь запросил семь миллионов параметров restorer с прежней
+строгой целью RF-image SSIM > 0,85. Фаза 2M остановлена на **локальном шаге 800 /
+накопленном restorer 2189**. Её полный модуль из 1 997 798 параметров / 130
+тензоров сохранён под `previous.*` вместе с обеими группами Adam, разными
+возрастами, настройками и всеми прежними моментами. Независимая ветка
+`expansion.*` использует width 384, heads 8, FF720 и два attention-блока. Её
+5 002 515 параметров и 65 свежих записей optimizer дают **7 000 313 обучаемых
+параметров / 195 тензоров**. Фиктивной ёмкости ради размера нет. Нулевой RGB
+readout точно сохраняет функцию обученного 2M при подключении; затем обучаются
+все ветки restorer.
+
+Входы прежние: квантованные коды, decoded/restored RGB32, текущий state20 и
+известная raw map 16×16 материалов. Source image, целевая маска, raycast или
+oracle видимости в runtime не поступают. RF3 на накопленном шаге 30717 /
+локальном 1108, Base 29209, world 5906, E/Q/codebook и весь decoder/post-quant
+шага 1725 заморожены. Пройдены шесть новых core-тестов и восемь строгих bundle
+тестов: точный trained-parent RGB, FP16/modes/RNG, все 130 прежних Adam-состояний,
+градиенты каждого добавленного тензора после открытия нулевого выхода,
+загрузка old/2M/7M и отклонение подмены. UI прошёл **202/202** тестов. Реальный
+строгий GPU proof прошёл **14/14**; три отброшенных warmup updates занимали в
+среднем 0,87344 секунды при peak 0,659 GiB (0,718 GiB в отдельной строгой GPU
+проверке). Веса и Adam пробы не переносились в production.
+
+Worker **21756** запустил `training_runs/conditional_restorer_7m_20261114`;
+прежняя страница **http://127.0.0.1:8784/** теперь показывает эту фазу. Работа
+подтверждена на **локальном шаге 17 / накопленном restorer 2206**. Начальная
+полная validation сохранила функцию зафиксированного 2M и дала RF-Q/restorer
+SSIM **0,7442107737** на тех же 256 held-out Source queries. Живой HTTP/served-JS/PNG
+proof прошёл **34/34** на локальном шаге 56 / validation 0 / preview 50. Цель пока
+не достигнута. Жёсткого бюджета обновлений нет: обучение продолжается до
+`models.rf_new.summary.ssim_mean > 0.85`. Равенство, Source-Q scores, MAE, train
+loss и preview не заменяют эту метрику. Best checkpoints отслеживают максимум
+проверенного RF-image SSIM. Preview остаётся каждые 10 обновлений, полная
+validation — каждые 100; в update восемь согласованных RF-code и восемь
+Source-code примеров с равными весами. Прочие image/geometry guards видимы;
+достижение цели не подтвердит качество автономной игры.
+
+Публичный запуск — `python -m turkeyworld.train_conditional_restorer_7m`, без
+`--steps`. Для resume нужны полный `restorer_last.pt`, все immutable inputs и
+предыдущий полный training snapshot 2M. Динамика отдельно продолжает H98.
+Assets рендера/SR игры и динамики автоматически не менялись.
+
+[Receipt входов и родителя](training_runs/conditional_restorer_7m_20261114/inputs/snapshot_receipt.json),
+[отброшенная GPU-проба](training_runs/conditional_restorer_7m_20261114/gpu_preflight/gpu_warmstart.json),
+[строгий GPU proof](training_runs/conditional_restorer_7m_20261114/gpu_bundle_verification.json),
+[начальная полная validation](training_runs/conditional_restorer_7m_20261114/validation_initial.json),
+[проверка живой страницы](training_runs/conditional_restorer_7m_20261114/diagnostics/live_ui/verification.json).
+
+## H100. Base-first геометрия и пять экспертов с полными запросами
+
+Пользователь поставил геометрию Base, углы, окклюзию и соответствие карте перед
+дальнейшим обучением RF, затем запросил около 300 тысяч параметров на каждого
+эксперта Base. Подготовлена фаза `training_runs/base_geometry_20261114`, протокол
+`base_expanded_geometry_v1`. Пять экспертов сохраняют обученный 8D Transformer
+и получают независимый Transformer width192 / heads6 / FF314 с полным запросом
+144D. Нулевой выход192→8 сохраняет исходную обученную функцию. У каждого
+эксперта **300 058 параметров**; Base увеличен **1 001 157→2 498 447**, добавлено
+**1 497 290 параметров / 80 тензоров**, без фиктивной ёмкости ради размера.
+
+Прежние тензоры Base и 537 Adam states/шесть групп сохранены; только 80 новых
+тензоров начинают без moments в седьмой группе. Обучается только Base. RF30717,
+world5906, private opacity и весь codec/D1725/E/Q/codebook заморожены;
+восстановителя нет, training/validation не вызывают RF. Сохранены три Source
+sampler-потока и RNG. MAIN16, far4×0,25 и geometry8×1 используют прежние Source
+корпуса, held-out256 и geometry128. Начальный pilot — 2000 обновлений,
+preview10 и VAL100. Best выбирается по raw Base SSIM, не по codec reconstruction
+или RF-изображению. Resume проверяет сохранённые отчёты и отклоняет NaN, будущий
+или чужой best; при равенстве остаётся ранний шаг. Бюджет не означает quality-pass.
+
+Прошли семь новых архитектурных и 36 тестов совместимости, а также 12 driver/
+best-resume тестов. Три отброшенных GPU warmup updates прошли: в среднем
+**1,50772 с/update**, peak **1,15978 GiB**. Production worker47280 работает,
+**http://127.0.0.1:8784/** показывает его здоровый baseline. Строгая GPU-загрузка
+format6 точно сохранила warm raw/quantized decoded RGB. У независимых начальных
+CUDA forward измерен численный разброс RGB около1e-6, способный менять hard codes.
+Аудит production0/1/2/3/20 прошёл32 проверки старых весов/moments/RNG и sampler clocks.
+Начальный raw Base SSIM0,72477; запуск не означает улучшения качества.
+Restorer 7M остановлен на local17277 без достижения
+цели 0,85. RF-only production не запускался и ждёт проверки Base. Динамика
+продолжает финальную loss-политику H98 с прежними renderer/SR assets.
+Автоматического подключения новых весов к игре нет.
+
+Закреплённая **VAL300** на тех же256 Source queries дала raw Base SSIM
+**0,724771957→0,728862517**, выбран best300. Reconstruction Base через frozen
+E/Q/D вырос **0,711908530→0,719739665**. Raw wall-boundary L1 остался почти
+прежним и чуть ухудшился: **0,095222458→0,095269307** на218 кадрах с поддержкой;
+raw RGB MAE вырос0,037659558→0,038095469. Умеренный прирост SSIM не подтверждает
+исправление границ или качество; новые image assets не подключались.
+[Фактический отчёт](training_runs/base_geometry_20261114/validation/step_000300.json),
+SHA `dd785ae8e656fcafe167f49e4fafc006f97b4a160e28cd1a1f1c82906b8f891d`.
+
+[Закреплённые inputs](training_runs/base_geometry_20261114/inputs/snapshot_receipt.json),
+[отброшенная GPU-проба](training_runs/base_geometry_20261114/gpu_preflight/gpu_warmstart.json),
+[GPU reload](training_runs/base_geometry_20261114/gpu_bundle_verification.json),
+[production audit](training_runs/base_geometry_20261114/diagnostics/independent_audit/verification.json),
+[live dashboard](training_runs/base_geometry_20261114/diagnostics/live_ui/verification.json).
+
+## H101. Обучаемые часы и кандидаты позиции спавна
+
+После аудита входов spawn-головы пользователь запросил предложенное улучшение.
+Активирована opt-in ветка `rssm_spawn_conditioning_enabled`: **118 736 параметров
+в 12 тензорах**, namespace `vjepa_backend.spawn_conditioning.*`. Она добавляется
+после прежних модулей динамики. Новая recurrent memory не создаётся, прежние
+объекты параметров не заменяются. В старых config/checkpoints flag по умолчанию false.
+
+Собственное время переводится к следующему tick только для признаков:
+округление к30Гц, one-hot восьми фаз по90 ticks и доля внутри фазы. У каждого из
+восьми anchor-кандидатов есть ID embedding, абсолютные XY, относительные к игроку
+XY/расстояние и известная допустимость по полу/разделению участников. Девятый
+класс получает центр и долю допустимых не-anchor клеток. Это описание fallback-пула,
+не выбранная позиция: конкретную клетку по-прежнему выбирают learned256 tile head
+и прежний decoder. Общая MLP выдаёт девять additive logits с нулевым последним
+весом. Общий scalar bias не добавлен: он сократился бы в девятисторонних CE и argmax.
+
+Адаптер включается до прежней anchor/fallback иерархии; поправки MoE и CombatRSSM
+сохраняют прежний путь. Новая ветка обучается существующим Source-labelled
+AUX/late spawn CE. Формула loss, три RSSM/память5232, batch32×1, sampler-потоки,
+бюджеты и финальная H450 loss-цель не меняются. Source rank, будущий RGB,
+подстановка teacher-координат или принудительная позиция не добавлены.
+Worker **45344** продолжил тот же run на **6412 / H450**, добавлен только
+`--spawn-conditioning-plan` (`spawn_conditioning_plan.json`, SHA
+`4d04c39a47c82a874fb891e4faf4bc4c0f9b6a488b0aeea45b44251c4807f5dd`). Страница
+остаётся **http://127.0.0.1:8765/**. Сохранены все1587 прежних model tensors,
+430 Adam states/шесть групп, RNG/три sampler-потока и полный H450 gate/history.
+Только12 новых тензоров образуют свежую седьмую группу; память остаётся5232.
+
+Прошли шесть focused CPU-тестов: все восемь границ фаз±один tick и24-секундный
+цикл, parity масок с прежней иерархией, нулевой readout на первом шаге и глубокие
+градиенты на втором, отсутствие Source/rank вызовов, точность прежних state/
+memory/spawn outputs и stochastic RNG при zero activation, строгая migration
+metadata/загрузка и отклонение подмены. Прежние восемь fusion regressions также
+прошли. Это проверка безопасного начального поведения, не доказанное улучшение
+точности спавна. Реальный GPU proof прошёл **16/16**, независимая CPU-миграция —
+**28/28**, format6/H450 regressions после нового flag — **10/10**, начальная
+same-step resume проверка — **26/26**. Held-out spawn report на128 случаях
+идентичен при нулевом адаптере, что не доказывает обученное улучшение. Первый
+сохранённый update **6413** прошёл **27/27** проверок: все12 новых Adam states
+достигли возраста1, всего состояний442, frozen assets остались точными.
+Новая spawn-ветка получила градиент **0,029850155**, supervision содержала девять
+настоящих Source respawn events. Прежний policy update counter естественно
+увеличился280→281; при TOTAL **3,4124397** H450 strict-loss streak остался0.
+Полная validation остаётся каждые250 updates, следующая —6500. Это подтверждение
+выполнения обучения, не прирост точности спавна. Base-first обучение H100
+продолжается отдельно; image assets автоматически не меняются.
+
+[Активация](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/start.json),
+[GPU proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/gpu_verification.json),
+[независимая миграция](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/independent_migration_verification.json),
+[начальный resume](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/initial_verification.json),
+[первое сохранённое обновление](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/first_update_verification.json).
+
+## H102. Последовательное обучение Base, RF3, декодера и SR
+
+Пользователь запросил **Base → RF3 → VQGAN D/post-quant → SR, по3000 обновлений**.
+Base продолжен с661 до общего лимита3000 без изменения исходной фазы, весов,
+Adam, RNG, sampler-потоков и best-history; ревизия на том же шаге прошла22 проверки.
+Каждый следующий этап получает3000 новых updates и полный best checkpoint
+с соответствующим экспортом. Base замораживает RF/D, RF — Base/D, D обучает
+только decoder/post-quant на50/50 RF-Q/Source-Q; SR обновляет парный cache по
+выбранному финальному рендереру. World5906, E/Q/codebook и private geometry
+заморожены. Восстановителя и автоматического подключения весов к игре/preview нет.
+
+[Supervisor](turkeyworld/ordered_image_pipeline.py) запущен как **PID50340** в
+`training_runs/image_chain_20261114` и принял Base45576 на1402/3000 без сброса.
+Изолированные GPU-проверки прошли **RF27, decoder37 и SR19+23**; все девять
+тестовых updates отброшены. Перед production каждый будущий этап повторяет
+проверку трёх обновлений на фактически выбранном родителе. RF smoke сохранил
+617 Adam states в семи группах и замороженные Base/D сохранены. Строгий format7
+точно воспроизводит RGB и terminal-Q. Исправление загрузчика сохраняет прежнюю
+неединичную нормализацию латентов и не меняет обученные веса. Workers скрыты;
+system-only keep-awake не требует видимого окна при блокировке экрана.
+Прогресс — **http://127.0.0.1:8784/**. Завершение бюджета не означает quality-pass.
+SHA256 плана этапов: `481e93dec913e6181658b93486debb431a63c6cda021e06288236fe41f500a92`.
+
+[План бюджета](training_runs/base_geometry_20261114/budget_3000_plan.json),
+[проверка resume661](training_runs/base_geometry_20261114/budget_revisions/g661_7cc00df3ca4f/initial_verification.json),
+[план запуска](training_runs/image_chain_20261114/launch_plan.json),
+[план этапов](training_runs/image_chain_20261114/ordered_plan.json),
+[RF smoke proof](training_runs/image_chain_20261114/smoke/rf3/verification.json),
+[decoder proof](training_runs/image_chain_20261114/smoke/decoder/verification.json),
+[SR warmup](training_runs/image_chain_20261114/smoke/sr/gpu_warmstart.json),
+[строгая загрузка SR](training_runs/image_chain_20261114/smoke/sr/verification.json).
+
+Живая проверка страницы8784 прошла22/22: Base1441/3000, preview1440,
+VAL1400 и три последующих этапа0/3000 согласованы. Power guard активен:
+system_required=true, display_required=false. Динамика продолжает6441/H450,
+batch32×1; её NPR/SR не менялись.
+[Проверка страницы](training_runs/image_chain_20261114/diagnostics/live_ui/verification.json).
+
+## H103. Контакты игрока и градиент через полный прогон
+
+Пользователь запросил исправление большого дрейфа игрока за15 секунд, сначала
+увеличив TBPTT16→64, затем условно выбрав **полный TBPTT450 и MAIN16×1=16**,
+если хватит GPU. Запуск64/B32 был отброшенной пробой вместимости, а не
+production-обучением. Последние запрошенные доли MAIN: **8 спокойного движения
+NPC,4 навигации без врага,4 боя**, то есть50%/25%/25%. Продолжение подготовлено
+с полной границы **6518 / H450**. GPU-проверка точных новых квот прошла;
+после проверки сохранности production активирован.
+Новый неизменяемый batch plan v3 сохраняет полный старый32×1 segment и его
+source gate. Новые updates учитывают16, AUX16/late-prefix2 считаются отдельно.
+Player XY использует три потока с весами4/16 combat,8/16 quiet и4/16 navigation;
+NPC —4/12 и8/12. Три RSSM, линия спавна, старые веса/Adam и image assets
+сохраняются. Основная траектория по-прежнему содержит450 переходов без исправления
+наблюдениями; граф450 передаёт ошибку через все15 секунд без промежуточного
+отсоединения памяти. Contact-снимки сохраняются каждые16 тиков независимо от
+усечения градиента.
+
+Используются имеющиеся **6912 коротких TRAIN-клипов**:2048 угловых и4864 replay.
+Новый отдельный PCG выбирает ещё четыре actors на update с балансом свободных
+и заблокированных осей. Горизонты восстановления идут циклом **4/8/16/32** из
+настоящих собственных состояния и RSSM-памяти модели в combat/navigation/quiet
+потоках. Source даёт контрфактические метки движения только при обучении;
+будущие состояния/RGB не исправляют rollout. Штраф стен для круга радиуса.20
+равен .25 от нормированного на радиус среднего проникновения конечной точки
+и пути X→Y, по половине каждого. Это обучающие ошибки, без runtime-проекций
+и исправления столкновений движком. Явно изменённые доли MAIN не включают
+contact actors: они учитываются отдельно как auxiliary-работа. Новый явный
+адаптер AUX16 сохраняет прежнюю32-sampling policy и её исторические счётчики,
+продолжая реальные event/anchor counts в отдельном16-continuation ledger.
+
+Новые `micro16_single_batch_revision_plan.json` и
+`player_navigation_tbptt450_batch16_plan.json` закрепляют SHA исходного checkpoint,
+прежнюю/новую линию gate/batch и состав contact-данных. Прежний план64/B32
+неизменяем и не переиспользуется для450/B16. Требуется сохранить все веса,
+442 Adam states в семи группах, общий RNG и прежние private sampler states.
+Цель H450 прежняя: **сырой TOTAL строго<1 десять updates подряд**, без лимита
+обновлений и EMA-нормировки. Активация допускается на существующей границе
+со streak0. Из-за добавленных quiet-player/contact/wall terms новая формула
+TOTAL имеет явный revision tag и **не сравнима напрямую с прежними TOTAL**;
+исходные метрики архивируются без переинтерпретации истории.
+
+Перед новым SGD обязательна свежая настоящая автономная450-проверка. Валидация
+остаётся каждые250 updates: дрейф игрока на1/4/8/16/32/64/128/256/450,
+пересечения стен кругом/путём и ошибки свободных/заблокированных осей коротких
+веток. Отдельный physical selector сохраняет полные model+Adam checkpoints
+по фиксированной held-out панели дрейфа и столкновений, а не по train loss,
+без автоматического подключения к игре. Прежние protocol/merge и replay/batch
+проверки прошли; добавлены тесты450/B16 lineage, исторических sampler quanta
+и проверки границы без записи. Улучшение дрейфа пока не заявляется.
+
+Настоящие проверки вместимости на RTX4090 выполнили backward, конечные
+градиенты, clipping и Adam; их тестовые веса отброшены:
+
+| Длина градиента / MAIN batch | Пик allocated, GiB | Один optimizer update, секунды |
+|---|---:|---:|
+| TBPTT64 / B32 | 4,25884 | 133,7512 |
+| TBPTT250 / B32 | 11,13769 | 133,7980 |
+| **TBPTT450 / B16,4 combat/8 quiet/4 NAV** | **9,00306** | **197,0446** |
+
+Выбранная проверка450/B16 прошла **11/11**, включая настоящий backward через450
+переходов каждого из трёх длинных потоков и contact backward. Градиенты получили434
+тензора параметров,8 остались нетронутыми. Пик reserved —9,25391GiB; полное время
+пробы с подготовкой —257,2538 секунды. Исходный6518 с SHA256
+`69b1793d58837499c0910476df6d3c5707f840ecf7053bcbd66cdad8b9eedfbe`
+не изменился; тестовые веса не подключались. У250/B32 и450/B16 различаются batch,
+доли actors и размеры auxiliary, поэтому это не чистое сравнение скорости.
+Успех проверки подтверждает выполнимость обновления, а не улучшение дрейфа.
+
+Production **PID52644** запущен с6518 **14.11.2026 в11:34:14UTC /
+14:34:14МСК**. Начальная проверка сохранности прошла **28/28**: все
+**1599 тензоров модели,442 Adam states/семь групп**, прежние RNG/private samplers
+и старый gate внутри явной batch-линии v3. SHA256 начального child checkpoint:
+`8b73e59cb68b98d0f19cf3c44b54325d31869db54bbed1e45c51e1afca2c6177`;
+SHA256 плана полного градиента:
+`42fc3871139ae40138ae542aa59a2ba62b3a579a513932e7238452c655f87d03`.
+Свежая450 baseline завершена до первого нового SGD:48 траекторий/21600 переходов,
+конечный дрейф игрока mean1,81483/p958,12678 клетки,4920 шагов пересечения стен.
+Это исходное качество6518, до нового обучения. Рабочее обновление **6519**
+сохранено: три потока действительно TBPTT450, MAIN4combat/8quiet/4NAV,
+TOTAL4,478004,107,69 секунды. Проверка первого обновления прошла полностью:
+434 Adam states обновились на один шаг,8 остались нетронутыми,1156 frozen tensors
+побитно сохранены; NAV/quiet/contact получили ровно4/8/4 новых draws.
+Снижение дрейфа после нового обучения ещё не измерено.
+
+[Свежая baseline6518](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/validation/step_006518/player_navigation_validation.json),
+[проверка рабочего6519](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/tbptt450_batch16/first_update_verification.json).
+
+[Production-запуск](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/tbptt450_batch16/start.json),
+[начальная проверка28/28](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/tbptt450_batch16/initial_verification.json),
+[Отброшенная проба64/B32](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/gpu_probe.json),
+[вместимость250/B32](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/capacity_250_b32.json),
+[вместимость450/B16 с точными50%/25%/25%](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/player_navigation_revisions/g6518_69b1793d5883/capacity_450_b16_enemy50_nav25_combat25.json).
+
+[Протокол ревизии](turkeyworld/rssm_player_navigation_revision.py),
+[contact replay](turkeyworld/rssm_player_contact_replay.py),
+[штраф стен](turkeyworld/rssm_player_geometry_objectives.py),
+[физическая валидация](turkeyworld/rssm_player_navigation_validation.py),
+[проверка границы без записи](training_runs/diagnostic_tools/verify_player_navigation_revision_20261114.py).
+
 ## Изменения целей, batch и единиц данных
 
 | Что менялось | Последовательность из чата / итог |
@@ -3424,7 +3871,8 @@ expanded RF3 local100/накопленно29709 и SR108105: четыре соб
 
 Это история запросов, не одинаково полная телеметрия всех ранних запусков.
 Поздние safe-resume факты подтверждены:746→747 для27×1 и800→801 для16×1.
-В текущем RSSM main-microbatch32, accumulation4, effective128; отдельные Source auxiliary clips
+В последнем условном продолжении RSSM main-microbatch16, accumulation1,
+effective16; отдельные Source auxiliary clips
 и до4 contact branches считаются отдельно.6000 Adam updates не равны6000
 примерам или эпохам. Draws могут многократно выбирать один и тот же клип.
 

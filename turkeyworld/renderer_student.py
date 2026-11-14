@@ -94,6 +94,7 @@ def validate_renderer_source_lineage(teacher, source_config):
     teacher's trained image assets through configuration normalization alone.
     """
     source = _world_config(source_config)
+    validate_spawn_conditioning_renderer_lineage(teacher,source)
     validate_five_role_renderer_lineage(teacher, source)
     validate_combat_renderer_lineage(teacher, source)
     validate_fusion_renderer_lineage(teacher, source)
@@ -233,6 +234,37 @@ def validate_expanded_five_renderer_lineage(teacher,source_config):
             or report.get('memory_size')!=teacher.vjepa_backend.memory_size
             or report.get('source_renderer_conditioning_identity')!=renderer_condition_identity(teacher)):
         raise ValueError('Expanded dynamics lineage changed capacity, old names, memory or frozen image assets')
+
+
+def validate_spawn_conditioning_renderer_lineage(teacher,source_config):
+    """Only the verified append may reuse frozen assets with new spawn inputs."""
+    from .rssm_spawn_conditioning import PREFIX,spawn_conditioning_metadata
+    from .rssm_five_migration import report_sha
+    source,target=_world_config(source_config),_world_config(teacher.config)
+    flag='rssm_spawn_conditioning_enabled'
+    if not target[flag]:
+        if source[flag]:raise ValueError('A spawn-conditioned renderer source requires its dynamics branch')
+        return
+    report=getattr(teacher,'rssm_spawn_conditioning_migration',None)
+    module=getattr(teacher.vjepa_backend,'spawn_conditioning',None)
+    if (not isinstance(report,dict)or report.get('format_version')!=1
+            or report.get('kind')!='append_current_state_spawn_conditioning'
+            or report.get('revision_sha256')!=report_sha(report)
+            or any(report.get(key)is not True for key in('old_model_tensors_bitexact',
+                'frozen_render_assets_bitexact','zero_residual_initialization'))
+            or not isinstance(report.get('source_config'),dict)
+            or not isinstance(report.get('target_config'),dict)or module is None):
+        raise ValueError('Spawn conditioning requires explicit strict migration lineage')
+    previous,migrated=_world_config(report['source_config']),_world_config(report['target_config'])
+    metadata=spawn_conditioning_metadata(module)
+    if (previous[flag]or migrated!={**previous,flag:True}
+            or report.get('allowed_config_changes')!=[flag]
+            or report.get('architecture')!=metadata
+            or report.get('added_parameter_names')!=[PREFIX+name for name in metadata['parameter_names']]
+            or report.get('added_parameter_count')!=metadata['parameters']
+            or report.get('memory_size')!=teacher.vjepa_backend.memory_size
+            or report.get('source_renderer_conditioning_identity')!=renderer_condition_identity(teacher)):
+        raise ValueError('Spawn conditioning lineage changed its architecture, memory or frozen render assets')
 
 
 def validate_combat_renderer_lineage(teacher, source_config):
@@ -493,6 +525,7 @@ def _student_config(student, teacher):
     if not isinstance(raw, dict):
         raise ValueError('Build the renderer student with build_renderer_student before export')
     config = WorldModelConfig(**raw)
+    validate_spawn_conditioning_renderer_lineage(teacher,asdict(config))
     validate_five_role_renderer_lineage(teacher, asdict(config))
     validate_dual_renderer_lineage(teacher, asdict(config))
     replacement = isinstance(getattr(student, '_renderer_codec_distillation', None), dict)
@@ -598,6 +631,30 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     payload = torch.load(Path(path), map_location='cpu', weights_only=False)
     if not isinstance(payload, dict):
         raise ValueError('Expected a standalone renderer bundle dictionary')
+    if payload.get('format_version') == 8:
+        from .decoder_rf_chain_bundle import load_decoder_rf_chain_payload
+        return load_decoder_rf_chain_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    if payload.get('format_version') == 7:
+        from .renderer_rf_chain_bundle import load_rf_chain_payload
+        return load_rf_chain_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    if payload.get('format_version') == 6:
+        from .base_geometry_bundle import load_base_geometry_payload
+        return load_base_geometry_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    if payload.get('format_version') == 5:
+        from .renderer_rf_codec_bundle import load_rf_codec_renderer_payload
+        return load_rf_codec_renderer_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    if payload.get('format_version') == 4:
+        from .conditional_restorer_bundle import load_conditional_restorer_payload
+        return load_conditional_restorer_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
+    if payload.get('format_version') == 3:
+        from .decoder_rf_adaptation_bundle import load_decoder_adaptation_payload
+        return load_decoder_adaptation_payload(teacher, payload, checkpoint=path,
+            require_trained=require_trained, allow_unqualified_codec=allow_unqualified_codec)
     if payload.get('format_version') == 2:
         from .renderer_rf5_bundle import load_rf5_renderer_payload
         return load_rf5_renderer_payload(teacher, payload, checkpoint=path,

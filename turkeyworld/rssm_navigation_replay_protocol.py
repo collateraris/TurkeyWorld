@@ -144,6 +144,15 @@ class NavigationReplaySampler:
             key=('navigation_main_actors_per_update' if self.state_field=='sampler_state'
                  else 'enemy_motion_main_actors_per_update')
             self.complete_draw_quantum=gcd(self.actors,batch_settings[key])
+            # A new update can be complete even when its inherited total was
+            # produced by five-NAV B32 updates. Keep every earlier draw/RNG;
+            # the pinned recursive replay ledger validates the exact totals.
+            history_key=('historical_navigation_actor_counts_per_update'if self.state_field=='sampler_state'
+                         else'historical_enemy_motion_actor_counts_per_update')
+            historical=batch_settings.get(history_key,[])
+            if not isinstance(historical,list)or any(type(n)is not int or n<1 for n in historical):
+                raise ValueError('Replay historical complete-update quanta must be positive integers')
+            for count in historical:self.complete_draw_quantum=gcd(self.complete_draw_quantum,count)
         self.restore_state(record[self.state_field])
 
     def state_dict(self):

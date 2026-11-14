@@ -558,10 +558,19 @@ class LatentFlowRenderer(LatentVelocityNetwork):
         return current
 
     def sample(self, base_rgb, state, noise=None, steps=None, *, checkpoint_velocity=False, map_condition=None):
+        restorer = getattr(self, 'conditional_restorer', None)
+        # Snapshot the SAME known raw map used by RF before any velocity call.
+        # The legacy path is unchanged and Source-code codec.decode is separate.
+        maps = map_condition
+        if restorer is not None:
+            maps = self._resolve_map_condition(map_condition, len(state), state.device)
+            if maps is None:
+                raise ValueError('Conditional restorer requires an explicit/cached raw material map')
         continuous = self.latent_sample(base_rgb, state, noise=noise, steps=steps,
-                                        checkpoint_velocity=checkpoint_velocity, map_condition=map_condition)
+                                        checkpoint_velocity=checkpoint_velocity, map_condition=maps)
         terminal = self.codec.quantize(self.denormalize_latents(continuous))['quantized']
-        return self.codec.decode(terminal)
+        rgb = self.codec.decode(terminal)
+        return rgb if restorer is None else restorer(terminal, rgb, state, maps)
 
 
 ConditionalLatentFlowRenderer = LatentFlowRenderer

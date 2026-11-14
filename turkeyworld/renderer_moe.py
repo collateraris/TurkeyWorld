@@ -25,6 +25,7 @@ def validate_role_schema(schema,experts,enabled=True):
 
 
 def base_parameter_budget(config):
+    if getattr(config,'output_moe_expanded_enabled',False):return 2_500_000
     return 1_005_000 if config.output_moe_role_schema==FIVE_SCHEMA else 1_000_000
 
 
@@ -107,7 +108,8 @@ class RendererTokenMoE(nn.Module):
         # Keep the old three-expert call/output shape and reduction order. Clones
         # contribute through zero differences, rather than summing five rounded
         # terms or changing the pretrained shared output GEMM's shape.
-        tokens_by_expert=[expert(projected)for expert in self.experts]
+        tokens_by_expert=([expert(projected,query_context=tokens)for expert in self.experts]
+            if getattr(self,'base_expanded_enabled',False)else[expert(projected)for expert in self.experts])
         primary_tokens=torch.stack(tokens_by_expert[:3],-2)
         parent_outputs=self.output(primary_tokens)
         differences=torch.stack([tokens_by_expert[3]-tokens_by_expert[0],
@@ -176,7 +178,28 @@ def output_moe_metadata(head):
             role_expert_indices=list(FIVE_ROLE_EXPERT_INDICES),routing='hierarchical_parent3_scene_enemy_sigmoid_splits',
             parent_roles=list(ROLES),parent_group_mass_preserved=True,
             runtime_depth_oracle=False,shared_output_delta_preserves_parent_reduction=True)
+    expanded=bool(getattr(getattr(head,'config',None),'output_moe_expanded_enabled',False))
+    if expanded or getattr(module,'base_expanded_enabled',False):
+        from .base_expanded_experts import KIND as BASE_KIND,base_expanded_expert_metadata
+        architecture=base_expanded_expert_metadata(head)
+        result.update(kind=BASE_KIND,version=1,base_expert_expansion=architecture,
+            private_query_context_width=144,private_expert_width=192,private_expert_heads=6,
+            private_expert_ff_width=314,expert_depth=2,parameters_per_expert=300058,
+            legacy_kind=FIVE_KIND,legacy_version=2)
     return result
+
+
+def _matching_moe_roles(base_meta,flow_meta):
+    if (base_meta.get('kind'),base_meta.get('version'))==(flow_meta.get('kind'),flow_meta.get('version')):
+        return True
+    from .base_expanded_experts import KIND as BASE_KIND,validate_base_expanded_expert_metadata
+    if ((base_meta.get('kind'),base_meta.get('version'))!=(BASE_KIND,1)
+            or(flow_meta.get('kind'),flow_meta.get('version'))!=(FIVE_KIND,2)
+            or base_meta.get('role_schema')!=FIVE_SCHEMA or flow_meta.get('role_schema')!=FIVE_SCHEMA
+            or base_meta.get('roles')!=list(FIVE_ROLES)or flow_meta.get('roles')!=list(FIVE_ROLES)):
+        return False
+    validate_base_expanded_expert_metadata(base_meta.get('base_expert_expansion'))
+    return True
 
 
 def renderer_moe_metadata(flow,base):
@@ -185,7 +208,7 @@ def renderer_moe_metadata(flow,base):
     if base_meta is None and flow_meta is None:return None
     if base_meta is None or flow_meta is None:
         raise ValueError('Renderer output MoE requires both its compact Base and RF experts')
-    if (base_meta['kind'],base_meta['version'])!=(flow_meta['kind'],flow_meta['version']):
+    if not _matching_moe_roles(base_meta,flow_meta):
         raise ValueError('Renderer Base and RF must share their explicit role schema')
     return dict(kind=flow_meta['kind'],version=flow_meta['version'],base=base_meta,flow=flow_meta,
         shared_transformers_unchanged=True,new_RSSM_memory=False,Source_future_inputs=False)
@@ -195,14 +218,17 @@ def validate_renderer_moe_bundle(flow,base_bundle,header):
     actual=output_moe_metadata(flow)
     base=(base_bundle or{}).get('output_moe')
     enabled=bool((base_bundle or{}).get('config',{}).get('output_moe_enabled',False))
+    expanded=(base_bundle or{}).get('config',{}).get('output_moe_expanded_enabled',False)
     if actual is None:
         if header is not None or base is not None or enabled:
             raise ValueError('Renderer output MoE metadata requires its actual RF module')
         return
     expected=dict(kind=actual['kind'],version=actual['version'],base=base,flow=actual,
         shared_transformers_unchanged=True,new_RSSM_memory=False,Source_future_inputs=False)
+    from .base_expanded_experts import KIND as BASE_KIND
     if (not enabled or not isinstance(base,dict)or header!=expected
-            or(base.get('kind'),base.get('version'))!=(actual['kind'],actual['version'])):
+            or type(expanded)is not bool or expanded!=(base.get('kind')==BASE_KIND)
+            or not _matching_moe_roles(base,actual)):
         raise ValueError('Renderer output MoE and compact Base binding/hash differ')
 
 

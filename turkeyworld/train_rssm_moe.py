@@ -41,7 +41,17 @@ def restore_optimizer(model, saved):
     policy = configure_rssm_training(model)
     parameters = dict(model.named_parameters())
     canonical = [n for n, p in model.named_parameters() if p.requires_grad]
-    if getattr(model.config,'rssm_five_expanded_enabled',False):
+    if getattr(model.config,'rssm_spawn_conditioning_enabled',False):
+        from .rssm_five_migration import report_sha
+        from .rssm_spawn_conditioning_migration import PREFIX
+        report=saved.get('rssm_spawn_conditioning_migration',{})
+        added=report.get('added_parameter_names',[])
+        correct=(report.get('revision_sha256')==report_sha(report)
+            and names==report.get('optimizer_parameter_names')
+            and names==report.get('source_optimizer_parameter_names',[])+added
+            and len(names)==len(canonical) and set(names)==set(canonical)
+            and added==[n for n in canonical if n.startswith(PREFIX)])
+    elif getattr(model.config,'rssm_five_expanded_enabled',False):
         report=saved.get('rssm_five_expanded_migration',{})
         added=set(report.get('added_parameter_names',[]))
         correct=(names==report.get('optimizer_parameter_names')and len(names)==len(canonical)
@@ -60,13 +70,18 @@ def restore_optimizer(model, saved):
 
 
 def merge_main_replay_metrics(combat,navigation,enemy,*,plan_sha256,
-                              layout=None,auxiliary_batch_size=64,late_actor_count=8):
+                              layout=None,auxiliary_batch_size=64,late_actor_count=8,
+                              player_navigation_protocol=None):
     """Count the actual actors; main, auxiliary and late streams are separate."""
     layout = layout or dict(combat=38, enemy_motion=16, navigation=10)
     c,e,n = (layout[key] for key in ('combat','enemy_motion','navigation'))
     batch_size = c+e+n
     row=copy.deepcopy(combat);row.update(navigation);row.update(enemy)
     row['moe_player_loss']=combat['moe_player_loss']+navigation['nav_player_loss']
+    if player_navigation_protocol is not None:
+        from .rssm_player_navigation_revision import player_navigation_protocol as validate_player_protocol
+        validate_player_protocol(player_navigation_protocol)
+        row['moe_player_loss']+=enemy['enemy_motion_player_loss']
     row['moe_enemy_loss']=combat['moe_enemy_loss']+enemy['enemy_motion_enemy_loss']
     for field in ('role','balance'):
         key='moe_router_'+field+'_loss'
@@ -82,6 +97,28 @@ def merge_main_replay_metrics(combat,navigation,enemy,*,plan_sha256,
         combat_late_actor_count=late_actor_count)
     row['loss_groups']=summarize_moe_metrics([row])
     return row
+
+
+def merge_player_contact_metrics(row,contact,*,plan_sha256,player_navigation_protocol=None):
+    """Add one already-backpropagated short objective to Player exactly once."""
+    from .rssm_player_navigation_revision import PROTOCOL,player_navigation_protocol as validate_player_protocol
+    protocol=PROTOCOL if player_navigation_protocol is None else validate_player_protocol(player_navigation_protocol)
+    value=contact.get('player_contact_loss')
+    if type(value)not in(int,float)or not np.isfinite(value)or value<0:
+        raise ValueError('Player contact objective must be finite and nonnegative')
+    result=copy.deepcopy(row)
+    result.update({key:value for key,value in contact.items()if key.startswith('player_contact_')})
+    result['player_contact_replay']=copy.deepcopy(contact)
+    result['player_contact_generated_transitions']=int(contact.get('scout_forward_transitions',0)+contact.get('forward_transitions',0))
+    result['player_contact_branch_forward_transitions']=int(contact.get('forward_transitions',0))
+    result['moe_player_contact_loss']=value
+    result['moe_player_loss']+=value
+    result['train_loss']=sum(result[key]for key in('moe_player_loss','moe_enemy_loss','moe_combat_loss','moe_router_loss'))
+    result['train_loss_without_kl_floor']=result['train_loss']
+    result.update(player_navigation_loss_revision=protocol,objective_formula_revision=protocol,
+        player_navigation_plan_sha256=plan_sha256,player_navigation_objective_changed=True)
+    result['loss_groups']=summarize_moe_metrics([result])
+    return result
 
 
 class RSSMMoETraining(RSSMCombatTraining):
@@ -152,6 +189,19 @@ class RSSMMoETraining(RSSMCombatTraining):
             self.state['rssm_five_expanded_training']['current_step']=saved['training_steps']
         elif getattr(args,'five_expanded_plan',None)is not None:
             raise ValueError('An expansion plan cannot enable an unmigrated checkpoint')
+        spawn_enabled=getattr(model.config,'rssm_spawn_conditioning_enabled',False)
+        spawn_report=None
+        if spawn_enabled:
+            from .rssm_spawn_conditioning_migration import bind_spawn_conditioning_plan
+            spawn_report=saved['rssm_spawn_conditioning_migration']
+            spawn_path=getattr(args,'spawn_conditioning_plan',None)
+            if spawn_path is None:raise ValueError('Spawn conditioning requires its immutable revision plan')
+            bind_spawn_conditioning_plan(self.state,json.loads(spawn_path.read_text(encoding='utf-8')),
+                path=spawn_path,sha256=_digest(spawn_path),report=spawn_report)
+            self.state['rssm_spawn_conditioning_training']['current_step']=saved['training_steps']
+            self.state.setdefault('model_parameters',{}).update(spawn_report['model_parameter_counts'])
+        elif getattr(args,'spawn_conditioning_plan',None)is not None:
+            raise ValueError('A spawn plan cannot enable an unmigrated checkpoint')
         self.plan_sha = _digest(args.moe_plan)
         plan = json.loads(args.moe_plan.read_text(encoding='utf-8'))
         self.moe = bind_moe_training(self.state, plan, path=args.moe_plan,
@@ -218,6 +268,16 @@ class RSSMMoETraining(RSSMCombatTraining):
                 self.state.update(loss=None, latest_metrics=None, loss_groups=None)
         elif self.state['rssm_training'].get('respawn_timing_revision') is not None:
             raise ValueError('Saved respawn-clock revision requires its immutable timing plan')
+        self.player_navigation_revision=None
+        self.player_navigation_plan=None
+        player_path=getattr(args,'player_navigation_plan',None)
+        if player_path is not None:
+            from .rssm_player_navigation_revision import bind_player_navigation_revision
+            self.player_navigation_plan=json.loads(player_path.read_text(encoding='utf-8'))
+            self.player_navigation_revision=bind_player_navigation_revision(self.state,self.player_navigation_plan,
+                path=player_path,sha256=_digest(player_path),loaded_checkpoint_sha256=loaded_sha)
+        elif self.state['rssm_training'].get('player_navigation_revision')is not None:
+            raise ValueError('Saved player contact/quiet navigation revision requires its immutable plan')
         if self.moe['updates'] == 0:
             if self.state.get('rssm_validation') is not None:
                 self.state.setdefault('validation_history', []).append(copy.deepcopy(self.state['rssm_validation']))
@@ -238,7 +298,7 @@ class RSSMMoETraining(RSSMCombatTraining):
         optimizer, self._optimizer_parameter_names, policy = restore_optimizer(model, saved)
         metadata = {k: saved[k] for k in ('rssm_migration', 'source_teacher_checkpoint',
             'dual_rssm_migration', 'enemy_rssm_resize', 'rssm_fusion_migration', 'combat_rssm_migration',
-            'rssm_five_migration','rssm_five_expanded_migration') if k in saved}
+            'rssm_five_migration','rssm_five_expanded_migration','rssm_spawn_conditioning_migration') if k in saved}
         self._drift_optimizer, self._drift_metadata = optimizer, metadata
         roots = {'combat': args.combat_data_root, 'navigation': args.navigation_data_root,
                  'recovery': args.recovery_data_root}
@@ -268,6 +328,22 @@ class RSSMMoETraining(RSSMCombatTraining):
                 batch_settings=batch_settings)
             enemy_motion_sampler=EnemyMotionReplaySampler(self.enemy_motion_long,self.navigation_replay_revision,
                 batch_settings=batch_settings)
+        player_contact_sampler=None
+        player_protocol=None
+        if self.player_navigation_revision is not None:
+            from .rssm_player_contact_replay import PlayerContactReplaySampler
+            from .rssm_player_navigation_revision import digest
+            if navigation_sampler is None:
+                raise ValueError('Player repair needs the unchanged three-way main replay')
+            player_protocol=self.player_navigation_plan['settings']
+            self.player_contact_data=self._data(Path(self.player_navigation_plan['contact_train_directory']),64)
+            player_contact_sampler=PlayerContactReplaySampler(self.player_contact_data,
+                seed=player_protocol['contact']['seed'],cache_path=self.root/'player_contact_sampling.json')
+            if digest(player_contact_sampler.identity)!=self.player_navigation_plan['contact_sampler_identity_sha256']:
+                raise ValueError('Player contact TRAIN sampler identity differs from its pinned plan')
+            contact_state=self.player_navigation_revision['contact_sampler_state']
+            if contact_state is not None:player_contact_sampler.restore_state(contact_state)
+            self.player_navigation_revision['contact_sampler_state']=player_contact_sampler.state_dict()
         history = self.state['navigation_training_history']
         contact_root = Path(history['contact_revision']['dataset_directory'])
         self.contact_val = self._data(contact_root/'short/rgb/val')
@@ -306,6 +382,9 @@ class RSSMMoETraining(RSSMCombatTraining):
             gradient_accumulation_steps=self.accumulation, effective_batch_size=effective_batch,
             auxiliary_fragments_per_update=auxiliary_batch_size*self.accumulation,
             late_own_prefix_actors=late_actor_count)
+        if player_protocol is not None:
+            self.state['training_protocol'].update(tbptt=player_protocol['tbptt'],
+                active_objective_formula_revision=self.player_navigation_revision['protocol'])
         self.state['rssm_training'].update(phase='combat',
             phase_label='MoE: навигация игрока, движение врага и бой',
             dynamics_trainable=policy['dynamics_trainable'], validation_every=250,
@@ -314,6 +393,11 @@ class RSSMMoETraining(RSSMCombatTraining):
         gc.collect()
         self.preview(model)
         self.save(model, optimizer, metadata)
+        if self.player_navigation_revision is not None and not self.player_navigation_revision['baseline_complete']:
+            from .rssm_player_navigation_revision import mark_player_navigation_baseline
+            self.validate(model)
+            mark_player_navigation_baseline(self.state,step=self.state['global_training_step'])
+            self.save(model,optimizer,metadata)
         started_updates = self.moe['updates']
         while not args.updates or self.moe['updates'] - started_updates < args.updates:
             if self.finish_completed_curriculum(model, optimizer, metadata):
@@ -336,6 +420,13 @@ class RSSMMoETraining(RSSMCombatTraining):
             rows, samples = [], []
             update_started = time.perf_counter()
             for micro in range(self.accumulation):
+                contact_candidates=[]
+                def contact_collector(stream,navigation_only):
+                    def capture(first,state,memory,actions,grid,prediction):
+                        from .rssm_player_contact_replay import capture_player_contact_candidate
+                        contact_candidates.append(capture_player_contact_candidate(first,state,memory,actions,grid,
+                            prediction,navigation_only=navigation_only,stream=stream))
+                    return capture
                 layout = microbatch_layout(self.state, micro)
                 draws = layout['combat_rng_draws']
                 pairs = np.column_stack((self.rng.integers(len(combat_long.episodes), size=draws), np.zeros(draws, np.int64)))
@@ -344,11 +435,13 @@ class RSSMMoETraining(RSSMCombatTraining):
                 auxiliary_horizon = min(horizon, 16)
                 sampler = samplers[auxiliary_horizon]
                 auxiliary, receipt = sample_moe_combat_batch(sampler, self.short, self.rng,
-                    horizon=horizon, batch_size=auxiliary_batch_size)
+                    horizon=horizon, batch_size=auxiliary_batch_size,
+                    allow_micro16_continuation=batch_settings.get('auxiliary_micro16_continuation',False))
                 samples.append(receipt)
                 def progress(processed, length):
                     self.state['long_training_progress'] = dict(step=step,
-                        transitions_processed=processed, horizon=length, tbptt_chunk=16,
+                        transitions_processed=processed, horizon=length,
+                        tbptt_chunk=player_protocol['tbptt']if player_protocol is not None else 16,
                         optimizer_updated=False, microbatch_index=micro+1, microbatches_total=self.accumulation,
                         completed_microbatches=micro, microbatch_size=self.microbatch, effective_batch_size=effective_batch,
                         environment='combat', source_future_feedback=False)
@@ -357,6 +450,8 @@ class RSSMMoETraining(RSSMCombatTraining):
                     context=context, observed_context=context, expected_horizon=horizon,
                     progress_callback=progress,
                     auxiliary_actor_limit=auxiliary_batch_size, late_own_prefix_actors=late_actor_count,
+                    **({'chunk_size':player_protocol['tbptt'],'player_navigation_protocol':player_protocol,
+                        'player_contact_callback':contact_collector('combat',False)}if player_protocol is not None else{}),
                     **({'main_player_weight':layout['main_player_weight'],
                         'main_router_weight':layout['main_router_weight'],
                         'main_enemy_weight':layout['main_enemy_weight']}
@@ -369,16 +464,33 @@ class RSSMMoETraining(RSSMCombatTraining):
                     enemy_batch,enemy_receipt=enemy_motion_sampler.batch(context=context,horizon=horizon,
                         actors=layout['enemy_motion'])
                     nav=navigation_replay_backward(model,navigation_batch,context=context,observed_context=context,
-                        expected_horizon=horizon,weight=layout['navigation_player_router_weight'])
+                        expected_horizon=horizon,weight=layout['navigation_player_router_weight'],
+                        **({'player_navigation_protocol':player_protocol,
+                            'player_contact_callback':contact_collector('navigation',True)}if player_protocol is not None else{}))
                     motion=enemy_motion_backward(model,enemy_batch,context=context,observed_context=context,
                         expected_horizon=horizon,enemy_weight=layout['enemy_motion_enemy_weight'],
-                        router_weight=layout['enemy_motion_router_weight'])
+                        router_weight=layout['enemy_motion_router_weight'],
+                        **({'player_weight':layout['enemy_motion']/sum(layout[key]for key in('combat','navigation','enemy_motion')),
+                            'player_navigation_protocol':player_protocol,
+                            'player_contact_callback':contact_collector('enemy_motion',False)}if player_protocol is not None else{}))
                     row=merge_main_replay_metrics(row,nav,motion,
                         plan_sha256=self.navigation_replay_revision['sha256'], layout=layout,
-                        auxiliary_batch_size=auxiliary_batch_size, late_actor_count=late_actor_count)
+                        auxiliary_batch_size=auxiliary_batch_size, late_actor_count=late_actor_count,
+                        player_navigation_protocol=player_protocol)
                     row.update(navigation_sampling=navigation_receipt,enemy_motion_sampling=enemy_receipt,
                         main_combat_pairs=combat_pairs.tolist(),discarded_combat_rng_pairs=pairs[layout['combat']:].tolist())
                     del navigation_batch,enemy_batch
+                if player_contact_sampler is not None:
+                    from .rssm_player_contact_replay import contact_replay_backward
+                    from .rssm_player_navigation_revision import HORIZONS
+                    contact_batch,contact_receipt=player_contact_sampler.batch(actors=player_protocol['contact']['actors_per_microbatch'])
+                    contact_horizon=HORIZONS[self.player_navigation_revision['updates']%len(HORIZONS)]
+                    contact=contact_replay_backward(model,contact_batch,candidates=contact_candidates,
+                        horizon=contact_horizon,weight=player_protocol['contact']['weight'])
+                    row=merge_player_contact_metrics(row,contact,plan_sha256=self.player_navigation_revision['sha256'],
+                        player_navigation_protocol=player_protocol)
+                    row['player_contact_sampling']=contact_receipt
+                    del contact_batch
                 rows.append(row)
                 del batch, auxiliary
             average_accumulated_gradients(model.parameters(), self.accumulation)
@@ -402,6 +514,10 @@ class RSSMMoETraining(RSSMCombatTraining):
                 diagnostic_updates = min(diagnostic_updates, step - five_report['source_step'] - 1)
             if expanded_enabled:
                 diagnostic_updates=min(diagnostic_updates,step-expanded_report['source_step']-1)
+            if spawn_enabled:
+                diagnostic_updates=min(diagnostic_updates,step-spawn_report['source_step']-1)
+            if self.player_navigation_revision is not None:
+                diagnostic_updates=min(diagnostic_updates,self.player_navigation_revision['updates'])
             if diagnostic_updates < 3:
                 gradient_groups = {}
                 for label, prefix in {
@@ -425,6 +541,7 @@ class RSSMMoETraining(RSSMCombatTraining):
                         for i in range(5)}if expanded_enabled else{}),
                     **({f'expanded_private_output_{i}':f'vjepa_backend.five_role_fusion.experts.{i}.private_output.'
                         for i in range(5)}if expanded_enabled else{}),
+                    **({'spawn_conditioning':'vjepa_backend.spawn_conditioning.'}if spawn_enabled else{}),
                 }.items():
                     gradients = [p.grad.detach().float().square().sum()
                         for n, p in model.named_parameters() if n.startswith(prefix) and p.grad is not None]
@@ -439,6 +556,16 @@ class RSSMMoETraining(RSSMCombatTraining):
                 metrics.update(rssm_five_expanded_migration_sha256=expanded_report['revision_sha256'],
                     rssm_five_expanded_plan_sha256=self.state['rssm_five_expanded_training']['plan_sha256'],
                     rssm_five_expanded_protocol=self.state['rssm_five_expanded_training']['protocol'])
+            if spawn_enabled:
+                descriptor=self.state['rssm_spawn_conditioning_training']
+                descriptor['current_step']=step
+                metrics.update(rssm_spawn_conditioning_protocol=descriptor['protocol'],
+                    rssm_spawn_conditioning_migration_sha256=spawn_report['revision_sha256'],
+                    rssm_spawn_conditioning_plan_sha256=descriptor['plan_sha256'],
+                    spawn_conditioning_objective_changed=False,
+                    spawn_conditioning_Source_future_inputs=False,
+                    spawn_conditioning_supervised_events=sum(metrics.get(key,{}).get('combat_spawn_event_count',0.)
+                        for key in ('moe_auxiliary','moe_late_own_prefix')))
             gate = commit_moe_update(self.state, step=step, horizon=horizon, train_loss=metrics['train_loss'],
                 microbatches=self.accumulation,
                 microbatch_size=self.microbatch, effective_batch_size=effective_batch,
@@ -460,6 +587,13 @@ class RSSMMoETraining(RSSMCombatTraining):
                     enemy_sampler_state=enemy_motion_sampler.state_dict(),micro_rows=rows)
                 metrics.update(navigation_replay_plan_sha256=self.navigation_replay_revision['sha256'],
                     navigation_replay_updates=self.navigation_replay_revision['updates'])
+            if self.player_navigation_revision is not None:
+                from .rssm_player_navigation_revision import commit_player_navigation_revision
+                revision=commit_player_navigation_revision(self.state,step=step,
+                    contact_sampler_state=player_contact_sampler.state_dict(),metrics=metrics)
+                metrics.update(player_navigation_loss_revision=revision['protocol'],
+                    player_navigation_plan_sha256=revision['sha256'],player_navigation_updates=revision['updates'],
+                    player_navigation_tbptt=player_protocol['tbptt'])
             sampler_states[str(auxiliary_horizon)] = sampler.state_dict()
             metrics.update(step=step, global_training_step=step, timestamp=now(), main_horizon=horizon,
                 moe_training_plan_sha256=self.plan_sha,
@@ -485,6 +619,9 @@ class RSSMMoETraining(RSSMCombatTraining):
             self.state.update(current=step, loss=metrics['train_loss'], latest_metrics=metrics,
                 loss_groups=metrics['loss_groups'], status='running',
                 message='Simultaneous player navigation, enemy navigation and combat')
+            if gate.get('final_horizon_goal') is not None:
+                metrics['h450_total_loss_goal']=copy.deepcopy(gate['final_horizon_goal'])
+                self.state['h450_total_loss_goal']=copy.deepcopy(gate['final_horizon_goal'])
             self.state['long_training_progress'].update(optimizer_updated=True, completed_microbatches=self.accumulation)
             with (self.root/'metrics.jsonl').open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps(metrics, ensure_ascii=False, allow_nan=False)+'\n')
@@ -525,8 +662,10 @@ def main(argv=None):
     parser.add_argument('--stage-budget-plan', type=Path)
     parser.add_argument('--batch-revision-plan', type=Path)
     parser.add_argument('--five-expanded-plan',type=Path)
+    parser.add_argument('--spawn-conditioning-plan',type=Path)
     parser.add_argument('--navigation-replay-plan',type=Path)
     parser.add_argument('--enemy-motion-data-root',type=Path)
+    parser.add_argument('--player-navigation-plan',type=Path)
     parser.add_argument('--seed', type=int, default=173)
     parser.add_argument('--updates', type=int, default=0)
     args = parser.parse_args(argv)

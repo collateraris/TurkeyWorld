@@ -60,7 +60,7 @@ def moe_training_plan(state, *, source_checkpoint, source_checkpoint_sha256,
 
 def _validate_gate(gate, step):
     from .rssm_moe_budget import (validate_policy, validate_budget_advance, validate_completion,
-        validate_loss_advance, loss_gate_settings, SHORT_CAP_PROTOCOL, stage_requires_full_budget)
+        validate_loss_advance, loss_gate_settings, SHORT_CAP_PROTOCOL, H450_GOAL_PROTOCOL, stage_requires_full_budget)
     from .rssm_moe_batch_revision import validate_moe_batch_accounting
     start, updates = gate.get('start_optimizer_step'), gate.get('updates')
     if (type(start) is not int or type(updates) is not int or updates < 0
@@ -113,12 +113,14 @@ def _validate_gate(gate, step):
         loss = gate.get('last_train_loss')
         eligible = gate.get('last_loss_gate_eligible', True)
         policy = gate.get('advance_policy') or {}
-        activation = policy.get('kind') == SHORT_CAP_PROTOCOL and policy.get('updates') == 0
+        activation = (policy.get('kind') == SHORT_CAP_PROTOCOL
+                      or policy.get('kind')==H450_GOAL_PROTOCOL and gate['current_horizon']==450) and policy.get('updates') == 0
+        decision_threshold,_ = loss_gate_settings(gate,horizon=gate.get('last_training_horizon',gate['current_horizon']))
         if (type(loss) not in (float, int) or not math.isfinite(loss) or loss < 0
                 or type(eligible) is not bool
-                or not activation and (gate.get('last_gate_passed') is not (eligible and loss < threshold)
-                or (not eligible or loss >= threshold) and streak != 0
-                or eligible and loss < threshold and not gate.get('last_stage_advanced') and streak == 0)):
+                or not activation and (gate.get('last_gate_passed') is not (eligible and loss < decision_threshold)
+                or (not eligible or loss >= decision_threshold) and streak != 0
+                or eligible and loss < decision_threshold and not gate.get('last_stage_advanced') and streak == 0)):
             raise ValueError('Saved MoE total-loss decision changed')
     validate_completion(gate)
 
@@ -193,7 +195,7 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
                       microbatch_size=64, effective_batch_size=256, loss_gate_eligible=True):
     gate = state['rssm_training']['moe_training']
     from .rssm_moe_budget import (curriculum_completion, update_completion, loss_gate_settings,
-                                 stage_requires_full_budget)
+                                 stage_requires_full_budget, H450_GOAL_PROTOCOL)
     from .rssm_moe_batch_revision import batch_settings_for_gate, commit_moe_batch_revision
     batch = batch_settings_for_gate(gate)
     if curriculum_completion(gate) is not None:
@@ -208,6 +210,12 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
             or type(loss_gate_eligible) is not bool):
         raise ValueError('MoE gate requires one finite complete pinned-batch total-loss optimizer commit')
     old = gate['stage_index']
+    final_goal_policy=(gate.get('advance_policy') or {}).get('kind')==H450_GOAL_PROTOCOL
+    actual_source_eligible=loss_gate_eligible
+    if final_goal_policy and horizon==450:
+        # This user criterion measures the actual TOTAL; Source-support
+        # diagnostics remain separate and do not silently add a requirement.
+        loss_gate_eligible=True
     threshold, required = loss_gate_settings(gate)
     passed = loss_gate_eligible and train_loss < threshold
     streak = min(required, gate['consecutive_below_threshold'] + 1) if passed else 0
@@ -221,7 +229,8 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
     if policy is not None:
         from .rssm_moe_budget import stage_budget
         policy['updates']+=1;policy['last_optimizer_step']=step
-        budget_passed=gate['stage_updates']>=stage_budget(old, policy)
+        cap=stage_budget(old, policy)
+        budget_passed=cap is not None and gate['stage_updates']>=cap
     mandatory = stage_requires_full_budget(old, policy)
     loss_passed = streak == required and not mandatory
     advanced = (loss_passed or budget_passed) and old < len(MOE_HORIZONS) - 1
@@ -243,6 +252,11 @@ def commit_moe_update(state, *, step, horizon, train_loss, microbatches=4,
         gate['last_loss_gate_eligible'] = loss_gate_eligible
     if policy is not None:
         gate['last_advance_reason']=gate['advance_history'][-1]['advance_reason'] if advanced else None
+    if final_goal_policy:
+        from .rssm_h450_goal import commit_h450_goal
+        gate['final_horizon_goal']=commit_h450_goal(gate['final_horizon_goal'],step=step,
+            horizon=horizon,total_loss=train_loss)
+        gate['last_source_support_gate_eligible']=actual_source_eligible
     update_completion(gate)
     commit_moe_batch_revision(state, step=step, horizon=horizon)
     _validate_gate(gate, step)

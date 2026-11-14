@@ -461,9 +461,17 @@ class VJEPA2ACWorldBackend(nn.Module):
         if getattr(self.config, 'game_training_v5', False):
             from .anchor_spawn import hierarchical_spawn_logits
             anchor_residual = self.spatial_spawn_anchor_head(context.to(self.spatial_spawn_anchor_head.weight.dtype))
-            return hierarchical_spawn_logits(logits, anchor_residual, state,
+            extra=None
+            if getattr(self.config,'rssm_spawn_conditioning_enabled',False):
+                extra=self.spawn_conditioning(state,pooled,spatial,
+                    self.renderer._spawn_walkable if walkable is None else walkable,
+                    dt=1/self.config.simulation_hz)
+                anchor_residual=anchor_residual+extra['anchor_residual'].to(anchor_residual.dtype)
+            result=hierarchical_spawn_logits(logits, anchor_residual, state,
                 self.renderer._spawn_walkable if walkable is None else walkable,
                 1/self.config.simulation_hz)
+            if extra is not None:result['spawn_conditioning']=extra
+            return result
         return {'spawn_logits': logits}
 
     def transition(self, state, action, map_features, memory, projection):

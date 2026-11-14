@@ -32,10 +32,16 @@ class BaseStudentConfig:
     output_moe_expert_width: int = 8
     output_moe_role_schema: str = 'scene_enemy_combat_v1'
     output_moe_experts: int = 3
+    output_moe_expanded_enabled: bool = False
 
     def __post_init__(self):
         from .renderer_moe import validate_role_schema
         validate_role_schema(self.output_moe_role_schema,self.output_moe_experts,self.output_moe_enabled)
+        if (type(self.output_moe_expanded_enabled) is not bool
+                or self.output_moe_expanded_enabled and (not self.output_moe_enabled
+                    or self.output_moe_role_schema != 'near_far_enemy_motion_enemy_combat_player_combat_v2'
+                    or self.output_moe_experts != 5 or self.width != 144)):
+            raise ValueError('Expanded Base requires its explicit five-role 144D architecture')
         if (self.image_size != 32 or self.geometry_width != 192 or not isinstance(self.pixel_residual, bool)
                 or type(self.output_moe_enabled) is not bool or self.output_moe_expert_width != 8
                 or self.output_moe_enabled and self.pixel_residual
@@ -71,6 +77,9 @@ class CompactBaseHead(nn.Module):
             self.output_moe = _new_module(self, width=width, output_dim=12,
                 expert_width=self.config.output_moe_expert_width, grid=16,
                 role_schema=self.config.output_moe_role_schema,experts=self.config.output_moe_experts)
+        if self.config.output_moe_expanded_enabled:
+            from .base_expanded_experts import upgrade_base_experts
+            upgrade_base_experts(self)
         from .renderer_moe import base_parameter_budget
         if sum(value.numel() for value in self.parameters()) > base_parameter_budget(self.config):
             raise ValueError('Compact Base head exceeds its explicit role-schema parameter budget')

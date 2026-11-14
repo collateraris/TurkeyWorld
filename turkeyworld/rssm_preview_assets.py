@@ -158,7 +158,8 @@ def prepare_preview_assets(model, plan, device, *, clone_factory=None):
         client = factory(model.config)
         client.load_state_dict(model.state_dict(), strict=True)
         for name in ('rssm_migration', 'dual_rssm_migration', 'enemy_rssm_resize','rssm_fusion_migration',
-                     'combat_rssm_migration', 'rssm_five_migration','rssm_five_expanded_migration'):
+                     'combat_rssm_migration', 'rssm_five_migration','rssm_five_expanded_migration',
+                     'rssm_spawn_conditioning_migration'):
             if hasattr(model, name):
                 setattr(client, name, copy.deepcopy(getattr(model, name)))
         renderer = load_renderer_student(client, plan['renderer']['checkpoint'],

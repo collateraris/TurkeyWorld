@@ -154,6 +154,9 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                 if getattr(config,'rssm_five_expanded_enabled',False):
                     from .rssm_five_expanded import expand_five_experts
                     expand_five_experts(self.five_role_fusion)
+        if getattr(config,'rssm_spawn_conditioning_enabled',False):
+            from .rssm_spawn_conditioning import RSSMSpawnConditioning
+            self.spawn_conditioning=RSSMSpawnConditioning(width=width)
 
     @property
     def memory_size(self):
@@ -312,6 +315,7 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
         if self.config.endless:
             from .spawn import decode_spawn_positions
             heads = self.spawn_outputs(state, pooled, spatial, map_features)
+            spawn_conditioning=heads.get('spawn_conditioning')
             if fusion is not None or combat_result is not None:
                 tile_residual = (fusion['interaction_spawn_tile_residual'].float()
                     if fusion is not None else torch.zeros_like(heads['spawn_logits']))
@@ -330,6 +334,7 @@ class RSSMWorldBackend(VJEPA2ACWorldBackend):
                     heads = {**heads, 'spawn_logits': heads['spawn_logits']+tile_residual}
             positions, valid = decode_spawn_positions(heads['spawn_logits'], state,
                 self.renderer._spawn_walkable, 1/self.config.simulation_hz)
+            if spawn_conditioning is not None:heads['spawn_conditioning']=spawn_conditioning
             spawn = {**heads, 'spawn_positions': positions, 'spawn_valid': valid}
         result = structured_transition(state, candidate, action.float(), targets, attacks,
             dt=1/self.config.simulation_hz, training=self.training, endless=self.config.endless,

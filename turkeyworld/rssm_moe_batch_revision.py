@@ -67,6 +67,27 @@ MICRO32_SETTINGS = {
     'preserve_gate_streak_history': True, 'preserve_all_rng': True,
     'optimizer_reset': False, 'model_reset': False,
 }
+MICRO16_SINGLE_PROTOCOL = 'rssm_moe_micro16_accum1_v3'
+MICRO16_SINGLE_SETTINGS = deepcopy(SETTINGS)
+MICRO16_SINGLE_SETTINGS.update(version=3, gradient_accumulation_steps=1,
+    effective_batch_size=16, micro_layouts=[{'combat':4,'enemy_motion':8,'navigation':4}],
+    combat_main_actors_per_update=4, enemy_motion_main_actors_per_update=8,
+    navigation_main_actors_per_update=4, discarded_combat_rng_draws_per_update=12,
+    navigation_fraction=4/16, enemy_motion_fraction=8/16,
+    enemy_normalization_denominator_per_update=12,
+    enemy_micro_weight='actor_count_times_accumulation_divided_by_12',
+    historical_effective_batch_sizes=[256,64,32],
+    historical_navigation_actor_counts_per_update=[40,10,5],
+    historical_enemy_motion_actor_counts_per_update=[64,16,8],
+    auxiliary_micro16_continuation=True)
+MICRO16_SINGLE_SETTINGS.pop('historical_effective_batch_size')
+
+
+def _parent_protocol(protocol):
+    return {PROTOCOL:None, MICRO32_PROTOCOL:PROTOCOL,
+            MICRO16_SINGLE_PROTOCOL:MICRO32_PROTOCOL}[protocol]
+
+
 LEGACY_SETTINGS = {
     'microbatch_size': 64, 'gradient_accumulation_steps': 4,
     'effective_batch_size': 256,
@@ -145,12 +166,34 @@ def micro32_batch_revision_plan(state, *, source_checkpoint, source_checkpoint_s
     }
 
 
+def micro16_single_batch_revision_plan(state, *, source_checkpoint, source_checkpoint_sha256=None):
+    """Direct B32x1 -> B16x1 continuation; all earlier segments stay immutable."""
+    from .rssm_moe_protocol import _validate_gate
+    step=state.get('global_training_step'); gate=state['rssm_training']['moe_training']
+    _validate_gate(gate,step)
+    previous=gate.get('batch_revision')
+    if not isinstance(previous,dict)or previous.get('kind')!=MICRO32_PROTOCOL:
+        raise ValueError('Micro16x1 requires its exact direct micro32x1 parent')
+    source=Path(source_checkpoint).resolve();actual_sha=_file_sha(source)
+    if source_checkpoint_sha256 is not None and source_checkpoint_sha256!=actual_sha:
+        raise ValueError('Micro16x1 source checkpoint SHA changed')
+    return dict(version=3,kind=MICRO16_SINGLE_PROTOCOL,settings=deepcopy(MICRO16_SINGLE_SETTINGS),
+        source_checkpoint=str(source),source_checkpoint_sha256=actual_sha,
+        source_optimizer_step=step,source_moe_updates=gate['updates'],
+        source_gate_sha256=_digest(gate),moe_training_plan_sha256=gate['sha256'],
+        source_navigation_replay_revision_sha256=_digest(state['rssm_training'].get('navigation_replay_revision')),
+        previous_batch_revision_sha256=previous['sha256'],weights_reset=False,optimizer_reset=False,
+        rng_reset=False,gate_reset=False,historical_counts_rewritten=False)
+
+
 def batch_settings_for_plan(plan):
     """Validate canonical dimensions before a trainer/checkpoint is constructed."""
     if (plan.get('kind'), type(plan.get('version')), plan.get('version')) == (PROTOCOL, int, 1):
         settings = SETTINGS
     elif (plan.get('kind'), type(plan.get('version')), plan.get('version')) == (MICRO32_PROTOCOL, int, 2):
         settings = MICRO32_SETTINGS
+    elif (plan.get('kind'), type(plan.get('version')), plan.get('version')) == (MICRO16_SINGLE_PROTOCOL, int, 3):
+        settings = MICRO16_SINGLE_SETTINGS
     else:
         raise ValueError('Unknown MoE microbatch revision protocol/version')
     if _digest(plan.get('settings')) != _digest(settings):
@@ -185,7 +228,7 @@ def validate_moe_batch_accounting(gate, step):
     counts = record.get('horizon_update_counts')
     parent = None if not isinstance(source, dict) else source.get('batch_revision')
     valid_parent = (parent is None if record['kind'] == PROTOCOL else
-                    isinstance(parent, dict) and parent.get('kind') == PROTOCOL
+                    isinstance(parent, dict) and parent.get('kind') == _parent_protocol(record['kind'])
                     and record.get('previous_batch_revision_sha256') == parent.get('sha256'))
     if (not isinstance(source, dict) or not valid_parent
             or not _sha(record.get('sha256')) or not _sha(record.get('source_checkpoint_sha256'))
@@ -224,7 +267,7 @@ def bind_moe_batch_revision(state, plan, *, path, sha256, loaded_checkpoint_sha2
         'rng_reset', 'gate_reset', 'historical_counts_rewritten'}
     settings = batch_settings_for_plan(plan)
     protocol = plan['kind']
-    if protocol == MICRO32_PROTOCOL:
+    if protocol != PROTOCOL:
         expected_keys.add('previous_batch_revision_sha256')
     if (set(plan) != expected_keys or not _sha(sha256)
             or type(plan.get('source_optimizer_step')) is not int
@@ -239,10 +282,10 @@ def bind_moe_batch_revision(state, plan, *, path, sha256, loaded_checkpoint_sha2
     gate, step = q['moe_training'], state['global_training_step']
     _validate_gate(gate, step)
     record = gate.get('batch_revision')
-    activating = record is None or protocol == MICRO32_PROTOCOL and record.get('kind') == PROTOCOL
+    activating = record is None or isinstance(record,dict)and record.get('kind')==_parent_protocol(protocol)
     if activating:
         valid_parent = (record is None if protocol == PROTOCOL else
-                        isinstance(record, dict) and record.get('kind') == PROTOCOL
+                        isinstance(record, dict) and record.get('kind') == _parent_protocol(protocol)
                         and plan.get('previous_batch_revision_sha256') == record.get('sha256'))
         if (not valid_parent or step != plan['source_optimizer_step'] or gate['updates'] != plan['source_moe_updates']
                 or loaded_checkpoint_sha256 != plan['source_checkpoint_sha256']
@@ -262,7 +305,7 @@ def bind_moe_batch_revision(state, plan, *, path, sha256, loaded_checkpoint_sha2
             'last_optimizer_step': step, 'updates': 0, 'main_examples': 0, 'main_transitions': 0,
             'horizon_update_counts': {str(h): 0 for h in MOE_HORIZONS},
         }
-        if protocol == MICRO32_PROTOCOL:
+        if protocol != PROTOCOL:
             record['previous_batch_revision_sha256'] = plan['previous_batch_revision_sha256']
         gate.update(batch_revision=record, batch_protocol=protocol)
     elif (record.get('kind') != protocol or record.get('sha256') != sha256
@@ -273,7 +316,7 @@ def bind_moe_batch_revision(state, plan, *, path, sha256, loaded_checkpoint_sha2
             or record.get('source_navigation_replay_revision_sha256') !=
                 plan['source_navigation_replay_revision_sha256']
             or gate['sha256'] != plan['moe_training_plan_sha256']
-            or protocol == MICRO32_PROTOCOL and record.get('previous_batch_revision_sha256') !=
+            or protocol != PROTOCOL and record.get('previous_batch_revision_sha256') !=
                 plan['previous_batch_revision_sha256']):
         raise ValueError('Saved MoE micro16 revision source or plan identity changed')
     _validate_gate(gate, step)

@@ -11,7 +11,9 @@ conditions and losses use that one enemy. The active dynamics run is now
 **three DreamerV3-style RSSMs + a pretrained shared MoE trunk + five private
 Transformer experts** for player, enemy and combat, in
 `training_runs/rssm_moe_nav15_enemy25_cap20_20261113`, continued from5800
-with microbatch32×accumulation1=effective32 and simultaneous three-task training; the earlier
+with simultaneous three-task training. Continuation at6518 is activated with
+microbatch16×accumulation1=effective16 and full450-step gradients after a
+successful GPU capacity check; the earlier
 JEPA dynamics are archived at update **1633**. In the RSSM worker, the locally
 trained image renderer, VQGAN and SR remain frozen. Native **32×32** playback is
 **neural RGB32 → learned SR128 → bilinear512**.
@@ -62,6 +64,32 @@ This command uses the original engine and classical display resizing; neural
 playback is a separate command below.
 
 ## Current RSSM dynamics run
+
+The player-drift repair is activated at the complete **6518 / H450** boundary
+as **PID52644**,14:34:14 Moscow time on14 November. It uses
+**TBPTT450 with16×1=16 MAIN actors**:
+**8 quiet NPC-motion,4 no-enemy navigation and4 combat**, or50%/25%/25%.
+The exact450/B16 GPU check passed11/11: one real update took197.04 seconds,
+with peak9.003GiB allocated and9.254GiB reserved. This was a discarded probe;
+the production preservation check passed28/28, including1599 model tensors,
+442 Adam states/seven groups, old RNG and samplers. The fresh full450 baseline
+completed before SGD, and production update6519 was saved and independently verified. The earlier
+TBPTT64/B32 run was also a discarded probe. The new explicit batch
+and `--player-navigation-plan` give the full15-second trajectory one gradient
+graph, add Player XY supervision to quiet NPC-motion actors, and penalize the
+player's circular footprint and ordered X-then-Y wall path in all three streams.
+Player actor weights are4/16 combat,8/16 quiet and4/16 navigation; NPC losses
+use4/12 and8/12. AUX16 and late-prefix2 remain separate. Four contact actors reuse
+the existing6912 short TRAIN clips, cycling recovery horizons **4/8/16/32**
+from the model's own state and memory. No architecture, Adam or old sampler/RNG
+reset is involved. Old batch counts remain historical; new updates count16
+MAIN actors. A fresh autonomous450 baseline precedes the first update;
+subsequent physical validation remains every250 updates. Whole checkpoints are
+ranked by held-out player drift and wall intersections separately from train
+loss, without automatic game deployment. **The new TOTAL formula is a distinct
+objective revision; old and new values are not directly comparable.** The
+H450 goal remains strict raw TOTAL<1 for ten consecutive updates. Improvement
+has not yet been established. See [H103](README_HISTORY_EN.md#h103-player-contact-repair-and-full-horizon-gradients).
 
 The active dynamics now has **1,005,088 parameters per private role expert**,
 with two Transformer blocks per expert and5,107,388 parameters in the five-role
@@ -119,18 +147,19 @@ windows improved264→1043/1043 spawn labels, including all four offsets. Actual
 neural batches now log all-microbatch per-offset/anchor counts on the dashboard.
 Remaining invalid own geometry is reported rather than corrected by Source.
 
-Every32×1 update trains **Player + Enemy + Combat**. The fixed total is their
+Every planned16×1 update trains **Player + Enemy + Combat**. The fixed total is their
 sum plus0.01 router role CE and0.001 load balancing; no EMA scaling, KL floor,
 reconstruction objective or renderer training is used. Local navigation branches
 have weight0.1 and late own-memory branches weight0.25. Event-balanced TRAIN
 windows use the actual min(H,16) horizon. Source labels supervise the own state;
 future Source states/images never correct the autonomous rollout.
 
-The one MAIN micro has19 combat/8 NPC-motion/5 navigation actors, retaining
-59.375%/25%/15.625% of32. Combat AUX32 and late-prefix4 remain separate, outside
-MAIN percentages. Navigation adds a weighted Player term; pure NPC movement adds
-an Enemy term. The NPC denominator excludes navigation. Historical256- and64-example
-segments retain their actual sizes; new updates add32. Activation at5958 preserved
+The H103 MAIN micro has4 combat/8 NPC-motion/4 navigation actors, retaining
+25%/50%/25% of16. Combat AUX16 and late-prefix2 remain separate, outside
+MAIN percentages. Navigation adds a weighted Player term; in the H103 revision,
+pure NPC movement also supervises player XY/walls, alongside its unchanged
+Enemy term. The NPC denominator excludes navigation. Historical256-,64- and32-example
+segments retain their actual sizes; new updates add16. The earlier32×1 activation at5958 preserved
 the model,360 Adam states, RNG/three sampler streams and H224/stage7; actual5959
 committed one32-example update. See
 [H89](README_HISTORY_EN.md#h89-microbatch32-with-one-accumulation-step);
@@ -140,21 +169,25 @@ preserves the earlier64×4 phase.
 
 The immutable `--moe-plan` selects31 stages:
 **4 → 8 → 16 → 32 → 48 → … → 432 → 448 → 450**.
-The current `--stage-budget-plan` requires **100 completed updates each at H240,
-H368 and H450**, with early loss advancement disabled on those three stages.
-All other stages advance after **5 consecutive completed optimizer updates with
-strict TOTAL loss <0.5 OR20 completed updates at that stage**.
-Loss is computed from one32-example microbatch; a value≥0.5 resets the streak.
-The preceding cap25 activation at5741, when H48 had45 completed updates, caused one boundary advance to
-H64/0 without SGD, preserving the389-update objective clock and prior stage history.
-That earlier threshold revision started its streak at0. At5800, cap20 preserved
-H96/stage9 and objective448. The selected-horizon policy was activated at5947
-without SGD, preserving H208/stage16, MoE595 and its current streak. H450 now
-stops after its mandatory100 updates with `completed_budget`; a low-loss streak
-cannot end it early and neither establishes gameplay quality. The
-previous cap50 and `50+15*N` policies remain historical; the interim100 cap was never activated.
-The original objective/`--moe-plan` is unchanged; model tensors1434, all277 Adam
-states and serialized RNG were preserved. Previews every10 updates use the current H and explicitly
+The current v6 `--stage-budget-plan` keeps **100 mandatory updates at H240 and
+H368**, with their early loss exit disabled. Other nonfinal stages retain
+**5 consecutive completed optimizer updates with strict TOTAL loss < 0.5 OR
+20 completed stage updates**. At the final **H450 there is no update cap**:
+training continues until **10 consecutive completed optimizer updates have
+raw TOTAL train loss strictly below 1**. A value of 1 or greater resets this
+final streak. This is the committed full training objective, with no EMA,
+preview or validation-loss substitution. Reaching 100 updates at H450 no longer
+stops training; only its qualifying streak completes the training goal.
+
+Activation at step 6132 preserved H304 / stage update 1, the complete model,
+named Adam states, RNG, three sampler streams, 32×1 batching and expanded private
+experts. Only the immutable budget-plan CLI value changed; worker 43976 was
+verified healthy at 6136. See
+[H98](README_HISTORY_EN.md#h98-h450-ends-after-ten-total-losses-below-one-without-a-cap).
+The preceding v5 policy requiring 100 H450 updates remains historical, as do
+cap25/cap50 and `50+15*N`; their stage counts and original plan files remain
+preserved. The objective/`--moe-plan` and image assets are unchanged. This
+training-loss goal does not establish gameplay quality. Previews every 10 updates use the current H and explicitly
 pinned five-role NPR29609/Base29209 (stopped local1409,6241 private-geometry
 parameters) with five-expert SR108105/local2000, explicitly selected after recovery5971.
 Full450-transition held-out validation runs every250 updates. See
@@ -164,6 +197,31 @@ The display-only revision resumed the same5816 boundary without SGD; see
 The later selected budgets and renderer revision are recorded in
 [H85](README_HISTORY_EN.md#h85-mandatory100-updates-at-h240-h368-and-h450) and
 [H87](README_HISTORY_EN.md#h87-requested-five-role-npr-in-the-dynamics-preview).
+
+A separate spawn-conditioning append is **activated**: worker **45344** resumed
+the same run from **6412 / H450**, on **http://127.0.0.1:8765/**. The adapter adds **118,736 parameters
+in 12 tensors**: the own next-tick clock is encoded as one of eight three-second
+phases plus its within-phase fraction. Each of eight anchors has an ID, XY,
+player-relative displacement/distance and the existing legality-mask features;
+class nine describes the legal fallback pool. The learned additive nine-way
+residual is zero at activation, before the existing hierarchy. It does not use
+the Source spawn ranking or choose a position by a new hardcoded rule. The
+existing AUX/late spawn CE, three RSSM memories/5232 values, batch32×1 and H450
+loss policy remain unchanged. No rollout is corrected with Source labels.
+The default flag is false, so legacy checkpoints keep their original behavior.
+Resume retains `--spawn-conditioning-plan` pointing to `spawn_conditioning_plan.json`
+(SHA `4d04c39a47c82a874fb891e4faf4bc4c0f9b6a488b0aeea45b44251c4807f5dd`)
+alongside every previous CLI pin. GPU checks passed 16/16, independent CPU migration
+checks 28/28 and initial same-step resume checks 26/26. The zero-initialized
+128-case spawn validation was identical to its parent; improved accuracy is not
+claimed. The first durable update **6413** passed
+[27/27 checks](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/spawn_conditioning_revisions/g6412_af2d46e5c2a4/first_update_verification.json):
+the new branch received gradient0.0298502, all12 new Adam states reached age1
+(442 total), and frozen assets stayed exact. Nine Source respawn events supplied
+supervision. TOTAL3.41244 left the H450 goal streak at0 under the unchanged policy.
+Full validation stays every250 updates, next at6500; spawn accuracy improvement
+has not yet been established.
+See [H101](README_HISTORY_EN.md#h101-learned-clock-and-candidate-spawn-conditioning).
 
 This phase supersedes the earlier pure-XY and forced-long schedules below.
 Its checkpoint is `checkpoints/rssm_world.pt`; stop safely with
@@ -434,7 +492,143 @@ Codec and same-pose diagnostics: **http://127.0.0.1:8780/**.
 See [H54](README_HISTORY_EN.md#h54-student-renderer-training-for-small-enemies-and-walls)
 and [H55](README_HISTORY_EN.md#h55-far-wall-strata-and-preserved-adam-continuation).
 
-The active renderer phase is `training_runs/renderer_rf_expanded_20261113` on
+### Current image training: Base, RF3, VQGAN and SR
+
+Base training continues in `training_runs/base_geometry_20261114` (worker45576).
+The requested order is **Base → RF3 → VQGAN D/post-quant → SR, 3000 updates each**.
+Base's completed661 updates count toward its total3000; the three later stages
+each receive3000 new updates. The ordered supervisor is running as **PID50340**
+under `training_runs/image_chain_20261114`; it adopted Base45576 at1402/3000
+without a reset. Progress remains at **http://127.0.0.1:8784/**.
+The exact command and immutable inputs are in the
+[launch plan](training_runs/image_chain_20261114/launch_plan.json) and
+[ordered plan](training_runs/image_chain_20261114/ordered_plan.json).
+This Base phase trains raw RGB32 first: wall boundaries, corners, occlusion and map
+alignment. Each of the five role experts retains its trained 8D Transformer
+and adds a private Transformer reading the **full 144D screen query** directly:
+width 192, 6 heads, FF314, dropout 0, and a zero-initialized 192→8 output.
+Each expert has **300,058 parameters**. Base grows from **1,001,157 to 2,498,447**
+parameters, adding 1,497,290 in 80 tensors. All old parameter objects are retained;
+the new branch is exactly zero for identical queries and bypasses the old 8D bottleneck.
+
+Only Base trains. RF remains at **30717**, world at **5906**, and the entire
+VQGAN—including D/post-quant update **1725**, E/Q and codebook—stays frozen,
+along with private opacity. No restorer is attached and no RF forward runs in
+this phase. All 537 old Adam states/six groups and three Source sampler streams
+are retained; the 80 new tensors form a fresh seventh group. Each update uses
+MAIN16 + far-wall4×0.25 + geometry8×1. The original2000 phase remains immutable;
+an explicit [budget revision](training_runs/base_geometry_20261114/budget_3000_plan.json)
+extends its effective total to **3000**, without resetting weights, Adam, RNG,
+samplers or best-history. The same-step661 resume passed22 checks. Preview runs
+every 10 and full fixed256 + geometry128 validation every 100.
+Best checkpoints use raw `models.base_new.summary.ssim_mean`, with the earliest
+tie retained and saved report SHA checks on resume. Budget completion is not a
+quality pass. RF starts after Base completes its budget, using the entire best
+checkpoint and its matching export. Next, only D/post-quant trains on RF-Q and
+Source-Q pairs; finally SR refreshes its cache from that selected renderer.
+No restorer is attached. Isolated GPU checks passed RF27, decoder37 and SR19+23;
+all nine test updates were discarded. Each future stage is checked again against
+its actual selected parent before production. See
+[H102](README_HISTORY_EN.md#h102-ordered-base-rf3-decoder-and-sr-training).
+
+The three discarded GPU warmup updates passed; their weights are not production
+weights. Strict format6 reload preserved warm RGB and quantized decoded RGB exactly.
+The initial independent full CUDA forwards have a measured ~1e-6 RGB numerical
+floor; hard quantization can amplify it, so raw and codec branches are reported separately.
+The monitor **http://127.0.0.1:8784/** now shows this healthy Base phase. The
+independent production0/1/2/3/20 audit passed32 checks, preserving frozen assets,
+391 frozen Adam states, all RNG and three sampler clocks. Baseline raw SSIM is
+0.72477; startup itself does not establish improvement. At pinned
+[VAL300](training_runs/base_geometry_20261114/validation/step_000300.json), raw Base
+SSIM rose **0.724772→0.728863** (best300), and frozen-codec reconstruction of its
+output rose **0.711909→0.719740**. Raw wall-boundary L1 was essentially flat and
+slightly worse, **0.0952225→0.0952693**; raw RGB MAE also rose
+0.0376596→0.0380955. These are modest SSIM gains, not repaired wall geometry or
+a quality pass. No new Base/RF weights have been promoted. See
+[H100](README_HISTORY_EN.md#h100-base-first-geometry-with-five-full-query-experts).
+
+With the pinned inputs available, the Base training/resume command is:
+
+```powershell
+$baseRun = 'training_runs/base_geometry_20261114'
+python -m turkeyworld.train_base_geometry --run-dir $baseRun `
+  --world "$baseRun/inputs/world.pt" `
+  --parent-checkpoint "$baseRun/inputs/generator_training.pt" `
+  --renderer-checkpoint "$baseRun/inputs/parent_decoder.pt" `
+  --source-recipe-parent "$baseRun/inputs/source_recipe_parent.pt" `
+  --steps 2000 --threads 2 --seed 173 --device cuda `
+  --budget-revision-plan "$baseRun/budget_3000_plan.json"
+```
+
+Resume uses `checkpoints/base_last.pt` with the same inputs and arguments;
+`base_best.pt` is the full best checkpoint and `base_best_for_preview.pt` is its
+format6 inference export. Its explicit binding states that frozen RF has not
+been adapted to the changed Base. No game or dynamics preview is updated automatically.
+
+### Stopped 7M restorer archive
+
+The preceding phase `training_runs/conditional_restorer_7m_20261114` stopped at
+local **17277** without reaching its goal. Its conditional restorer has **7,000,313 trainable
+parameters in 195 tensors**. The trained 2M parent continues from local update
+800 / cumulative restorer 2189, preserving all 130 Adam states in its two groups,
+including their different ages and options. A separate 384-wide branch, with
+8 heads and FF720 in two attention blocks, adds 5,002,515 parameters and
+65 fresh optimizer states. Its zero output preserves the learned 2M image
+exactly at activation. All restorer branches then train; no padding-only
+parameters were added.
+
+RF3 at cumulative 30717 / local 1108, Base 29209, world 5906, the complete codec
+including decoder/post-quant update 1725, and E/Q/codebook remain frozen. Inputs
+are quantized codes, the decoded/restored RGB32, current state20 and the known
+raw 16×16 material map. Runtime receives no Source image, mask or raycast oracle.
+Each update pairs 8 RF-code and 8 Source-code examples with equal loss weights.
+Its original policy had **no fixed update budget** and targeted
+`models.rf_new.summary.ssim_mean > 0.85` on the pinned full held-out 256-frame
+panel. Exactly 0.85 does not stop training; Source-code scores and train loss do
+not substitute for this RF-image goal. Preview is every 10 updates, validation
+every 100, and best checkpoints follow the same RF-image SSIM.
+
+Production worker 21756 was verified healthy at local 17, cumulative restorer
+2206. Initial full validation measured SSIM **0.744211**, preserving the captured
+2M parent's output; the 0.85 goal is not reached. Capacity expansion alone is
+not a quality improvement. Game and
+dynamics image assets remain unchanged. See
+[H99](README_HISTORY_EN.md#h99-seven-million-parameter-restorer-with-preserved-2m-learning).
+The preceding 2M phase stopped at local 800; its method remains in
+[H97](README_HISTORY_EN.md#h97-expanded-conditional-restorer-near-2m-with-a-strict-ssim-goal).
+The earlier 247k phase stopped at update 1389; see
+[H96](README_HISTORY_EN.md#h96-conditional-restorer-over-a-frozen-rf3-and-decoder).
+
+The archived reproduction entry point was:
+
+```powershell
+$restorerRun = 'training_runs/conditional_restorer_7m_20261114'
+python -m turkeyworld.train_conditional_restorer_7m --run-dir $restorerRun `
+  --world "$restorerRun/inputs/world.pt" --parent-decoder "$restorerRun/inputs/parent_decoder.pt" `
+  --parent-training "$restorerRun/inputs/decoder_training.pt" `
+  --generator-full-checkpoint "$restorerRun/inputs/generator_training.pt" `
+  --source-recipe-parent "$restorerRun/inputs/source_recipe_parent.pt" `
+  --restorer-parent "$restorerRun/inputs/restorer_training.pt" `
+  --batch 8 --lr 0.0001 --device cuda
+```
+
+This entry point has no `--steps` option. Resume from its full
+`checkpoints/restorer_last.pt`, retaining the immutable phase inputs. Best full
+training and inference exports are `restorer_best.pt` and `renderer_best.pt` in
+the same checkpoint directory; the format4 play export is not a resumable Adam
+checkpoint. Do not start a second worker for this run while it is active.
+
+The preceding decoder-only phase is `training_runs/decoder_rf_adaptation_20261114` on
+**http://127.0.0.1:8782/**. Only528,403 decoder/post_quant_conv parameters
+(62 tensors, fresh Adam) trained; each8 Source queries yielded8 frozen RF3 codes
+and8 Source E/Q codes, weighted50/50. RF is stopped at1108/cumulative30717;
+Base29209, world5906, E/Q/codebook, normalization and fixed noise stay exact.
+Budget2000, preview10 and VAL100 use the same Source panels. VAL100 did not
+improve RF images and failed Source-preservation/geometry guards. The phase stopped
+at decoder1725; quality is unqualified and game/dynamics image assets are unchanged.
+See [H95](README_HISTORY_EN.md#h95-decoder-only-adaptation-on-paired-rf-and-source-codes).
+
+The frozen expanded-RF phase is `training_runs/renderer_rf_expanded_20261113` on
 **http://127.0.0.1:8781/**: five RF experts of503,072 parameters each,
 RF9,524,294 total excluding codec, with frozen Base/VQGAN/private opacity/world5906.
 The user's latest choice is **three Euler steps**; budget2000, preview10 and

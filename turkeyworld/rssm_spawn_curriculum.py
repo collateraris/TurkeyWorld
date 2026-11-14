@@ -20,6 +20,7 @@ from .spawn import SPAWN_ANCHORS
 
 ATTACK_BALANCED_PROTOCOL = 'source_attack_positive_negative_balanced_v2'
 MICRO32_CONTINUATION_PROTOCOL = 'source_attack_balanced_micro32_continuation_v1'
+MICRO16_CONTINUATION_PROTOCOL = 'source_attack_balanced_micro16_continuation_v1'
 
 
 def upgrade_attack_balanced_sampler_state(previous):
@@ -236,13 +237,14 @@ class RecoveryCombatSampler:
         self.v2_draws = self.positive_draws = 0
         self.micro16_sampling = None
         self.micro32_sampling = None
+        self.micro16_continuation = None
         self.retained_legacy_ledger = {'draws': 0, 'negative_draws': 0, 'anchor_counts': self.anchor_counts.copy()}
         if self.attack_positive_balanced:
             self.attack_groups = {name: np.asarray(rows, np.int64).reshape(-1, 2) for name, rows in self.attack_groups.items()}
             if not any(len(self.attack_groups[name]) for name in ('positive_near_wall', 'positive_open')):
                 raise ValueError('Attack-balanced TRAIN pool needs genuine future positive attacks')
 
-    def sample(self,count,rng,*,allow_micro32_continuation=False):
+    def sample(self,count,rng,*,allow_micro32_continuation=False,allow_micro16_continuation=False):
         if (not isinstance(count,int) or isinstance(count,bool) or count not in (16,32,64)
                 or count == 64 and not self.attack_positive_balanced):
             raise ValueError('Recovery quotas require B16/B32, or explicit positive-balanced B64')
@@ -251,8 +253,22 @@ class RecoveryCombatSampler:
         if (type(allow_micro32_continuation) is not bool
                 or allow_micro32_continuation and (count!=32 or not self.attack_positive_balanced)):
             raise ValueError('Balanced micro32 continuation requires an explicit positive-balanced B32 draw')
-        if self.micro32_sampling is not None and count!=32:
+        if(type(allow_micro16_continuation)is not bool or allow_micro16_continuation and(
+                count!=16 or not self.attack_positive_balanced or self.micro32_sampling is None
+                or allow_micro32_continuation)):
+            raise ValueError('Balanced micro16 continuation requires an explicit saved-micro32 to B16 transition')
+        if self.micro16_continuation is not None and not allow_micro16_continuation:
+            raise ValueError('Cannot silently disable the saved balanced micro16 continuation policy')
+        if self.micro32_sampling is not None and count!=32 and not allow_micro16_continuation:
             raise ValueError('Cannot silently disable the saved balanced micro32 continuation policy')
+        if allow_micro16_continuation and self.micro16_continuation is None:
+            source=self.state_dict();self._validate_state(source)
+            self.micro16_continuation=dict(kind=MICRO16_CONTINUATION_PROTOCOL,version=1,
+                source_sampler_state=source,
+                source_sampler_state_sha256=hashlib.sha256(json.dumps(source,sort_keys=True).encode()).hexdigest(),
+                # Preserve the next B32 miss-stratum phase across two B16
+                # draws; old16/old32 counters remain immutable history.
+                rotation_base_batches=2*((self.v2_draws//32)%2),draws=0,batches=0)
         if allow_micro32_continuation and self.micro32_sampling is None:
             source=self.state_dict()
             self.micro32_sampling=dict(kind=MICRO32_CONTINUATION_PROTOCOL,version=1,
@@ -262,10 +278,11 @@ class RecoveryCombatSampler:
         micro16 = self.attack_positive_balanced and count == 16
         if self.micro16_sampling is not None and not micro16 and self.micro32_sampling is None:
             raise ValueError('Cannot silently disable the saved balanced micro16 sampling policy')
-        if micro16 and self.micro16_sampling is None:
+        if micro16 and self.micro16_sampling is None and self.micro16_continuation is None:
             self.micro16_sampling = dict(kind='source_attack_balanced_micro16_v1',version=1,
                 source_v2_draws=self.v2_draws,draws=0,batches=0)
-        micro16_index = self.micro16_sampling['batches'] if micro16 else None
+        micro16_index=((self.micro16_continuation['rotation_base_batches']+self.micro16_continuation['batches'])
+            if self.micro16_continuation is not None else self.micro16_sampling['batches']if micro16 else None)
         factor = count//32 if self.attack_positive_balanced else 1
         quarter=count//4
         spawned=[];chosen=[]
@@ -361,12 +378,17 @@ class RecoveryCombatSampler:
                 actual_attack_future_event_counts={name: int(sum(self.attack_masks[int(ep)][name][int(start)+self.context-1:int(start)+self.context-1+self.horizon].sum()
                     for ep,start in pairs)) for name in self.attack_groups},
                 attack_counts_include_duplicate_draws=True)
-            if micro16:
+            if self.micro16_continuation is not None:
+                self.micro16_continuation['draws']+=16;self.micro16_continuation['batches']+=1
+                self.last_sample.update(runtime_batch_size=16,micro16_continuation_policy=MICRO16_CONTINUATION_PROTOCOL,
+                    micro16_continuation_batch_index=self.micro16_continuation['batches']-1,
+                    micro16_rotation_index=micro16_index)
+            elif micro16:
                 self.micro16_sampling['draws']+=16;self.micro16_sampling['batches']+=1
                 self.last_sample.update(runtime_batch_size=16,
                     micro16_sampling_policy='source_attack_balanced_micro16_v1',
                     micro16_batch_index=micro16_index)
-            if self.micro32_sampling is not None:
+            if self.micro32_sampling is not None and self.micro16_continuation is None:
                 batch_index=self.micro32_sampling['batches']
                 self.micro32_sampling['draws']+=32;self.micro32_sampling['batches']+=1
                 self.last_sample.update(runtime_batch_size=32,
@@ -384,9 +406,37 @@ class RecoveryCombatSampler:
                 result['micro16_sampling']=deepcopy(self.micro16_sampling)
             if self.micro32_sampling is not None:
                 result['micro32_sampling']=deepcopy(self.micro32_sampling)
+            if self.micro16_continuation is not None:
+                result['micro16_continuation']=deepcopy(self.micro16_continuation)
         return result
 
     def _validate_state(self,state):
+        continuation=state.get('micro16_continuation')
+        if continuation is not None:
+            expected={'kind','version','source_sampler_state','source_sampler_state_sha256',
+                'rotation_base_batches','draws','batches'}
+            if(not self.attack_positive_balanced or not isinstance(continuation,dict)or set(continuation)!=expected
+                    or continuation.get('kind')!=MICRO16_CONTINUATION_PROTOCOL or continuation.get('version')!=1
+                    or any(type(continuation.get(key))is not int or continuation[key]<0 for key in('draws','batches','rotation_base_batches'))
+                    or continuation['draws']!=16*continuation['batches']
+                    or not isinstance(continuation.get('source_sampler_state'),dict)
+                    or 'micro16_continuation'in continuation['source_sampler_state']):
+                raise ValueError('Balanced micro16 continuation source/draw ledger changed')
+            source=continuation['source_sampler_state'];source_counts=self._validate_state(source)
+            if(not isinstance(source.get('micro32_sampling'),dict)
+                    or hashlib.sha256(json.dumps(source,sort_keys=True).encode()).hexdigest()!=continuation['source_sampler_state_sha256']
+                    or continuation['rotation_base_batches']!=2*((source['v2_draws']//32)%2)
+                    or any(state.get(key)!=source.get(key)for key in('version','protocol','micro16_sampling','micro32_sampling',
+                        'retained_legacy_ledger','retained_legacy_ledger_sha256'))
+                    or any(type(state.get(key))is not int or state[key]!=source[key]+continuation['draws']//factor
+                        for key,factor in(('draws',1),('v2_draws',1),('negative_draws',4),('positive_draws',4)))):
+                raise ValueError('Balanced micro16 continuation changed its immutable saved-micro32 history')
+            counts={int(key):value for key,value in state.get('anchor_counts',{}).items()}
+            if(set(counts)!=set(self.anchor_counts)or any(type(value)is not int or value<source_counts[key]
+                    for key,value in counts.items())or sum(counts.values())!=state['negative_draws']
+                    or state['draws']!=4*state['negative_draws']):
+                raise ValueError('Balanced micro16 continuation anchor/event counters changed')
+            return counts
         if self.attack_positive_balanced:
             old = state.get('retained_legacy_ledger', {})
             micro16=state.get('micro16_sampling')
@@ -448,6 +498,7 @@ class RecoveryCombatSampler:
             self.retained_legacy_ledger = deepcopy(state['retained_legacy_ledger'])
             self.micro16_sampling=deepcopy(state.get('micro16_sampling'))
             self.micro32_sampling=deepcopy(state.get('micro32_sampling'))
+            self.micro16_continuation=deepcopy(state.get('micro16_continuation'))
 
     def summary(self,*,batch_size=16):
         if (not isinstance(batch_size,int) or isinstance(batch_size,bool) or batch_size not in (16,32,64)
