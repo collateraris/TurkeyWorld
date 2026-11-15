@@ -113,6 +113,12 @@ class MotionOnlyTraining(RSSMCombatTraining):
             elif previous_drift['plan_sha256']!=file_sha(drift_path) or previous_drift['plan']!=drift_plan:
                 raise ValueError('Enemy drift revision plan changed')
         revision=bind_motion_only(self.state,plan,path=args.motion_plan,loaded_sha=loaded_sha)
+        from .rssm_motion_round_schedule import read_revision
+        schedule=read_revision(self.root/'motion_round_schedule.json',revision.get('round_schedule_revision'))
+        if schedule is not None:
+            if revision.get('round_schedule_revision') is None and schedule['plan']['effective_round']<=revision['gate']['round_index']:
+                raise ValueError('A new schedule cannot reinterpret the current round')
+            revision['round_schedule_revision']=schedule
         if args.round_corpus is not None:
             receipt=json.loads(args.round_corpus.read_text(encoding='utf-8'))
             if not any(row['sha256']==digest(receipt)for row in revision['corpus_revisions']):

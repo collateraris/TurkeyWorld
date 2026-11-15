@@ -119,6 +119,14 @@ class MotionCycle:
             completed_rounds=0,started_at=now(),active_pid=None)
         if self.state['protocol']!=PROTOCOL:raise ValueError('Unknown cycle state')
         self.state['plan_sha256']=sha(plan)
+        from .rssm_motion_round_schedule import read_revision
+        self.round_schedule_revision=read_revision(args.world_run/'motion_round_schedule.json',self.state.get('round_schedule_revision'))
+        if self.round_schedule_revision is not None:self.state['round_schedule_revision']=self.round_schedule_revision
+
+    def world_budget(self):
+        from .rssm_motion_round_schedule import schedule_for_round
+        schedule=schedule_for_round(getattr(self,'round_schedule_revision',None),self.state['round_index'])
+        return schedule['world_updates_per_round'] if schedule else 180
 
     def publish(self,*,mirror=False):
         self.state['updated_at']=now();atomic(self.status_path,self.state)
@@ -237,12 +245,13 @@ class MotionCycle:
         return path
 
     def world(self,directory):
+        budget=self.world_budget();self.state['world_target_updates']=budget
         path=self.args.world_run/'status.json'
         def current():return read(path)
         def finished():
             row=current();r=row.get('rssm_training',{}).get('motion_only_revision',{})
             return(row.get('status')=='world_round_complete'and r.get('gate',{}).get('round_index')==self.state['round_index']
-                and r.get('gate',{}).get('updates')==180)
+                and r.get('gate',{}).get('updates')==budget)
         def progress():
             row=current();r=row.get('rssm_training',{}).get('motion_only_revision',{})
             if r.get('gate',{}).get('round_index')==self.state['round_index']:
@@ -255,7 +264,7 @@ class MotionCycle:
         final=current();self.state.update(world_step=final['global_training_step'],
             trained_world_sha256=sha(self.args.world_run/'checkpoints/rssm_world.pt'))
         atomic(directory/'world_complete.json',dict(step=self.state['world_step'],
-            sha256=self.state['trained_world_sha256'],world_updates=180,budget_is_quality_pass=False))
+            sha256=self.state['trained_world_sha256'],world_updates=budget,budget_is_quality_pass=False))
 
     def policy(self,directory):
         path=self.args.policy_run/'status.json'

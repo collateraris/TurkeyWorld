@@ -12,6 +12,7 @@ import re
 
 from .rssm_main_ladder_revision import digest,file_sha
 from .workspace_paths import resolve_path,identity_path
+from .rssm_motion_round_schedule import gate_schedule,schedule_for_round
 
 PROTOCOL='rssm_motion_only_main16_v1'
 HORIZONS=(16,48,80,112,144,180)
@@ -84,10 +85,11 @@ def motion_only_plan(saved,*,source_checkpoint,source_checkpoint_sha256,navdir,e
         all_weights_named_Adam_RNG_and_lineage_preserved=True,new_formula_history_separate=True))
 
 
-def _new_gate(source_step,round_index):
-    return dict(round_index=round_index,source_optimizer_step=source_step,last_optimizer_step=source_step,
-        updates=0,stage_index=0,current_horizon=HORIZONS[0],stage_updates=0,
-        horizon_update_counts={str(h):0 for h in HORIZONS},advance_history=[],completed=False,
+def _new_gate(source_step,round_index,schedule=None):
+    horizons,_,_=gate_schedule({} if schedule is None else dict(schedule=schedule))
+    return dict(**({} if schedule is None else dict(schedule=deepcopy(schedule))),round_index=round_index,source_optimizer_step=source_step,last_optimizer_step=source_step,
+        updates=0,stage_index=0,current_horizon=horizons[0],stage_updates=0,
+        horizon_update_counts={str(h):0 for h in horizons},advance_history=[],completed=False,
         completion_reason=None,quality_passed=False,last_loss=None)
 
 
@@ -134,25 +136,26 @@ bind_motion_only_revision=bind_motion_only
 
 
 def _validate_gate(gate):
+    horizons,stage_updates,round_updates=gate_schedule(gate)
     index=gate.get('stage_index');updates=gate.get('updates');counts=gate.get('horizon_update_counts',{})
-    if(type(index)is not int or not 0<=index<len(HORIZONS)or type(updates)is not int or not 0<=updates<=ROUND_UPDATES
-            or gate.get('current_horizon')!=HORIZONS[index]or set(counts)!={str(h)for h in HORIZONS}
-            or any(type(n)is not int or not 0<=n<=STAGE_UPDATES for n in counts.values())
-            or sum(counts.values())!=updates or gate.get('stage_updates')!=counts[str(HORIZONS[index])]
-            or any(counts[str(h)]!=STAGE_UPDATES for h in HORIZONS[:index])
-            or any(counts[str(h)]!=0 for h in HORIZONS[index+1:])
+    if(type(index)is not int or not 0<=index<len(horizons)or type(updates)is not int or not 0<=updates<=round_updates
+            or gate.get('current_horizon')!=horizons[index]or set(counts)!={str(h)for h in horizons}
+            or any(type(n)is not int or not 0<=n<=stage_updates for n in counts.values())
+            or sum(counts.values())!=updates or gate.get('stage_updates')!=counts[str(horizons[index])]
+            or any(counts[str(h)]!=stage_updates for h in horizons[:index])
+            or any(counts[str(h)]!=0 for h in horizons[index+1:])
             or type(gate.get('round_index'))is not int or gate['round_index']<0
             or gate.get('last_optimizer_step')!=gate['source_optimizer_step']+updates):
         raise ValueError('Motion-only exact30-stage or round optimizer accounting changed')
-    done=updates==ROUND_UPDATES
+    done=updates==round_updates
     if(gate.get('completed')is not done or gate.get('quality_passed')is not False
             or gate.get('completion_reason')!=('world_round_complete'if done else None)
-            or not done and gate['stage_updates']>=STAGE_UPDATES or len(gate.get('advance_history',[]))!=index):
+            or not done and gate['stage_updates']>=stage_updates or len(gate.get('advance_history',[]))!=index):
         raise ValueError('Motion-only round completion must not be loss/quality gated')
     for i,row in enumerate(gate['advance_history']):
-        if(row.get('from_horizon')!=HORIZONS[i]or row.get('to_horizon')!=HORIZONS[i+1]
-                or row.get('stage_updates')!=STAGE_UPDATES or row.get('reason')!='fixed_stage_updates'
-                or row.get('step')!=gate['source_optimizer_step']+STAGE_UPDATES*(i+1)):
+        if(row.get('from_horizon')!=horizons[i]or row.get('to_horizon')!=horizons[i+1]
+                or row.get('stage_updates')!=stage_updates or row.get('reason')!='fixed_stage_updates'
+                or row.get('step')!=gate['source_optimizer_step']+stage_updates*(i+1)):
             raise ValueError('Motion-only horizon advance changed its exact update boundary')
 
 
@@ -166,10 +169,14 @@ def validate_motion_only(state):
         if key in source and key in state['rssm_training']and digest(source[key])!=digest(state['rssm_training'][key]):
             raise ValueError('Motion-only training rewrote an opaque parent training ledger')
     rounds=[*r.get('round_history',[]),r['gate']]
+    cumulative_source=r['source_optimizer_step']
     for i,gate in enumerate(rounds):
         _validate_gate(gate)
-        if(gate['round_index']!=i or gate['source_optimizer_step']!=r['source_optimizer_step']+ROUND_UPDATES*i
+        expected_schedule=schedule_for_round(r.get('round_schedule_revision'),i)
+        if gate.get('schedule')!=expected_schedule:raise ValueError('Round differs from its pinned schedule revision')
+        if(gate['round_index']!=i or gate['source_optimizer_step']!=cumulative_source
                 or i<len(rounds)-1 and not gate['completed']):raise ValueError('Motion-only serial round history changed')
+        cumulative_source+=gate_schedule(gate)[2]
     if(sum(g['updates']for g in rounds)!=r['updates']or r['gate']['last_optimizer_step']!=step
             or r['main_examples']!=16*r['updates']
             or r['main_transitions']!=16*sum(int(h)*n for g in rounds for h,n in g['horizon_update_counts'].items())
@@ -244,11 +251,12 @@ def commit_motion_only(state,*,step,loss,nav_sampler_state,enemy_sampler_state,m
     # partial/foreign update must leave a retryable exact pre-commit boundary.
     gate['updates']+=1;gate['stage_updates']+=1;gate['horizon_update_counts'][str(horizon)]+=1
     gate.update(last_optimizer_step=step,last_loss=float(loss))
-    if gate['stage_updates']==STAGE_UPDATES:
-        if old<len(HORIZONS)-1:
-            gate['advance_history'].append(dict(step=step,from_horizon=horizon,to_horizon=HORIZONS[old+1],
-                stage_updates=STAGE_UPDATES,reason='fixed_stage_updates',loss_diagnostic=float(loss)))
-            gate.update(stage_index=old+1,current_horizon=HORIZONS[old+1],stage_updates=0)
+    horizons,stage_updates,_=gate_schedule(gate)
+    if gate['stage_updates']==stage_updates:
+        if old<len(horizons)-1:
+            gate['advance_history'].append(dict(step=step,from_horizon=horizon,to_horizon=horizons[old+1],
+                stage_updates=stage_updates,reason='fixed_stage_updates',loss_diagnostic=float(loss)))
+            gate.update(stage_index=old+1,current_horizon=horizons[old+1],stage_updates=0)
         else:gate.update(completed=True,completion_reason='world_round_complete')
     r.update(updates=r['updates']+1,last_optimizer_step=step,nav_sampler_state=deepcopy(nav_sampler_state),
         enemy_sampler_state=deepcopy(enemy_sampler_state),main_examples=r['main_examples']+16,
@@ -285,7 +293,8 @@ def begin_motion_round(state,corpus_receipt):
     if not r['gate']['completed']:raise ValueError('A serial cycle cannot skip unfinished motion horizons')
     attach_corpus(state,corpus_receipt)
     r['round_history'].append(deepcopy(r['gate']))
-    r['gate']=_new_gate(state['global_training_step'],len(r['round_history']))
+    r['gate']=_new_gate(state['global_training_step'],len(r['round_history']),
+        schedule_for_round(r.get('round_schedule_revision'),len(r['round_history'])))
     validate_motion_only(state);publish_contract(state)
     return r['gate']
 
@@ -296,6 +305,8 @@ def publish_contract(state):
     state.setdefault('training_protocol',{}).update(motion_only_revision=dict(protocol=PROTOCOL,
         plan_sha256=r['sha256'],**motion_only_settings()),microbatch_size=16,gradient_accumulation_steps=1,
         effective_batch_size=16,tbptt=gate['current_horizon'],active_objective_formula_revision=PROTOCOL)
+    state['training_protocol']['active_round_schedule']=dict(horizons=list(gate_schedule(gate)[0]),
+        updates_per_stage=gate_schedule(gate)[1],world_updates_per_round=gate_schedule(gate)[2])
     return r
 
 
