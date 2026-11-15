@@ -4615,6 +4615,52 @@ negative mutation cases, and the validation-pin helper passed8 CPU tests.
 These are local, mostly ignored training artifacts; budget completion and
 improved imagined reward do not certify Source gameplay quality.
 
+## H113 — Serial-cycle recovery and locked-screen background work (2026-11-15, Moscow)
+
+The user asked to confirm that Source collection, world training and policy
+training really follow one another, and to keep working while Windows is
+locked. Inspection found that controller **PID22908** had failed with
+`PermissionError: [Errno 13]` while reading the dynamics `status.json`. Its last
+recorded world progress was158. The independent world worker had nevertheless
+completed **all180 updates**, including **H180/30**, at **7053**; policy was
+still stopped at **learner200 / actor100**. The completed world round was retained.
+
+The controller now retries temporary Windows file-sharing `PermissionError`s
+for reads, hashing, temporary writes and `os.replace`: at most **24 attempts**,
+with backoff from **0.025s** to **0.5s**. Permanent failure leaves the last good
+atomic status file intact and cleans up the controller's temporary file.
+Recovery archives the old error as `previous_error` and clears the active
+error. **20 CPU tests passed**, including transient/permanent failures,
+completed-world recovery without another SGD update or Source collection, and
+the unchanged absolute policy target150. User stop markers keep their existing
+meaning; ordinary recovery does not clear them.
+
+Recovered controller **PID31580** recognized the completed world and launched
+policy child **PID51360**. Policy explicitly rebound to world **7053**, performed
+**20 reward/continue head updates +50 actual actor/critic updates**, and finished
+at **learner270 / actor150**. This completed the first real outer cycle. The
+world checkpoint SHA256 was
+`4a0bd3e5428ec595cc9814932476d24569438aa7f4f1e9d780a599c26b5f613f`;
+the completed policy checkpoint SHA256 was
+`11f76158a1ef6a677bd924c3a2bf7a70a835ee432ad53554ee6ed618bbd36ffc`.
+
+The next collection then used **policy270 / world7053** and completed another
+**32 Source TRAIN episodes /5760 real transitions**:16 navigation +16 quiet
+enemy, each180 transitions. Dynamics child **PID52852** started outer round1
+from **7053 /H16**, with its fresh stage counter0. Existing weights, Adam states
+and earlier corpora continued; neither the first world round nor its collection
+was repeated. Completion of these budgets does not certify gameplay quality.
+
+All stages run headlessly under **KeepAwake/SystemRequired**, without requiring
+the display or an unlocked game window. Locking the Windows screen leaves these
+background workers running in the logged-in session.
+
+Fixed handoffs: [first world completion](training_runs/dreamer_motion_cycle_20261114/cycles/cycle_000000/world_complete.json),
+[first policy completion](training_runs/dreamer_motion_cycle_20261114/cycles/cycle_000000/policy_complete.json),
+[next Source collection](training_runs/dreamer_motion_cycle_20261114/cycles/cycle_000001/source/collection_receipt.json).
+These local artifacts document executed stages; the live status files continue
+to change as the second round progresses.
+
 ## Continuing this journal
 
 Add each new H stage to both language versions, preserving earlier results.

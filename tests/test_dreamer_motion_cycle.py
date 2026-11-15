@@ -1,6 +1,7 @@
 """Serial handoffs and recovery, with no real subprocess, CUDA or live files."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -63,6 +64,89 @@ class MotionCycleTests(unittest.TestCase):
         restored.policy=Mock();restored.run()
         restored.collect.assert_not_called();restored.world.assert_not_called();restored.policy.assert_called_once()
         self.assertEqual(restored.state['completed_rounds'],1)
+
+    def test_transient_windows_permission_error_read_retries_then_reads_same_complete_json(self):
+        target=self.root/'locked_status.json';target.write_text('{"world_updates":180}',encoding='utf-8')
+        original=Path.read_text;attempts=[]
+        def sharing_violation(path,*args,**kwargs):
+            if Path(path)==target:
+                attempts.append(1)
+                if len(attempts)<=2:raise PermissionError(13,'Temporary Windows sharing violation',str(path))
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'read_text',autospec=True,side_effect=sharing_violation):
+            self.assertEqual(read(target),dict(world_updates=180))
+        self.assertEqual(len(attempts),3)
+
+    def test_persistent_read_permission_failure_is_bounded_and_preserves_last_good_file(self):
+        target=self.root/'locked_status.json';target.write_text('{"world_updates":158}',encoding='utf-8')
+        before=target.read_bytes();attempts=[];original=Path.read_text
+        def locked(path,*args,**kwargs):
+            if Path(path)==target:
+                attempts.append(1)
+                if len(attempts)>64:raise AssertionError('Persistent I/O retry must be bounded')
+                raise PermissionError(13,'Persistent Windows sharing violation',str(path))
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'read_text',autospec=True,side_effect=locked):
+            with self.assertRaises(PermissionError):read(target)
+        self.assertGreater(len(attempts),1);self.assertLessEqual(len(attempts),64)
+        self.assertEqual(target.read_bytes(),before)
+
+    def test_transient_atomic_replace_retries_without_exposing_partial_status(self):
+        target=self.root/'replace_status.json';atomic(target,dict(world_updates=158))
+        original=os.replace;attempts=[]
+        def sharing_violation(source,destination,*args,**kwargs):
+            attempts.append(1)
+            if len(attempts)<=2:
+                self.assertEqual(json.loads(target.read_text()),dict(world_updates=158))
+                raise PermissionError(13,'Temporary Windows sharing violation',str(destination))
+            return original(source,destination,*args,**kwargs)
+        with patch('turkeyworld.dreamer_motion_cycle.os.replace',side_effect=sharing_violation):
+            atomic(target,dict(world_updates=180,complete=True))
+        self.assertEqual(len(attempts),3);self.assertEqual(read(target),dict(world_updates=180,complete=True))
+
+    def test_persistent_atomic_replace_failure_is_bounded_and_retains_last_good_status(self):
+        target=self.root/'replace_status.json';atomic(target,dict(world_updates=158));before=target.read_bytes();attempts=[]
+        def locked(*args,**kwargs):
+            attempts.append(1)
+            if len(attempts)>64:raise AssertionError('Persistent atomic retry must be bounded')
+            self.assertEqual(target.read_bytes(),before)
+            raise PermissionError(13,'Persistent Windows sharing violation',str(target))
+        with patch('turkeyworld.dreamer_motion_cycle.os.replace',side_effect=locked):
+            with self.assertRaises(PermissionError):atomic(target,dict(world_updates=180))
+        self.assertGreater(len(attempts),1);self.assertLessEqual(len(attempts),64)
+        self.assertEqual(target.read_bytes(),before);self.assertEqual(read(target),dict(world_updates=158))
+        self.assertFalse(list(target.parent.glob(target.name+'.*.tmp')))
+
+    def test_failed_progress158_resumes_completed_world7053_without_world_sgd_then_actor_target150(self):
+        cycle=self.controller();cycle.state.update(status='failed',phase='world_training',initial_flags_retired=True,
+            world_updates=158,error='PermissionError reading world status',source_receipt='cached_Source_receipt.json')
+        cycle.publish()
+        atomic(self.args.world_run/'status.json',dict(status='world_round_complete',global_training_step=7053,
+            rssm_training=dict(motion_only_revision=dict(gate=dict(round_index=0,updates=180,current_horizon=180,
+                completed=True,stage_updates=30)))))
+        restored=self.controller();restored.collect=Mock(side_effect=AssertionError('Source collection must not repeat'))
+        real_execute=restored.execute;world_commands=[];policy_commands=[]
+        def execute(directory,name,command,*,finished,progress):
+            if name=='world':
+                world_commands.append(command);self.assertTrue(finished())
+                return real_execute(directory,name,command,finished=finished,progress=progress)
+            self.assertEqual(name,'policy');policy_commands.append(command)
+            self.assertFalse(finished());target=command[command.index('--until-actor-updates')+1]
+            self.assertEqual(target,'150');self.assertIn('--refresh-world-now',command)
+            self.assertEqual(command[command.index('--cycle-corpus')+1],'cached_Source_receipt.json')
+            atomic(self.args.policy_run/'status.json',dict(status='completed',actor_updates=150,step=270,
+                world_sha256=restored.state['trained_world_sha256']))
+            progress();self.assertTrue(finished())
+        restored.execute=Mock(side_effect=execute);restored.run()
+        self.popen.assert_not_called();restored.collect.assert_not_called()
+        self.assertEqual(len(world_commands),1);self.assertEqual(len(policy_commands),1)
+        handoff=read(restored.root/'cycles/cycle_000000/world_complete.json')
+        self.assertEqual((handoff['step'],handoff['world_updates']),(7053,180))
+        self.assertFalse(handoff['budget_is_quality_pass'])
+        self.assertEqual(read(restored.root/'cycles/cycle_000000/policy_complete.json')['actor_updates'],150)
+        self.assertEqual((restored.state['status'],restored.state['completed_rounds']),('completed',1))
+        self.assertNotIn('error',restored.state)
+        self.assertEqual(restored.state['previous_error']['error'],'PermissionError reading world status')
 
     def test_initial_authorized_stop_retirement_never_removes_later_user_stops(self):
         cycle=self.controller()

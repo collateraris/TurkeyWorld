@@ -23,17 +23,37 @@ ROOT=Path(__file__).resolve().parents[1]
 PROTOCOL='dreamer_motion_Source_world_policy_cycle_v1'
 DEFAULT_WORLD=ROOT/'training_runs/rssm_moe_nav15_enemy25_cap20_20261113'
 DEFAULT_POLICY=ROOT/'training_runs/dreamer_actor_critic_20261114'
+IO_ATTEMPTS=24
+IO_INITIAL_DELAY=.025
+IO_MAX_DELAY=.5
 
 
 def now():return datetime.now(timezone.utc).isoformat()
-def read(path):return json.loads(Path(path).read_text(encoding='utf-8'))
+def retry_shared_file(operation):
+    """Windows may briefly deny access while a status file is atomically replaced."""
+    delay=IO_INITIAL_DELAY
+    for attempt in range(IO_ATTEMPTS):
+        try:return operation()
+        except PermissionError:
+            if attempt+1==IO_ATTEMPTS:raise
+            time.sleep(delay);delay=min(delay*2,IO_MAX_DELAY)
+
+def read(path):return json.loads(retry_shared_file(lambda:Path(path).read_text(encoding='utf-8')))
 def sha(path):
-    with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    def calculate():
+        with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    return retry_shared_file(calculate)
 def atomic(path,value):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     temporary=path.with_name(path.name+f'.{os.getpid()}.tmp')
-    temporary.write_text(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
-    os.replace(temporary,path)
+    body=json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)
+    try:
+        retry_shared_file(lambda:temporary.write_text(body,encoding='utf-8'))
+        retry_shared_file(lambda:os.replace(temporary,path))
+    except BaseException:
+        try:temporary.unlink(missing_ok=True)
+        except OSError:pass
+        raise
 def alive(pid):
     if not pid:return False
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -112,6 +132,9 @@ class MotionCycle:
             self.args.policy_run/'stop.request')if name=='policy'else None
         if(self.root/'stop.request').exists()or(child_stop is not None and child_stop.exists()):
             raise InterruptedError('Serial cycle stopped before launching its next child')
+        if self.state.get('error'):
+            self.state['previous_error']=dict(error=self.state.pop('error'),recovered_at=now())
+        self.state['status']='running'
         if finished():
             progress();self.state['active_pid']=None;self.publish(mirror=True);return
         launch_path=directory/(name+'_launch.json')
