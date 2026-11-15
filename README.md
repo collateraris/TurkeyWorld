@@ -6,6 +6,15 @@ English | [Русский](README_RU.md)
 
 Experimental neural upscaler128×128: neural-renderer inputs above, textured output with separate weapon below. User screenshot; perspective and grass-edge errors remain.
 
+**Video: navigation from six starting positions — 36 seconds.**
+
+[![Watch original versus neural gameplay](docs/videos/navigation-six-starts-8873-sr7000.jpg)](docs/videos/navigation-six-starts-8873-sr7000.mp4)
+
+[Watch / download MP4](docs/videos/navigation-six-starts-8873-sr7000.mp4) · [Recording verification](docs/videos/navigation-six-starts-8873-sr7000.json).
+Original left, autonomous neural game right: dynamics8873, experimental SR7000.
+Six6-second clips, no enemies or firing, identical controls.
+Offline simulation-time recording at30fps; this is not a performance benchmark.
+
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
 **Training resumed on Ubuntu.** World weights/Adam/RNG resumed from8111 and

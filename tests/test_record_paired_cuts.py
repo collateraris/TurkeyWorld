@@ -20,3 +20,13 @@ class PairedCutsTests(unittest.TestCase):
     def test_composite_is_even_sized_and_discloses_offline_timing(self):
         image=compose(np.zeros((512,512,3),np.uint8),np.zeros((512,512,3),np.uint8),scenes()[0],0,8433,9000)
         self.assertEqual(image.shape,(640,1080,3));self.assertEqual(image.dtype,np.uint8)
+
+    def test_six_navigation_starts_are_distinct_and_have_no_enemies(self):
+        cuts=scenes('navigation-six');self.assertEqual(len(cuts),6)
+        self.assertEqual(len({tuple(s['player']) for s in cuts}),6)
+        for scene in cuts:
+            self.assertFalse(scene['chase']);self.assertEqual(scene['total'],6)
+            game=scene_factory(scene)(seed=scene['seed'],endless=True,enemies_enabled=False)
+            for tick in range(180):
+                action=action_at(scene,tick);self.assertEqual(action[3],0);game.step(action,dt=1/30)
+                self.assertFalse(game.enemies_enabled);self.assertEqual(game.player['hp'],100)
