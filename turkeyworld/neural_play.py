@@ -14,6 +14,7 @@ from dataclasses import replace
 import json
 import math
 from pathlib import Path
+from .workspace_paths import resolve_path
 import time
 
 import numpy as np
@@ -62,6 +63,8 @@ def _arguments(argv=None):
     p.add_argument("--output", type=Path, help="Save the last neural frame as PNG.")
     p.add_argument("--stats", type=Path, help="Also write the JSON report to this path.")
     a = p.parse_args(argv)
+    for key,value in vars(a).items():
+        if isinstance(value,Path):setattr(a,key,resolve_path(value))
     if a.max_catchup_steps is None:
         a.max_catchup_steps = 1 if a.two_stage_upscale else 4
     if a.display_size is None and not a.two_stage_upscale:

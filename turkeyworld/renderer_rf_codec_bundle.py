@@ -1,6 +1,7 @@
 """RF-only format5 overlay on the exact adapted-decoder format3 parent."""
 from copy import deepcopy
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -156,7 +157,7 @@ def load_rf_codec_renderer_payload(teacher, payload, *, checkpoint,
     flow._check_codec()
     flow.eval()
     metadata = {k:deepcopy(v) for k,v in payload.items() if k not in {'parent_bundle', 'rf_override'}}
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     flow._renderer_rf_codec = deepcopy(metadata)
     flow._renderer_rf_codec_parent_bundle = deepcopy(parent)
     if hasattr(teacher, 'base_student'):

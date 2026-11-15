@@ -10,6 +10,8 @@ htmlcov/
 .tox/
 .nox/
 .venv/
+/.venv-ubuntu/
+/.venv-ubuntu-cpu/
 venv/
 env/
 *.egg-info/

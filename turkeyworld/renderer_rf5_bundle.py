@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .workspace_paths import identity_path
 import re
 import time
 
@@ -280,7 +281,7 @@ def load_rf5_renderer_payload(teacher, payload, *, checkpoint,
     if _hash_tensors(teacher.flow_renderer.codec.state_dict()) == _hash_tensors(flow.codec.state_dict()):
         flow.codec = teacher.flow_renderer.codec
     metadata = {k: deepcopy(v) for k, v in payload.items() if k not in {'model', 'parent_bundle'}}
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     teacher.flow_renderer = flow
     teacher.base_student = private.base_student
     teacher.base_student_metadata = private.base_student_metadata

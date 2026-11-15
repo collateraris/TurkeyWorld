@@ -1,0 +1,7 @@
+# Linux application packages matching the saved Windows reference.
+# Install torch==2.11.0 and torchvision==0.26.0 from the selected official
+# PyTorch cu128/CPU index first; scripts/setup_ubuntu.sh performs those steps.
+numpy==2.5.2
+Pillow==12.3.0
+pygame==2.6.1
+lpips==0.1.4

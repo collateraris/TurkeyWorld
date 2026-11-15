@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -212,7 +213,7 @@ def load_decoder_adaptation_payload(teacher, payload, *, checkpoint,
             raise ValueError('Loaded compact Base differs from decoder-adaptation parent')
         private.base_student = teacher.base_student
     metadata = deepcopy(flow._renderer_decoder_adaptation)
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     teacher.flow_renderer = flow
     teacher.base_student = private.base_student
     teacher.base_student_metadata = private.base_student_metadata

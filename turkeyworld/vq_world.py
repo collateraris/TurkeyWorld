@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 from torch.nn import functional as F
@@ -141,7 +142,7 @@ def validate_frozen_codec(checkpoint, *, require_qualified=True, accept_user_req
                           expected_image_size=None):
     """Validate the compact codec alone, without loading a world checkpoint."""
     saved, codec, fingerprint = _load_codec(checkpoint, require_qualified, accept_user_requested, expected_image_size)
-    return {'checkpoint': str(Path(checkpoint).resolve()), 'codec_config': codec.get_config(),
+    return {'checkpoint': identity_path(checkpoint), 'codec_config': codec.get_config(),
         'codec_fingerprint': fingerprint, 'quality_gate': saved.get('quality_gate'),
         'latent_normalization': saved['latent_normalization'],
         'generator_parameters': sum(parameter.numel() for parameter in codec.parameters()),

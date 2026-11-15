@@ -18,6 +18,7 @@ from .engine import Game,BEHAVIOR_VERSION
 from .rssm_preview_assets import preserve_preview_rng
 from .runtime_checks import circle_is_clear,segment_is_clear
 from .sr_neural_pairs_data import fingerprint
+from .workspace_paths import resolve_path,identity_path
 
 
 TRAINING_PROTOCOL='dreamer_actor_critic_imagination_v1'
@@ -28,7 +29,7 @@ SOURCE_OBSERVER='actual_current_state20_with_continuous_prior_RSSM_memory; RGB_o
 
 
 def file_sha(path):
-    with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    with resolve_path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
 def _pixels_sha(image):return hashlib.sha256(np.asarray(image,dtype=np.uint8).tobytes()).hexdigest()
@@ -49,7 +50,7 @@ def _source(record,source_factory=Game):
 
 def build_policy_validation_panel(data_root,*,count=4,seed=173,include_terminal=False):
     if type(count)is not int or count<1 or type(seed)is not int:raise ValueError('Positive distinct policy starts and integer seed required')
-    root=Path(data_root).resolve();manifest_path=root/'manifest.json'
+    root=resolve_path(data_root);manifest_path=root/'manifest.json'
     manifest=json.loads(manifest_path.read_text(encoding='utf-8'));records=manifest.get('records',[])
     eligible=[]
     for record in records:
@@ -67,7 +68,7 @@ def build_policy_validation_panel(data_root,*,count=4,seed=173,include_terminal=
         terminal=[]
         for i,record in enumerate(eligible):
             if not record['relative_path'].replace('\\','/').startswith('moving1/'):continue
-            path=(root/record['relative_path']).resolve()
+            path=(root/record['relative_path'].replace('\\','/')).resolve()
             if root not in path.parents or file_sha(path)!=record['sha256']:raise ValueError('Terminal policy Source record changed')
             with np.load(path,allow_pickle=False)as source:
                 hp=source['states'][:,4]
@@ -79,7 +80,7 @@ def build_policy_validation_panel(data_root,*,count=4,seed=173,include_terminal=
         selected=[eligible[i]for i in sorted(chosen)]
     starts=[]
     for record in selected:
-        path=(root/record['relative_path']).resolve()
+        path=(root/record['relative_path'].replace('\\','/')).resolve()
         if root not in path.parents or file_sha(path)!=record['sha256']:raise ValueError('Policy held-out source path/hash changed')
         with np.load(path,allow_pickle=False)as source:
             if(str(source['split'])!='val' or 'initial_state'not in source
@@ -88,13 +89,13 @@ def build_policy_validation_panel(data_root,*,count=4,seed=173,include_terminal=
             snapshot=json.loads(str(source['initial_state']));grid=source['map'].copy();state=source['states'][0].copy()
             image=source['frames'][0].copy()
             hp=source['states'][:,4];terminal_in_episode=bool(((hp[:-1]>0)&(hp[1:]<=0)).any())
-        start=dict(episode_path=str(path),episode_sha256=record['sha256'],split='val',start_frame=0,
+        start=dict(episode_path=identity_path(path),episode_sha256=record['sha256'],split='val',start_frame=0,
             snapshot=snapshot,map=grid.tolist(),state=state.astype(float).tolist(),initial_rgb_sha256=_pixels_sha(image),
             environment='combat'if snapshot.get('enemies_enabled',True)else'navigation')
         if include_terminal:start['recorded_terminal_in_episode']=terminal_in_episode
         _source(start);starts.append(start)
     receipt=dict(kind=PANEL_KIND,version=1,split='val',seed=seed,frames=len(starts),starts=starts,
-        data_root=str(root),data_identity_sha256=file_sha(manifest_path),behavior_version=BEHAVIOR_VERSION,
+        data_root=identity_path(root),data_identity_sha256=file_sha(manifest_path),behavior_version=BEHAVIOR_VERSION,
         initialization='exact_full_Source_snapshot_map_state0_RGB32',Source_initial_observation_only=True,
         training_uses_panel=False,source_held_out=True,max_horizon=450,simulation_hz=30)
     if include_terminal:receipt.update(include_terminal=True,
@@ -114,10 +115,10 @@ def validate_panel(panel,*,verify_source_files=True):
             or any(r.get('split')!='val'or r.get('start_frame')!=0 for r in starts)):
         raise ValueError('Policy VAL panel protocol, identity, unique starts or held-out labels changed')
     if verify_source_files:
-        root=Path(value['data_root']).resolve()
+        root=resolve_path(value['data_root'])
         if file_sha(root/'manifest.json')!=value['data_identity_sha256']:raise ValueError('Policy VAL manifest changed')
         for start in starts:
-            path=Path(start['episode_path']).resolve()
+            path=resolve_path(start['episode_path'])
             if root not in path.parents or file_sha(path)!=start['episode_sha256']:raise ValueError('Policy held-out Source file changed')
     return panel
 

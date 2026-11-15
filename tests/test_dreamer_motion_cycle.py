@@ -133,7 +133,7 @@ class MotionCycleTests(unittest.TestCase):
             self.assertEqual(name,'policy');policy_commands.append(command)
             self.assertFalse(finished());target=command[command.index('--until-actor-updates')+1]
             self.assertEqual(target,'150');self.assertIn('--refresh-world-now',command)
-            self.assertEqual(command[command.index('--cycle-corpus')+1],'cached_Source_receipt.json')
+            self.assertEqual(command[command.index('--cycle-corpus')+1],str(Path('cached_Source_receipt.json').resolve()))
             atomic(self.args.policy_run/'status.json',dict(status='completed',actor_updates=150,step=270,
                 world_sha256=restored.state['trained_world_sha256']))
             progress();self.assertTrue(finished())
@@ -197,6 +197,17 @@ class MotionCycleTests(unittest.TestCase):
         self.alive.side_effect=AssertionError('A completed stage must not adopt a reused PID')
         cycle.execute(directory,'world',['fake_world'],finished=lambda:True,progress=progress)
         progress.assert_called_once();self.popen.assert_not_called();self.alive.assert_not_called()
+
+    def test_legacy_child_pid_requires_explicit_migration_and_host_record_must_match(self):
+        cycle=self.controller();directory=cycle.root/'one';directory.mkdir()
+        launch=directory/'world_launch.json';atomic(launch,dict(pid=12345))
+        with self.assertRaisesRegex(RuntimeError,'host receipt'):
+            cycle.execute(directory,'world',['fake_world'],finished=lambda:False,progress=lambda:None)
+        self.popen.assert_not_called()
+        atomic(launch,dict(pid=12345,process_identity=dict(pid=12346)))
+        with self.assertRaisesRegex(ValueError,'differ'):
+            cycle.execute(directory,'world',['fake_world'],finished=lambda:False,progress=lambda:None)
+        self.popen.assert_not_called()
 
     def test_policy_resume_uses_persisted_absolute_actor_target_not_another_fifty(self):
         cycle=self.controller();cycle.state.update(phase='policy_training',source_receipt='immutable_receipt.json',

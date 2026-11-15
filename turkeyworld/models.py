@@ -13,6 +13,7 @@ from .structured_state import STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS, S
 from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
+from .workspace_paths import resolve_path
 from typing import Any
 
 import torch
@@ -837,7 +838,7 @@ def initialize_event_heads(target_head, attack_head):
 
 def _read_checkpoint(path, device):
     # Only load checkpoints you created or otherwise trust.
-    return torch.load(Path(path), map_location=device, weights_only=False)
+    return torch.load(resolve_path(path), map_location=device, weights_only=False)
 
 
 def load_world_checkpoint(path, device="cpu"):

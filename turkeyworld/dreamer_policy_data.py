@@ -13,10 +13,11 @@ import numpy as np
 import torch
 
 from .jepa_training_utils import SequenceData
+from .workspace_paths import resolve_path,identity_path
 
 
 def file_sha(path):
-    with Path(path).open('rb') as stream:
+    with resolve_path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
@@ -59,20 +60,20 @@ class PolicyReplay:
         self.horizon, self.rng = horizon, np.random.default_rng(seed)
         self.streams, self.identities = [], []
         for stream, directory in enumerate(directories):
-            directory = Path(directory).resolve()
+            directory = resolve_path(directory)
             paths = sorted(directory.glob('*.npz'))
             if not paths or directory.name not in ('train', 'val'):
                 raise ValueError('Policy replay requires an explicit nonempty TRAIN/VAL split')
             records, panels, event_rows, death_rows = [], [], [], []
             for i, path in enumerate(paths):
-                records.append(dict(path=str(path), sha256=file_sha(path)))
+                records.append(dict(path=identity_path(path), sha256=file_sha(path)))
                 with np.load(path, allow_pickle=False) as saved:
                     if str(saved['split']) != directory.name:
                         raise ValueError('Policy replay refuses mixed splits')
                     starts, event, death = window_index(saved['states'], saved['events'], horizon)
                 panels.extend((i, int(start)) for start in starts)
                 event_rows.extend(event.tolist()); death_rows.extend(death.tolist())
-            identity = dict(directory=str(directory), split=directory.name,
+            identity = dict(directory=identity_path(directory), split=directory.name,
                 horizon=horizon, episodes=records, windows=len(panels),
                 reward_windows=sum(event_rows), terminal_windows=sum(death_rows))
             if identities is not None and identity != identities[stream]:

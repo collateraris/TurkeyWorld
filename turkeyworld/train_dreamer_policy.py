@@ -29,6 +29,7 @@ from .models import load_world_checkpoint
 from .power_guard import KeepAwake
 from .renderer_student import _hash_tensors
 from .training_pipeline import atomic_json, now
+from .workspace_paths import resolve_path,identity_path
 
 
 PROTOCOL = 'dreamer_actor_critic_imagination_v1'
@@ -50,7 +51,7 @@ def atomic_torch(path, payload):
 
 def pinned_world(source, destination):
     """Hard-link one atomic boundary before reading a continuously replaced file."""
-    destination = Path(destination)
+    source,destination=resolve_path(source),resolve_path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         os.link(source, destination)
@@ -64,7 +65,7 @@ def pinned_world(source, destination):
         raise ValueError('Pinned dynamics checkpoint clocks disagree')
     if saved.get('run_state',{}).get('global_training_step') != step:
         raise ValueError('Pinned dynamics run state is not a completed optimizer boundary')
-    return dict(path=str(destination.resolve()), sha256=sha, step=step,
+    return dict(path=identity_path(destination), sha256=sha, step=step,
         config_sha256=digest(saved['config']), tensor_count=len(saved['model']))
 
 
@@ -141,7 +142,7 @@ def archive_unsaved_history(root, completed_step):
 
 class PolicyTraining:
     def __init__(self, args):
-        self.args, self.root = args, args.run_dir
+        self.args, self.root = args, resolve_path(args.run_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.device = torch.device(args.device)
         self.step = 0
@@ -158,7 +159,7 @@ class PolicyTraining:
         atomic_json(self.root/'status.json', self.state)
 
     def load_world(self, identity):
-        model, _ = load_world_checkpoint(identity['path'], self.device)
+        model, _ = load_world_checkpoint(resolve_path(identity['path']), self.device)
         model.requires_grad_(False).eval()
         # The adapter controls stochastic prior sampling without training NN assets.
         if hasattr(self, 'world'):
@@ -217,7 +218,7 @@ class PolicyTraining:
         self.validation_panel = panel
         declared_reward_settings = self.reward_config
         proposed = dict(protocol=PROTOCOL, world_initial=plan['world_initial'] if plan else identity,
-            world_source=str(self.args.world_source.resolve()), actor_critic=config.to_dict(),
+            world_source=identity_path(self.args.world_source), actor_critic=config.to_dict(),
             reward_settings=declared_reward_settings, reward_continue_config=vars(self.head_config),
             data=self.replay.identities,
             head_event_data=self.head_replay.identities,
@@ -288,7 +289,7 @@ class PolicyTraining:
         cycle_path=getattr(self.args,'cycle_corpus',None)
         previous_cycle=saved.get('cycle_policy_data')if saved is not None else None
         if cycle_path is None and previous_cycle is not None:
-            cycle_path=Path(previous_cycle['receipt_path'])
+            cycle_path=resolve_path(previous_cycle['receipt_path'])
         if cycle_path is not None:
             from .dreamer_policy_cycle_data import PolicyCycleData
             self.cycle_data=PolicyCycleData(cycle_path,device=self.device,horizon=self.args.replay_horizon,
@@ -300,7 +301,7 @@ class PolicyTraining:
             receipt=json.loads(receipt_path.read_text(encoding='utf-8'))
             if receipt['policy_step']<=self.step and receipt['plan_sha256']==self.plan_sha:
                 self.state['validation_receipt']=receipt
-                self.state['validation']=json.loads(Path(receipt['report_file']).read_text(encoding='utf-8'))
+                self.state['validation']=json.loads(resolve_path(receipt['report_file']).read_text(encoding='utf-8'))
                 reward_path=self.root/f"validation/reward_step_{receipt['policy_step']:06d}.json"
                 if reward_path.exists():
                     self.state['reward_validation']=json.loads(reward_path.read_text(encoding='utf-8'))
@@ -449,9 +450,9 @@ class PolicyTraining:
                 plan_sha256=self.plan_sha)
             atomic_json(directory/f'reward_step_{self.step:06d}.json',reward_report)
             self.state['reward_validation']=reward_report
-            self.state['validation_receipt']=dict(report_file=str((directory/f'step_{self.step:06d}.json').resolve()),
+            self.state['validation_receipt']=dict(report_file=identity_path(directory/f'step_{self.step:06d}.json'),
                 report_sha256=file_sha(directory/f'step_{self.step:06d}.json'),
-                policy_checkpoint_file=str(validated_policy.resolve()),
+                policy_checkpoint_file=identity_path(validated_policy),
                 policy_checkpoint_sha256=file_sha(validated_policy),
                 world_checkpoint_file=self.world_identity['path'],world_sha256=self.world_identity['sha256'],
                 world_step=self.world_identity['step'],policy_step=self.step,
@@ -524,6 +525,8 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=173)
     parser.add_argument('--refresh-world-now',action='store_true',help='Explicit serial-cycle world handoff before SGD')
     parser.add_argument('--cycle-corpus',type=Path,help='Immutable appended TRAIN Source collection')
+    parser.add_argument('--discard-foreign-pids',action='store_true',
+        help='Ignore copied legacy/foreign PID records after an explicit workspace transfer.')
     parser.add_argument('--until-step',type=int,default=0,help='Idempotent absolute update target for a serial cycle')
     parser.add_argument('--until-actor-updates',type=int,default=0,help='Absolute actor/critic update target excluding head warmup')
     args = parser.parse_args(argv)
@@ -534,13 +537,13 @@ def main(argv=None):
         parser.error('Budgets and intervals must be nonnegative')
     if args.device=='cuda': torch.cuda.init()
     torch.set_num_threads(2)
-    args.run_dir = args.run_dir.resolve(); args.world_source=args.world_source.resolve()
+    args.run_dir=resolve_path(args.run_dir);args.world_source=resolve_path(args.world_source)
     args.run_dir.mkdir(parents=True,exist_ok=True)
-    from .vqgan_pipeline import process_alive
+    from .process_runtime import pid_file_alive,write_pid_file
     pid_path=args.run_dir/'training.pid'
-    if pid_path.exists() and process_alive(int(pid_path.read_text())):
+    if pid_file_alive(pid_path,discard_foreign=args.discard_foreign_pids):
         parser.error('Policy worker is already running')
-    pid_path.write_text(str(os.getpid()))
+    write_pid_file(pid_path)
     trainer = PolicyTraining(args)
     try:
         with KeepAwake(): trainer.run()

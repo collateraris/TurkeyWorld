@@ -4661,6 +4661,200 @@ Fixed handoffs: [first world completion](training_runs/dreamer_motion_cycle_2026
 These local artifacts document executed stages; the live status files continue
 to change as the second round progresses.
 
+## H114 — Optional worker telemetry made nonfatal; exact remaining updates resumed (2026-11-15, Moscow)
+
+H113 fixed the controller's Windows file operations. A second coverage gap
+remained in the dynamics worker: `MotionOnlyTraining.publish()` directly read
+the optional controller `status.json` before publishing its own state. In outer
+round3, that read raised `PermissionError` while the world was at **7591,
+178/180 round updates, H180/stage28/30**. This was a telemetry failure, not a
+neural loss, data, architecture or CUDA failure.
+
+The recorded traceback confirms that the complete checkpoint write and atomic
+replacement had already returned successfully before the optional read failed
+inside the subsequent `publish()`. The preserved full source7591 is SHA256
+`1867d235587e1994fe6a43d6c3e2b79c0ad97872b82238181f295039e4d12091`.
+The metrics file contained **718 unique contiguous updates6874…7591**, with
+no duplicate, missing, future or malformed row. Three earlier rounds had180
+updates each; current round had178. NAV and quiet sampler draws agreed with
+their initial counters+718×8 and the latest metric. Exactly **7592 and7593**
+remained; collection and the previous718 optimizer updates were not repeated.
+
+The worker's optional mirror now uses the shared bounded Windows reader.
+`OSError`/`ValueError` from that optional read retains the last good
+`dreamer_cycle` snapshot and records **`cycle_telemetry_warning`**, including the
+attempt timestamp and whether cached data were retained. Training continues;
+a successful read clears the warning. Errors writing the worker's own status
+or checkpoint remain real failures. Neural models, losses, full-BPTT horizon
+ladder30/H, MAIN8+8, frozen image assets and Source corpus identity were unchanged.
+**10 regression CPU tests** passed, including actual tiny Adam/update/save cases.
+
+Recovery archived the failed status/logs and full checkpoint in
+`failure_recoveries/optional_cycle_telemetry_g7591_1794729585053280900` under the
+world run. Native pre-SGD verification passed seven checks. An additional
+independent comparison of source7591 with the resumed initial7591, before any
+SGD, passed **19/19 checks**: all1599 model tensors byte for byte, all442 Adam
+states/seven groups, name order and every moment, CPU/CUDA/global PCG RNG,
+configuration, every migration lineage, and the entire typed motion gate/private
+sampler states. Weights, optimizer history, RNG, sampler clocks, gate and the
+existing cycle3 Source32/5760 corpus continued without reset.
+
+Resumed world worker **PID27608** executed **exactly7592 and7593**. World7593
+completed **H180/30 and180/180** for round3, then completed the pinned **VAL180**.
+Its frozen completion checkpoint SHA256 is
+`0aff97f781992f68cb2659cb3b5ba80fd489bb0df88ba4a266967298df655827`.
+Controller **PID54972** then entered `policy_training` against world7593,
+retaining actor start250 and target300. The old active error was archived as
+`previous_error`; budget completion still does not certify gameplay quality.
+
+The dynamics UI now displays a separate calm notice when optional telemetry
+is unavailable, with the last known cycle timestamp. It does not show a red
+training-failure banner, change losses/H/counters or imply that a genuinely
+failed/stopped worker is still training. A successful read removes the notice.
+**261 Node tests**, the dashboard build and diff checks passed; new tests cover
+cached/missing mirrors, clearing the notice and preserving real failure banners.
+
+[Recovery receipt](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/latest_optional_telemetry_recovery.json),
+[archived preparation](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/failure_recoveries/optional_cycle_telemetry_g7591_1794729585053280900/preparation.json),
+[19-check full boundary proof](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/failure_recoveries/optional_cycle_telemetry_g7591_1794729585053280900/full_boundary_verification.json),
+[native resume verification](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/motion_only_resume_verification.json),
+[round3 world handoff](training_runs/dreamer_motion_cycle_20261114/cycles/cycle_000003/world_complete.json),
+[pinned validation7593](training_runs/rssm_moe_nav15_enemy25_cap20_20261113/validation/motion_step_007593/motion_only_validation.json).
+These are local workspace artifacts; later policy/cycle progress remains live.
+
+## H115 — User pause, complete saved boundary and Ubuntu handoff (2026-11-15, Moscow)
+
+The user requested stopping all work, saving the project and leaving a note
+for continuation on Ubuntu. Training and the serial controller stopped safely;
+read-only dashboard processes were also stopped. No training restart, Linux
+port or automatic continuation was performed. The next training launch requires
+the user's explicit request after the Ubuntu migration has been checked.
+
+The final saved world is **8111**, **round_index6** (seventh world round),
+**158/180 updates**, **H180/stage8/30**. From source6873,1238 new world updates
+equal six completed rounds1080 plus the current158. Policy is completed at
+**learner620 /actor400**. Seven retained Source corpora each contain32 episodes:
+**224 episodes /40320 genuine Source transitions**. The controller phase remains
+`world_training`; no new Source collection should precede its completion.
+
+The unfinished round needs exactly **22 more world updates,8112…8133**, with
+the same H180 gate, Source corpus, weights, Adam, RNG and private samplers.
+Only after world8133 should policy rebind that completed world and run20 head
+updates +50 actor/critic updates, with future targets **learner690 /actor450**.
+Those are future resume targets, not executed results. Do not reset to H16 or
+repeat an entire180-update round.
+
+The local handoff directory is `training_runs/ubuntu_handoff_20261115`.
+Its pause receipt passed **15 checks**, covering the complete world clocks,
+1599 model tensors,442 named Adam states/seven groups, CPU/CUDA/global/private
+RNG, policy slow critic/normalizers/three optimizers, snapshot hashes and
+termination of all training processes. The four frozen full snapshots are:
+
+| Snapshot | SHA256 |
+| --- | --- |
+| `rssm_world_step_008111.pt` | `f43d053ea2854bec13e6d7fa8458c964a94ec240e0aa99df258a08b3d710314a` |
+| `policy_step_000620_actor_000400.pt` | `de8261d9a0ed153f6f59374feabf39fe87ae46303ed3c4b1660155119523a328` |
+| `renderer_RF3_Base31709_decoder4125.pt` | `40f9373125c038a200b4386c25a375fa2c32d6902447a9f8b2b8cfa1e70985b6` |
+| `sr_frozen_step_003000.pt` | `c7912165e80d555f9b09c521a3d0b6c46ac3915d1ff879fbdd35d815385dc388` |
+
+The source manifest records paths/sizes/hashes; the metadata directory retains
+cycle/world/policy plans, statuses, PID history and stop markers. Git-state and
+working-tree patch records, installed-package metadata and a code snapshot are
+part of the handoff. These exports complement the **whole workspace**, including
+ignored `training_runs`, data, all preview-parent assets and untracked code;
+a Git clone or the four latest weights alone is insufficient.
+
+The new [Russian Ubuntu continuation note](CONTINUE_ON_UBUNTU_RU.md) and narrow
+README links document the exact active configuration: MAIN16=8NAV+8 quiet,
+Combat/AUX/late0, horizons16/48/80/112/144/180 with30 updates each, full BPTT,
+Source32/5760 per round and finite policy20-head+50-actor phases. RF3/NPR32317,
+Base31709, decoder4125 and frozen SR3000 remain unchanged. Stop markers are
+preserved; historical Windows PIDs must not be adopted as Ubuntu processes.
+
+**Exact Ubuntu resume is not yet ready.** Confirmed blockers are unguarded
+Windows process APIs/launch flags, immutable absolute Windows path/SHA graphs,
+relative backslashes, and VAL identities that include `mtime_ns`. No global
+path replacement or validator relaxation was performed. A future explicit
+relocation resolver/child migration must preserve original bytes and raw
+ledgers, then verify all model/Adam/RNG/gate states before the first SGD.
+`KeepAwake` is a Linux no-op; the next session must address process lifetime
+and sleep separately. No `pathlib.WindowsPath` pickle-global blocker was found
+in the latest four assets. The saved Windows reference is Python3.12.11,
+Torch2.11.0+cu128/torchvision0.26.0+cu128, NumPy2.5.2 and one RTX4090; future
+SGD bitwise equivalence across OS/GPU/runtime is not promised.
+
+[Pause receipt](training_runs/ubuntu_handoff_20261115/pause_receipt.json),
+[snapshot manifest](training_runs/ubuntu_handoff_20261115/source_manifest.json),
+[Torch environment](training_runs/ubuntu_handoff_20261115/torch_environment.json),
+[Windows package reference](training_runs/ubuntu_handoff_20261115/installed_packages_windows_reference.json),
+[working-tree state](training_runs/ubuntu_handoff_20261115/git_state.json),
+[continuation note](CONTINUE_ON_UBUNTU_RU.md).
+All are local handoff artifacts; the pause does not certify gameplay quality.
+
+## H116 — Windows/Ubuntu code paths and a checked, paused handoff (2026-11-15, Moscow)
+
+After H115, the user explicitly requested actual Windows/Ubuntu-compatible
+code, including background operation with Ubuntu locked. This authorized code
+adaptation, not restarting training. World8111/policy620/actor400, all four
+snapshot hashes, Source corpora, gates and stop markers remained unchanged.
+
+`workspace_paths` now separates native filesystem paths from their original
+Windows identities. `workspace_portability.json` retains origin
+`E:\nau\TurkeyWorld`; absolute Windows strings and relative backslashes resolve
+inside the copied workspace without rewriting immutable JSON or their SHA
+graph. Replay/corpus/VAL/preview/policy readers use this adapter. Existing raw
+ledgers and ordered VAL identities, including file nanosecond mtimes, remain
+strict. A timestamp/content mismatch fails instead of silently changing a panel.
+
+The shared `turkeyworld.bootstrap` initializes CPU thread settings and, when
+requested/available, CUDA before checkpoint modules on either OS. Process
+management now has Windows and POSIX branches. Host receipts distinguish
+platform/hostname and process start identity; Linux additionally uses boot/start
+tokens. Old Windows PID numbers are not adopted on Ubuntu. Explicit
+`--discard-foreign-pids` archives foreign/legacy records; an owned live worker
+remains protected. World/policy children receive that explicit migration flag.
+
+Linux `KeepAwake` uses a sleep-only `systemd-inhibit` helper with a READY
+handshake, visible failures and release on EOF/parent death. The Bash launcher
+also holds a sleep-only inhibitor by default; `--allow-sleep` explicitly permits
+the wrapper without it, while workers still attempt their guard. Screen lock,
+display and security settings are not disabled. `tmux` preserves a terminal
+session; it does not itself prevent suspend. These Linux branches were tested
+with mocks, not a native Ubuntu/systemd session.
+
+Added `scripts/setup_ubuntu.sh`, `requirements-ubuntu.txt`, Linux-venv ignores
+and LF rules for Bash scripts. Setup pins Python3.12 application versions and
+the official Torch2.11/torchvision0.26 CUDA12.8 pair, or a separate CPU test env.
+It supports dry-run, never starts training and never clears stop flags.
+The [official PyTorch version table](https://pytorch.org/get-started/previous-versions/#v2110)
+and Ubuntu package links are recorded in the handoff note.
+
+Verification passed **45 focused CPU tests**: PID5, KeepAwake10, cycle21,
+moved-path7 and launcher2; installer syntax/dry-run passed **3 additional tests**.
+The actual machine-readable Windows preflight passed **8 snapshot checks
++22 resume checks** on the full paused8111/620 state, all224 Source paths,
+strict VAL pins and complete preview ancestry. Original JSON identities stayed
+unchanged; no optimizer/SGD/worker was started by this preflight. Actual Windows
+world/policy `--help` calls passed. One real Windows CUDA inference step used
+world8111+RF3+SR3000 to1024 without SGD or GUI. None of these proves execution
+on a real Ubuntu GPU; no Ubuntu/WSL distribution was available here.
+
+Future destination preflight:
+`python -m turkeyworld.bootstrap --module turkeyworld.portability_check --resume --snapshots`.
+Only after it passes and the user requests continuation, the Linux launcher may
+run `--module turkeyworld.dreamer_motion_cycle --resume-after-user-stop
+--discard-foreign-pids --cycles 1`:22 remaining world updates to8133, then
+20 head+50 actor updates, without another Source collection first. Windows
+primarily uses Python/bootstrap directly. `.ps1` is optional under an already
+permitting ExecutionPolicy; the local policy blocked ordinary script execution
+and was not changed. Installation/resume details are kept in the existing
+handoff note rather than duplicated here. Training remains paused.
+
+[Continuation note](CONTINUE_ON_UBUNTU_RU.md),
+[actual Windows preflight](training_runs/ubuntu_handoff_20261115/portability_preflight_windows.json),
+[original pause receipt](training_runs/ubuntu_handoff_20261115/pause_receipt.json),
+[snapshot manifest](training_runs/ubuntu_handoff_20261115/source_manifest.json).
+
 ## Continuing this journal
 
 Add each new H stage to both language versions, preserving earlier results.

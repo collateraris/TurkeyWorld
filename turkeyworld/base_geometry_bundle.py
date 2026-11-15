@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -143,7 +144,7 @@ def load_base_geometry_payload(teacher,payload,*,checkpoint,require_trained=True
     private.flow_renderer._renderer_base_bundle=deepcopy(canonical)
     private.flow_renderer._renderer_Base_RF_unadapted_binding=deepcopy(payload['RF_base_condition_binding'])
     metadata={k:deepcopy(v) for k,v in payload.items() if k not in {'parent_bundle','base_student_bundle'}}
-    metadata['checkpoint']=str(Path(checkpoint).resolve())
+    metadata['checkpoint']=identity_path(checkpoint)
     private.flow_renderer._renderer_base_geometry=deepcopy(metadata)
     teacher.flow_renderer=private.flow_renderer;teacher.base_student=head
     teacher.base_student_metadata=base_meta;teacher.base_student_bundle=canonical;teacher.config=private.config

@@ -7,6 +7,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 import math
 from pathlib import Path
+from pathlib import PureWindowsPath
+from .workspace_paths import resolve_path
 import time
 import zipfile
 
@@ -23,11 +25,11 @@ def resolve_episode_paths(directory, episode_paths):
         return None
     if isinstance(episode_paths, (str, Path)):
         raise ValueError('episode_paths must be a nonempty sequence of NPZ paths')
-    directory = Path(directory).resolve()
+    directory = resolve_path(directory)
     paths, seen = [], set()
     for value in episode_paths:
-        path = Path(value)
-        path = (path if path.is_absolute() else directory/path).resolve()
+        absolute = Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+        path = resolve_path(value) if absolute else resolve_path(directory/str(value).replace('\\','/'))
         if path.parent != directory:
             raise ValueError('Selected episode must belong directly to the explicit split directory')
         if path.suffix.lower() != '.npz':
@@ -164,7 +166,7 @@ def initialize_stream(owner, directory, device="cpu", limit=0, max_bytes=6*1024*
                       counterfactual_backgrounds=False):
     if limit < 0 or cache_bytes < 1 or max_bytes < 1 or refresh_interval < 0 or image_size is not None and image_size < 1:
         raise ValueError("Invalid streamed dataset limit/cache/image size")
-    owner.directory, owner.device = Path(directory), torch.device(device)
+    owner.directory, owner.device = resolve_path(directory), torch.device(device)
     owner._fixed_episode_paths = resolve_episode_paths(directory, episode_paths)
     owner.split = split or (owner.directory.name if owner.directory.name in {"train", "val", "test"} else None)
     owner.mode, owner.image_size, owner.rng = "stream", image_size, np.random.default_rng(seed)

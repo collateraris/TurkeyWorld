@@ -1,6 +1,7 @@
 """Format8: decoder/post-quant overlay over the exact selected RF/Base chain."""
 from copy import deepcopy
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -120,7 +121,7 @@ def load_decoder_rf_chain_payload(teacher,payload,*,checkpoint,require_trained=T
         raise ValueError('Decoder chain assembled full-flow/codec fingerprints differ')
     flow._check_codec();flow.eval()
     metadata={key:deepcopy(value)for key,value in payload.items()if key not in {'parent_bundle','decoder_override'}}
-    metadata['checkpoint']=str(Path(checkpoint).resolve())
+    metadata['checkpoint']=identity_path(checkpoint)
     flow._renderer_decoder_chain=deepcopy(metadata);flow._renderer_decoder_chain_parent_bundle=deepcopy(parent)
     if hasattr(teacher,'base_student'):
         if _hash_tensors(teacher.base_student.state_dict())!=parent['base_student_identity']:

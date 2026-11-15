@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .workspace_paths import resolve_path
 import time
 
 import numpy as np
@@ -28,26 +29,26 @@ from .training_pipeline import atomic_json, now, replace_file
 
 
 def _digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(resolve_path(path).read_bytes()).hexdigest()
 
 
 def verify_data(root):
-    root = Path(root).resolve()
+    root = resolve_path(root)
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('status') != 'complete':
         raise ValueError('RSSM navigation data is incomplete')
     for record in manifest['records']:
-        source = (root/record['relative_path']).resolve()
+        source = (root/record['relative_path'].replace('\\','/')).resolve()
         if root not in source.parents or _digest(source) != record['sha256']:
             raise ValueError('RSSM navigation data content changed or escaped its directory')
     return _digest(root/'manifest.json')
 
 
 def episode_names(root, *, split, stage=None):
-    root = Path(root)
+    root = resolve_path(root)
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     prefix = (stage+'/' if stage else '')+'rgb/'+split+'/'
-    names = sorted(Path(record['relative_path']).name for record in manifest['records']
+    names = sorted(Path(record['relative_path'].replace('\\','/')).name for record in manifest['records']
         if record['relative_path'].replace('\\', '/').startswith(prefix))
     if not names:
         raise ValueError('No pinned dataset episodes for '+prefix)

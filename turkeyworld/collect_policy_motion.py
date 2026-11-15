@@ -27,6 +27,7 @@ from .power_guard import KeepAwake
 from .renderer_student import _hash_tensors
 from .rssm_combat_protocol import environment_profile
 from .training_pipeline import atomic_json, now
+from .workspace_paths import resolve_path,identity_path
 
 PROTOCOL = 'rssm_motion_only_Source_cycle_corpus_v1'
 POLICY_PROTOCOL = 'dreamer_actor_critic_imagination_v1'
@@ -35,7 +36,7 @@ EXPLORATION_ACTIONS = np.asarray([(*values, 0.) for values in itertools.product(
 
 
 def file_sha(path):
-    with Path(path).open('rb') as stream:
+    with resolve_path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
@@ -52,13 +53,13 @@ def _immutable_json(path, value):
 
 
 def _pin(source, destination):
-    source, destination = Path(source).resolve(), Path(destination).resolve()
+    source, destination = resolve_path(source),resolve_path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists(): os.link(source, destination)
     if not destination.is_file(): raise ValueError('Missing pinned collection checkpoint')
     if file_sha(source) != file_sha(destination):
         raise ValueError('An existing cycle cannot silently switch to different policy/world checkpoint bytes')
-    return dict(path=str(destination), sha256=file_sha(destination), original_path=str(source))
+    return dict(path=identity_path(destination), sha256=file_sha(destination), original_path=identity_path(source))
 
 
 def _initial_source(seed, stream, *, min_enemy_distance=8., source_factory=Game):
@@ -107,7 +108,7 @@ def _episode_record(path):
         if (not valid or str(saved['split']) != 'train' or str(saved['collection_protocol']) != PROTOCOL
                 or saved['states'].shape != (steps+1, 20) or saved['frames'].shape != (steps+1, 32, 32, 3)):
             raise ValueError('Invalid collected Source episode: '+str(reason))
-        return dict(path=str(Path(path).resolve()), sha256=file_sha(path), split='train', stream=stream,
+        return dict(path=identity_path(path), sha256=file_sha(path), split='train', stream=stream,
             seed=int(saved['seed']), episode_index=int(saved['episode_index']), attempt=int(saved['collection_attempt']),
             transitions=steps, observations=steps+1, policy_checkpoint_sha256=str(saved['policy_checkpoint_sha256']),
             world_checkpoint_sha256=str(saved['world_checkpoint_sha256']),
@@ -204,7 +205,7 @@ def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cy
     device = torch.device(device)
     if device.type == 'cuda': torch.cuda.init()
     torch.set_num_threads(2)
-    root = Path(output_dir).resolve(); root.mkdir(parents=True, exist_ok=True)
+    root = resolve_path(output_dir); root.mkdir(parents=True, exist_ok=True)
     policy_pin = _pin(policy_checkpoint, root/'assets/policy_source.pt')
     world_pin = _pin(world_checkpoint, root/'assets/world_source.pt')
     plan = _json(dict(protocol=PROTOCOL, cycle_index=cycle_index, split='train', validation_unchanged=True,
@@ -230,7 +231,7 @@ def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cy
         return receipt
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == 'cuda' else []
     with torch.random.fork_rng(devices=devices):
-        policy_saved = torch.load(policy_pin['path'], map_location='cpu', weights_only=False, mmap=True)
+        policy_saved = torch.load(resolve_path(policy_pin['path']), map_location='cpu', weights_only=False, mmap=True)
         if (policy_saved.get('protocol') != POLICY_PROTOCOL or type(policy_saved.get('step')) is not int
                 or type(policy_saved.get('actor_updates')) is not int or policy_saved['actor_updates'] < 1):
             raise ValueError('Source controller requires the pinned trained Dreamer actor checkpoint')
@@ -298,8 +299,8 @@ def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cy
             cycle_index=cycle_index, policy_checkpoint_sha256=policy_pin['sha256'], world_checkpoint_sha256=world_pin['sha256'],
             policy_checkpoint=policy_pin['path'], world_checkpoint=world_pin['path'],
             policy_step=policy_saved['step'], policy_actor_updates=policy_saved['actor_updates'],
-            world_step=world_saved['training_steps'], nav_train_directory=str(directories['navigation']),
-            enemy_train_directory=str(directories['enemy_motion']), episodes=episodes,
+            world_step=world_saved['training_steps'], nav_train_directory=identity_path(directories['navigation']),
+            enemy_train_directory=identity_path(directories['enemy_motion']), episodes=episodes,
             episodes_per_stream=episodes_per_stream, transitions_per_episode=transitions,
             total_real_Source_transitions=2*episodes_per_stream*transitions,
             collection_plan_sha256=file_sha(root/'collection_plan.json'), controller_observation=plan['controller_observation'],

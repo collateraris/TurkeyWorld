@@ -32,13 +32,15 @@ from .staged_curriculum import StagedSequenceData
 from .train_rssm_combat import RSSMCombatTraining
 from .train_rssm_moe import restore_optimizer
 from .training_pipeline import atomic_json,now
+from .dreamer_motion_cycle import read as read_cycle_status,PROTOCOL as CYCLE_PROTOCOL
+from .workspace_paths import resolve_path
 
 ROOT=Path(__file__).resolve().parents[1]
 RUN=ROOT/'training_runs/rssm_moe_nav15_enemy25_cap20_20261113'
 
 
 def file_sha(path):
-    with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    with resolve_path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
 class MotionOnlyTraining(RSSMCombatTraining):
@@ -54,8 +56,21 @@ class MotionOnlyTraining(RSSMCombatTraining):
 
     def publish(self):
         path=getattr(self.args,'cycle_status',None)
-        if path is not None and path.is_file():
-            self.state['dreamer_cycle']=json.loads(path.read_text(encoding='utf-8'))
+        if path is not None:
+            try:
+                cycle=read_cycle_status(path)
+                if not isinstance(cycle,dict)or cycle.get('protocol')!=CYCLE_PROTOCOL:
+                    raise ValueError('Optional cycle telemetry has an unexpected protocol')
+                self.state['dreamer_cycle']=cycle
+                self.state.pop('cycle_telemetry_warning',None)
+            except (OSError,ValueError)as error:
+                # This is a UI mirror, not training data or a checkpoint.
+                # Preserve the last good view and still publish/save the real
+                # optimizer boundary if another process holds the cycle file.
+                self.state['cycle_telemetry_warning']=dict(path=str(path),
+                    error=f'{type(error).__name__}: {error}',last_attempt_at=now(),
+                    last_good_cycle_retained='dreamer_cycle'in self.state,
+                    training_continues=True)
         return super().publish()
 
     def frozen_tensors(self,model):
@@ -64,7 +79,7 @@ class MotionOnlyTraining(RSSMCombatTraining):
 
     def _data(self,path):
         return StagedSequenceData(path,self.device,mode='stream',cache_bytes=64*1024**2,
-            image_size=32,episode_paths=sorted(Path(path).glob('*.npz')))
+            image_size=32,episode_paths=sorted(resolve_path(path).glob('*.npz')))
 
     def prepare(self):
         args=self.args
@@ -140,6 +155,8 @@ class MotionOnlyTraining(RSSMCombatTraining):
             global_PCG_unchanged=self.rng.bit_generator.state==saved['rng_state'],
             no_architecture_migration=model.config.architecture=='dreamer_rssm')
         if not all(checks.values()):raise AssertionError('Motion-only activation changed the source boundary')
+        if self.state.get('error'):
+            self.state['previous_training_error']=dict(error=self.state.pop('error'),verified_resume_step=step)
         atomic_json(self.root/'motion_only_resume_verification.json',dict(step=step,checks=checks,
             passed=True,checked_before_SGD=True,source_checkpoint_sha256=loaded_sha))
         self.publish()
@@ -286,6 +303,8 @@ def main(argv=None):
     parser.add_argument('--motion-plan',type=Path,required=True)
     parser.add_argument('--round-corpus',type=Path)
     parser.add_argument('--cycle-status',type=Path)
+    parser.add_argument('--discard-foreign-pids',action='store_true',
+        help='Ignore copied legacy/foreign PID records after an explicit workspace transfer.')
     parser.add_argument('--validation-plan',type=Path,default=RUN/'motion_only_validation_plan.json')
     parser.add_argument('--updates',type=int,default=0)
     parser.add_argument('--probe-horizon',type=int,choices=HORIZONS)
@@ -303,12 +322,12 @@ def main(argv=None):
     if args.device=='cuda':torch.cuda.init()
     torch.set_num_threads(2)
     for key,value in vars(args).items():
-        if isinstance(value,Path):setattr(args,key,value.resolve())
+        if isinstance(value,Path):setattr(args,key,resolve_path(value))
     args.run_dir.mkdir(parents=True,exist_ok=True)
-    from .vqgan_pipeline import process_alive
+    from .process_runtime import pid_file_alive,write_pid_file
     pid=args.run_dir/'training.pid'
-    if pid.exists()and process_alive(int(pid.read_text())):parser.error('Dynamics worker is already active')
-    pid.write_text(str(os.getpid()))
+    if pid_file_alive(pid,discard_foreign=args.discard_foreign_pids):parser.error('Dynamics worker is already active')
+    write_pid_file(pid)
     trainer=MotionOnlyTraining(args)
     try:
         with KeepAwake():trainer.run()

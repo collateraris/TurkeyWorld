@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from .jepa_training_utils import SequenceData
+from .workspace_paths import resolve_path
 
 
 class MotionReplay:
@@ -20,17 +21,17 @@ class MotionReplay:
         self.stream=stream;self.device=device;self.rng=np.random.default_rng()
         self.protocol=sampler_state['protocol'];self.draws=sampler_state['draws']
         self.rng.bit_generator.state=deepcopy(sampler_state['rng'])
-        directories=[Path(directory)]
+        directories=[resolve_path(directory)]
         key='nav_train_directory'if stream=='navigation'else'enemy_train_directory'
-        directories.extend(Path(receipt[key])for receipt in corpora)
+        directories.extend(resolve_path(receipt[key])for receipt in corpora)
         self.data=[]
         for data_index,path in enumerate(directories):
             if path.name!='train':raise ValueError('Motion replay refuses any split except TRAIN')
             files=sorted(path.glob('*.npz'))
             if data_index:
                 receipt=corpora[data_index-1]
-                declared=sorted(Path(row['path'])for row in receipt['episodes']
-                    if Path(row['path']).resolve().parent==path.resolve())
+                declared=sorted(resolve_path(row['path'])for row in receipt['episodes']
+                    if resolve_path(row['path']).parent==path.resolve())
                 if [f.resolve()for f in files]!=[f.resolve()for f in declared]:
                     raise ValueError('Motion corpus directory changed after its immutable receipt')
             self.data.append(SequenceData(path,device=device,split='train',image_size=32,

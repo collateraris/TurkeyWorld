@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .workspace_paths import resolve_path,identity_path
 import time
 
 import torch
@@ -422,7 +423,7 @@ def _validate_compact_codec(teacher, codec, provenance, *, allow_unqualified_cod
 
 
 def _load_compact_codec(teacher, path, *, allow_unqualified_codec=False):
-    payload = torch.load(Path(path), map_location='cpu', weights_only=False)
+    payload = torch.load(resolve_path(path), map_location='cpu', weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get('model'), dict):
         raise ValueError('Expected a distilled compact-codec checkpoint')
     with torch.random.fork_rng(devices=[]):
@@ -434,7 +435,7 @@ def _load_compact_codec(teacher, path, *, allow_unqualified_codec=False):
         provenance['acceptance'] = {'scope': 'experimental_preview', 'quality_gate_passed': False,
             'reason': EXPERIMENTAL_CODEC_REASON, 'allow_unqualified_codec': True}
     _validate_compact_codec(teacher, codec, provenance, allow_unqualified_codec=allow_unqualified_codec)
-    provenance['checkpoint'] = str(Path(path).resolve())
+    provenance['checkpoint'] = identity_path(path)
     provenance['codec_fingerprint'] = codec_tensor_fingerprint(codec)
     provenance['parameters'] = sum(parameter.numel() for parameter in codec.parameters())
     return codec, provenance
@@ -628,7 +629,7 @@ def export_renderer_student(teacher, student, path, *, training_steps, metrics=N
 
 def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualified_codec=False):
     """Validate all tensors/dependencies before replacing only teacher.flow_renderer."""
-    payload = torch.load(Path(path), map_location='cpu', weights_only=False)
+    payload = torch.load(resolve_path(path), map_location='cpu', weights_only=False)
     if not isinstance(payload, dict):
         raise ValueError('Expected a standalone renderer bundle dictionary')
     if payload.get('format_version') == 8:
@@ -766,7 +767,7 @@ def _load_renderer_student_payload(teacher, payload, *, checkpoint,
     metadata = {key: value for key, value in payload.items() if key not in {'model', 'base_student_bundle'}}
     if pending_base is not None:
         metadata['base_student'] = base_metadata
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     teacher.renderer_student_metadata = metadata
     return metadata
 

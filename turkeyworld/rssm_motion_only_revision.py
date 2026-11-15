@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 
 from .rssm_main_ladder_revision import digest,file_sha
+from .workspace_paths import resolve_path,identity_path
 
 PROTOCOL='rssm_motion_only_main16_v1'
 HORIZONS=(16,48,80,112,144,180)
@@ -72,13 +73,13 @@ def motion_only_plan(saved,*,source_checkpoint,source_checkpoint_sha256,navdir,e
     if(q.get('motion_only_revision')is not None or gate['current_horizon']!=16
             or not _sha(source_checkpoint_sha256)or file_sha(source_checkpoint)!=source_checkpoint_sha256):
         raise ValueError('Motion-only activation needs the exact complete MAIN18/H16 source')
-    source=Path(source_checkpoint).resolve();nav=Path(navdir).resolve();enemy=Path(enemydir).resolve()
+    source=resolve_path(source_checkpoint);nav=resolve_path(navdir);enemy=resolve_path(enemydir)
     if not nav.is_dir()or not enemy.is_dir():raise ValueError('Motion-only replay roots must exist')
     return _json(dict(kind=PROTOCOL,version=1,settings=motion_only_settings(),batch_settings=batch_settings(),
-        source_checkpoint=str(source),source_checkpoint_sha256=source_checkpoint_sha256,source_optimizer_step=step,
+        source_checkpoint=identity_path(source),source_checkpoint_sha256=source_checkpoint_sha256,source_optimizer_step=step,
         source_rssm_training=deepcopy(q),source_rssm_training_sha256=digest(q),
         source_training_protocol=deepcopy(state.get('training_protocol',{})),
-        navigation_directory=str(nav),enemy_motion_directory=str(enemy),
+        navigation_directory=identity_path(nav),enemy_motion_directory=identity_path(enemy),
         initial_corpus_identity=deepcopy(corpus_identity),
         all_weights_named_Adam_RNG_and_lineage_preserved=True,new_formula_history_separate=True))
 
@@ -94,7 +95,7 @@ def record(state):return state['rssm_training']['motion_only_revision']
 
 
 def bind_motion_only(state,plan,*,path,loaded_sha,sha256=None):
-    raw=Path(path).read_bytes();actual=file_sha(path);sha256=actual if sha256 is None else sha256
+    raw=resolve_path(path).read_bytes();actual=file_sha(path);sha256=actual if sha256 is None else sha256
     if(actual!=sha256 or json.loads(raw.decode('utf-8'))!=plan or plan.get('kind')!=PROTOCOL
             or plan.get('settings')!=motion_only_settings()or plan.get('batch_settings')!=batch_settings()
             or digest(plan.get('source_rssm_training'))!=plan.get('source_rssm_training_sha256')
@@ -107,7 +108,7 @@ def bind_motion_only(state,plan,*,path,loaded_sha,sha256=None):
             raise ValueError('Motion-only activation must preserve the complete raw source ledger')
         old=deepcopy(q);replay=old['navigation_replay_revision']
         nav=deepcopy(replay['sampler_state']);enemy=deepcopy(replay['enemy_sampler_state'])
-        r=dict(protocol=PROTOCOL,version=1,sha256=sha256,plan_path=str(Path(path).resolve()),
+        r=dict(protocol=PROTOCOL,version=1,sha256=sha256,plan_path=identity_path(path),
             source_optimizer_step=step,last_optimizer_step=step,updates=0,
             source_checkpoint_sha256=plan['source_checkpoint_sha256'],source_rssm_training=old,
             source_rssm_training_sha256=digest(old),settings=motion_only_settings(),
@@ -254,12 +255,12 @@ def attach_corpus(state,receipt):
     if(not isinstance(receipt,dict)or not _sha(receipt.get('policy_checkpoint_sha256'))
             or not _sha(receipt.get('world_checkpoint_sha256'))or receipt.get('split')!='train'
             or receipt.get('validation_unchanged')is not True
-            or not receipt.get('episodes')or not Path(receipt.get('nav_train_directory','')).is_dir()
-            or not Path(receipt.get('enemy_train_directory','')).is_dir()):
+            or not receipt.get('episodes')or not resolve_path(receipt.get('nav_train_directory','')).is_dir()
+            or not resolve_path(receipt.get('enemy_train_directory','')).is_dir()):
         raise ValueError('A cycle corpus needs actual TRAIN records, frozen VAL and pinned policy/world')
     for row in receipt['episodes']:
-        path=Path(row['path']).resolve()
-        roots=(Path(receipt[key]).resolve()for key in('nav_train_directory','enemy_train_directory'))
+        path=resolve_path(row['path'])
+        roots=(resolve_path(receipt[key])for key in('nav_train_directory','enemy_train_directory'))
         if(row.get('split')!='train'or not any(path.is_relative_to(root)for root in roots)
                 or not _sha(row.get('sha256'))or file_sha(path)!=row['sha256']):
             raise ValueError('A policy-collected Source TRAIN episode changed or leaks VAL')

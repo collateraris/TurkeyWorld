@@ -18,6 +18,8 @@ import sys
 import time
 
 from .power_guard import KeepAwake
+from .process_runtime import pid_file_alive,write_pid_file,process_identity,process_identity_alive
+from .workspace_paths import resolve_path,identity_path
 
 ROOT=Path(__file__).resolve().parents[1]
 PROTOCOL='dreamer_motion_Source_world_policy_cycle_v1'
@@ -38,13 +40,13 @@ def retry_shared_file(operation):
             if attempt+1==IO_ATTEMPTS:raise
             time.sleep(delay);delay=min(delay*2,IO_MAX_DELAY)
 
-def read(path):return json.loads(retry_shared_file(lambda:Path(path).read_text(encoding='utf-8')))
+def read(path):return json.loads(retry_shared_file(lambda:resolve_path(path).read_text(encoding='utf-8')))
 def sha(path):
     def calculate():
-        with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+        with resolve_path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
     return retry_shared_file(calculate)
 def atomic(path,value):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    path=resolve_path(path);path.parent.mkdir(parents=True,exist_ok=True)
     temporary=path.with_name(path.name+f'.{os.getpid()}.tmp')
     body=json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)
     try:
@@ -54,11 +56,36 @@ def atomic(path,value):
         try:temporary.unlink(missing_ok=True)
         except OSError:pass
         raise
+def _posix_alive(pid):
+    try:
+        os.kill(pid,0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM proves the PID exists; it must not trigger a second worker.
+        pass
+    if sys.platform.startswith('linux'):
+        try:
+            # kill(pid,0) also succeeds for an unreaped child. Its process name
+            # may contain spaces/parentheses, so parse after the final ')'.
+            record=Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+            state=record.rsplit(')',1)[1].split()[0]
+            if state in ('Z','X','x'):return False
+        except (OSError,IndexError):
+            # /proc may be unavailable; the signal permission probe still
+            # established existence. A process-exit race is rechecked next poll.
+            pass
+    return True
+
+
 def alive(pid):
-    if not pid:return False
+    if not isinstance(pid,int)or isinstance(pid,bool)or pid<1:return False
+    if os.name!='nt':return _posix_alive(pid)
     kernel=ctypes.WinDLL('kernel32',use_last_error=True)
     kernel.OpenProcess.restype=ctypes.c_void_p
+    kernel.OpenProcess.argtypes=[ctypes.c_uint,ctypes.c_int,ctypes.c_uint]
     kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint]
+    kernel.WaitForSingleObject.restype=ctypes.c_uint
     kernel.CloseHandle.argtypes=[ctypes.c_void_p]
     handle=kernel.OpenProcess(0x00100000,False,int(pid))
     if not handle:return False
@@ -66,11 +93,16 @@ def alive(pid):
     finally:kernel.CloseHandle(handle)
 
 
+def child_process_options():
+    """Suppress Windows console helpers; POSIX requires zero creation flags."""
+    return dict(creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)if os.name=='nt'else 0)
+
+
 class MotionCycle:
     def __init__(self,args):
-        self.args=args;self.root=args.run_dir;self.root.mkdir(parents=True,exist_ok=True)
+        self.args=args;self.root=resolve_path(args.run_dir);self.root.mkdir(parents=True,exist_ok=True)
         self.status_path=self.root/'status.json'
-        settings=dict(protocol=PROTOCOL,version=1,world_run=str(args.world_run),policy_run=str(args.policy_run),
+        settings=dict(protocol=PROTOCOL,version=1,world_run=identity_path(args.world_run),policy_run=identity_path(args.policy_run),
             motion_plan_sha256=sha(args.motion_plan),horizons=[16,48,80,112,144,180],updates_per_horizon=30,
             world_updates_per_round=180,actor_critic_updates_per_round=args.policy_updates,
             episodes_per_stream=args.episodes_per_stream,episode_transitions=180,
@@ -96,7 +128,7 @@ class MotionCycle:
                 status=read(path);status['dreamer_cycle']=self.state;atomic(path,status)
 
     def bootstrap(self,module,*arguments):
-        return [sys.executable,'-X','utf8','-u',str(ROOT/'training_runs/diagnostic_tools/bootstrap_torch_cuda_20261114.py'),
+        return [sys.executable,'-X','utf8','-u','-m','turkeyworld.bootstrap',
             '--module',module,*map(str,arguments)]
 
     def retire_initial_flags(self):
@@ -140,11 +172,19 @@ class MotionCycle:
         launch_path=directory/(name+'_launch.json')
         launch=read(launch_path)if launch_path.exists()else{}
         child=None;pid=launch.get('pid')
-        if not alive(pid)and not finished():
+        if launch.get('process_identity')is not None and launch['process_identity'].get('pid')!=pid:
+            raise ValueError('Child PID and host-bound launch receipt differ')
+        owned=(process_identity_alive(launch.get('process_identity'),
+            discard_foreign=getattr(self.args,'discard_foreign_pids',False))if pid is not None else False)
+        if not owned and not finished():
+            if launch_path.exists():
+                archive=directory/'launch_history'/f'{time.time_ns()}_{launch_path.name}'
+                archive.parent.mkdir(exist_ok=True)
+                archive.write_bytes(launch_path.read_bytes())
             with(directory/(name+'.stdout.log')).open('ab')as out,(directory/(name+'.stderr.log')).open('ab')as err:
                 child=subprocess.Popen(command,cwd=ROOT,stdout=out,stderr=err,stdin=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
-            pid=child.pid;atomic(launch_path,dict(pid=pid,argv=command,started_at=now()))
+                    **child_process_options())
+            pid=child.pid;atomic(launch_path,dict(pid=pid,argv=command,started_at=now(),process_identity=process_identity(pid)))
         self.state.update(status='running',active_pid=pid);self.publish(mirror=name!='world')
         while alive(pid):
             progress();self.publish(mirror=name!='world')
@@ -192,7 +232,7 @@ class MotionCycle:
         for stream in('navigation','enemy_motion'):
             if sum(row.get('stream')==stream for row in value['episodes'])!=self.args.episodes_per_stream:
                 raise ValueError('Collected Source data has incorrect motion cohort counts')
-        self.state.update(source_receipt=str(path),source_receipt_sha256=sha(path),
+        self.state.update(source_receipt=identity_path(path),source_receipt_sha256=sha(path),
             source_episodes=len(value['episodes']),source_transitions=value['total_real_Source_transitions'])
         return path
 
@@ -209,7 +249,8 @@ class MotionCycle:
                 self.state.update(world_updates=r['gate']['updates'],world_step=row.get('global_training_step'))
         command=self.bootstrap('turkeyworld.train_rssm_motion_only','--run-dir',self.args.world_run,
             '--source-checkpoint',self.args.initial_world,'--motion-plan',self.args.motion_plan,
-            '--round-corpus',self.state['source_receipt'],'--cycle-status',self.status_path)
+            '--round-corpus',resolve_path(self.state['source_receipt']),'--cycle-status',self.status_path)
+        if getattr(self.args,'discard_foreign_pids',False):command.append('--discard-foreign-pids')
         self.execute(directory,'world',command,finished=finished,progress=progress)
         final=current();self.state.update(world_step=final['global_training_step'],
             trained_world_sha256=sha(self.args.world_run/'checkpoints/rssm_world.pt'))
@@ -231,8 +272,9 @@ class MotionCycle:
                 policy_step=row.get('step'),policy_phase=row.get('phase'))
         command=self.bootstrap('turkeyworld.train_dreamer_policy','--run-dir',self.args.policy_run,
             '--world-source',self.args.world_run/'checkpoints/rssm_world.pt','--refresh-world-now',
-            '--cycle-corpus',self.state['source_receipt'],
+            '--cycle-corpus',resolve_path(self.state['source_receipt']),
             '--until-actor-updates',self.state['policy_actor_target'])
+        if getattr(self.args,'discard_foreign_pids',False):command.append('--discard-foreign-pids')
         self.execute(directory,'policy',command,finished=finished,progress=progress)
         atomic(directory/'policy_complete.json',dict(actor_updates=read(path)['actor_updates'],
             step=read(path)['step'],world_sha256=self.state['trained_world_sha256'],
@@ -270,15 +312,16 @@ def main(argv=None):
     parser.add_argument('--policy-updates',type=int,default=50)
     parser.add_argument('--cycles',type=int,default=0)
     parser.add_argument('--resume-after-user-stop',action='store_true',help='Explicitly authorize clearing saved stop flags and resuming the same stage')
+    parser.add_argument('--discard-foreign-pids',action='store_true',help='Explicit migration only: ignore foreign/legacy PID receipts after confirming old workers are stopped')
     args=parser.parse_args(argv)
     if min(args.episodes_per_stream,args.policy_updates)<1 or args.cycles<0:parser.error('Invalid cycle budgets')
     for key,value in vars(args).items():
-        if isinstance(value,Path):setattr(args,key,value.resolve())
-    if args.initial_world is None:args.initial_world=Path(read(args.world_run/'motion_only_source.json')['source_checkpoint'])
+        if isinstance(value,Path):setattr(args,key,resolve_path(value))
+    if args.initial_world is None:args.initial_world=resolve_path(read(args.world_run/'motion_only_source.json')['source_checkpoint'])
     args.run_dir.mkdir(parents=True,exist_ok=True)
     pid=args.run_dir/'cycle.pid'
-    if pid.exists()and alive(int(pid.read_text())):parser.error('Serial cycle controller already active')
-    pid.write_text(str(os.getpid()))
+    if pid_file_alive(pid,discard_foreign=args.discard_foreign_pids):parser.error('Serial cycle controller already active')
+    write_pid_file(pid)
     cycle=MotionCycle(args)
     try:
         with KeepAwake():cycle.run()

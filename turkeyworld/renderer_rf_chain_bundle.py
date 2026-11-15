@@ -1,6 +1,7 @@
 """RF3 continuation on the selected complete expanded-Base format6 parent."""
 from copy import deepcopy
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -167,7 +168,7 @@ def load_rf_chain_payload(teacher, payload, *, checkpoint,
     flow._check_codec()
     flow.eval()
     metadata = {k:deepcopy(v) for k,v in payload.items() if k not in {'parent_bundle', 'rf_override'}}
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     flow._renderer_rf_chain = deepcopy(metadata)
     flow._renderer_rf_chain_parent_bundle = deepcopy(parent)
     if hasattr(teacher, 'base_student'):

@@ -14,6 +14,7 @@ from collections import OrderedDict
 import json
 import math
 from pathlib import Path
+from .workspace_paths import resolve_path
 
 import numpy as np
 import torch
@@ -159,7 +160,7 @@ class SequenceData:
                               counterfactual_backgrounds=counterfactual_backgrounds)
             return
         self.mode = "memory"
-        self.directory, self.device = Path(directory), torch.device(device)
+        self.directory, self.device = resolve_path(directory), torch.device(device)
         if limit < 0 or max_bytes < 1 or image_size is not None and image_size < 1:
             raise ValueError("File limit must be nonnegative; memory/image sizes must be positive")
         from .streaming_sequences import resolve_episode_paths
@@ -227,7 +228,7 @@ class SequenceData:
 
     def _initialize_object_masks(self, directory, counterfactual_backgrounds=False):
         """Preflight completed training-only annotations, without engine calls."""
-        self.object_masks_directory = Path(directory).resolve() if directory is not None else None
+        self.object_masks_directory = resolve_path(directory) if directory is not None else None
         self._object_mask_cache = OrderedDict()
         self._object_mask_sidecar_identities = {}
         self.object_mask_cache_limit = 16
@@ -254,7 +255,7 @@ class SequenceData:
                 or manifest.get("completed_episodes") != len(records)
                 or manifest.get("total_episodes") != len(records)):
             raise ValueError("Object mask cache manifest must describe a complete verified cache")
-        source_root = Path(manifest.get("source_data_root", "")).resolve()
+        source_root = resolve_path(manifest.get("source_data_root", ""))
         if (source_root / "rgb" / self.split).resolve() != self.directory.resolve():
             raise ValueError("Object mask cache source directory/split mismatch")
         self._object_mask_behavior = manifest.get("behavior_version")

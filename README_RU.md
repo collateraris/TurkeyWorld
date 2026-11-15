@@ -4,6 +4,24 @@
 
 Журнал изменений и результатов: [Русский](README_HISTORY_RU.md) | [English](README_HISTORY_EN.md).
 
+**Обучение приостановлено для переноса на Ubuntu.** См.
+[инструкцию продолжения](CONTINUE_ON_UBUNTU_RU.md) и финальные pause-артефакты.
+Сохранить весь workspace, включая игнорируемые training runs и незакоммиченный код.
+Пути, процессы, bootstrap и sleep guards теперь имеют Windows/Linux-ветки;
+перед явным продолжением на целевой Ubuntu GPU обязателен preflight из инструкции.
+
+Окружение Ubuntu: сначала `bash scripts/setup_ubuntu.sh --dry-run`, затем
+`bash scripts/setup_ubuntu.sh`. Установщик создаёт Python3.12-окружение с
+закреплёнными Torch2.11/torchvision0.26 CUDA12.8 и зависимостями; обучение
+не запускается, stop markers не удаляются. Пара версий есть в
+[официальной инструкции PyTorch](https://pytorch.org/get-started/previous-versions/#v2110).
+Перед resume нужен read-only preflight из инструкции; настоящий Ubuntu GPU
+здесь пока не проверен.
+Windows: `python -X utf8 -u -m turkeyworld.bootstrap --module ...` напрямую;
+[run_training.ps1](scripts/run_training.ps1) необязателен при разрешающей политике.
+Linux: [run_training.sh](scripts/run_training.sh), с теми же target-module flags.
+Команда конечного одного раунда находится в инструкции. Обучение остаётся на паузе.
+
 TurkeyWorld содержит обычную игру от первого лица и экспериментальную модель
 мира: **один постоянный враг**, **state20**, условия игрока и NPC. Сохранены
 **три RSSM по принципам Dreamer, общий MoE trunk и пять отдельных

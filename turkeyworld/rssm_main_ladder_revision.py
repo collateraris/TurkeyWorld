@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from .workspace_paths import resolve_path
 
 PROTOCOL='rssm_main18_full_bptt_loss_ladder_v1'
 HORIZONS=(*range(16,449,32),450)
@@ -23,7 +24,7 @@ def _canonical_json(value):
 
 
 def file_sha(path):
-    with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    with resolve_path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
 def settings():

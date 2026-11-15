@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from .workspace_paths import resolve_path,identity_path
 
 import torch
 from torch import nn
@@ -230,7 +231,7 @@ def export_base_student(teacher, head, path, *, training_steps, metrics=None, pr
 def prepare_base_student(teacher, path_or_payload):
     """Validate/build privately, returning(head, metadata, fullbundle); no mutation."""
     _require_teacher(teacher)
-    payload = (torch.load(Path(path_or_payload), map_location='cpu', weights_only=False)
+    payload = (torch.load(resolve_path(path_or_payload), map_location='cpu', weights_only=False)
                if isinstance(path_or_payload, (str, Path)) else path_or_payload)
     if (not isinstance(payload, dict) or payload.get('format_version') != 1
             or payload.get('stage') != 'base_student' or payload.get('state_schema') != STATE_SCHEMA):
@@ -266,7 +267,7 @@ def prepare_base_student(teacher, path_or_payload):
     head.to(device=parameter.device, dtype=parameter.dtype).eval().requires_grad_(False)
     metadata = {key: value for key, value in payload.items() if key != 'model'}
     if isinstance(path_or_payload, (str, Path)):
-        metadata['checkpoint'] = str(Path(path_or_payload).resolve())
+        metadata['checkpoint'] = identity_path(path_or_payload)
     return head, metadata, payload
 
 

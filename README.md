@@ -4,6 +4,25 @@ English | [Русский](README_RU.md)
 
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
+**Training is paused for the Ubuntu handoff.** Read the
+[continuation note in Russian](CONTINUE_ON_UBUNTU_RU.md) and final pause artifacts
+before resuming. Preserve the whole workspace, including ignored training runs
+and uncommitted code. Path/process/bootstrap/sleep guards now support Windows
+and Linux; the destination Ubuntu GPU must pass the handoff preflight before
+any explicitly requested resume.
+
+Ubuntu environment setup: `bash scripts/setup_ubuntu.sh --dry-run`, then
+`bash scripts/setup_ubuntu.sh` installs a dedicated Python3.12 environment with
+the saved Torch2.11/torchvision0.26 CUDA12.8 pair and application pins.
+The installer never starts training or clears stop markers. The pair is listed
+in the [official PyTorch instructions](https://pytorch.org/get-started/previous-versions/#v2110).
+Destination resume still requires the read-only preflight in the handoff note;
+Ubuntu GPU execution has not been tested here.
+Windows uses `python -X utf8 -u -m turkeyworld.bootstrap --module ...` directly;
+[run_training.ps1](scripts/run_training.ps1) is optional if existing policy permits.
+Linux uses [run_training.sh](scripts/run_training.sh); target-module flags are shared.
+The handoff note contains the finite one-round resume command. Training remains paused.
+
 TurkeyWorld contains a first-person reference game and an experimental neural
 world model: **one persistent enemy**, **state20**, and player/NPC conditions.
 The world retains **three Dreamer-style RSSMs, a shared MoE trunk and five

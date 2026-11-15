@@ -4,8 +4,9 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 import hashlib
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path,PureWindowsPath
 from urllib.parse import urlsplit
+from .workspace_paths import resolve_path
 
 ROOT=Path(__file__).resolve().parents[1]
 PAGE_ROOT=ROOT/'policy_dashboard'
@@ -13,17 +14,22 @@ PAGE_ROOT=ROOT/'policy_dashboard'
 
 @lru_cache(maxsize=64)
 def _sha_cached(path,size,mtime_ns):
-    with Path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    with resolve_path(path).open('rb')as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
 def _sha(path):
-    path=Path(path);stat=path.stat();return _sha_cached(str(path),stat.st_size,stat.st_mtime_ns)
+    path=resolve_path(path);stat=path.stat();return _sha_cached(str(path),stat.st_size,stat.st_mtime_ns)
+
+
+def _report_path(root,value):
+    if Path(value).is_absolute()or PureWindowsPath(value).is_absolute():return resolve_path(value)
+    return (root/value.replace('\\','/')).resolve()
 
 
 def verified_validation(root,receipt):
     """Verify pinned saved evaluation artifacts without deserializing weights."""
     def inside(name):
-        path=Path(receipt[name]);path=path.resolve()if path.is_absolute()else(root/path).resolve()
+        path=_report_path(root,receipt[name])
         if root not in path.parents:raise ValueError('Policy validation artifact escapes its run directory')
         return path
     report_path=inside('report_file');policy_path=inside('policy_checkpoint_file');world_path=inside('world_checkpoint_file')
@@ -41,7 +47,7 @@ def verified_validation(root,receipt):
 
 
 def monitor_payload(run_dir,*,history_limit=2048):
-    root=Path(run_dir).resolve();path=root/'status.json'
+    root=resolve_path(run_dir);path=root/'status.json'
     if not path.is_file():return dict(status='waiting',message='Policy training has not published status.json',history=[])
     value=json.loads(path.read_text(encoding='utf-8'));history=[];log=root/'history.jsonl'
     if log.is_file():
@@ -56,7 +62,7 @@ def monitor_payload(run_dir,*,history_limit=2048):
             value['validation_receipt_verified']=False;value['validation_receipt_error']=str(error)
         return value
     if isinstance(validation,dict)and validation.get('file'):
-        report=Path(validation['file']);report=report.resolve()if report.is_absolute()else(root/report).resolve()
+        report=_report_path(root,validation['file'])
         if root not in report.parents:raise ValueError('Policy validation file must remain in the explicit run directory')
         if report.is_file():value['validation_report']=json.loads(report.read_text(encoding='utf-8'))
     return value

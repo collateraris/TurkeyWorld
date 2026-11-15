@@ -1,4 +1,6 @@
 """Thread-scoped sleep protection keeps the display/lock policy unchanged."""
+import io
+import subprocess
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -68,14 +70,57 @@ class KeepAwakeTests(unittest.TestCase):
         self.assertTrue(guard.error)
         self.assertEqual(api.call_count, 2)
 
-    def test_non_windows_default_is_a_noop_without_loading_windows_libraries(self):
+    def test_linux_missing_inhibitor_is_visible_without_loading_windows_libraries(self):
         from turkeyworld.power_guard import KeepAwake
-        with patch("sys.platform", "linux"), \
+        with patch("sys.platform", "linux"),patch('shutil.which',return_value=None), \
              patch("ctypes.WinDLL", create=True, side_effect=AssertionError("Windows-only library load")) as library:
-            with KeepAwake() as guard:
-                self.assertFalse(guard.active)
-                self.assertFalse(guard.error)
+            with self.assertWarnsRegex(RuntimeWarning,'Sleep protection inactive'):
+                with KeepAwake() as guard:
+                    self.assertFalse(guard.active)
+                    self.assertIn('systemd-inhibit',guard.error)
+                    self.assertEqual(guard.report()['backend'],'systemd-inhibit')
             library.assert_not_called()
+
+    def test_linux_readiness_sleep_only_and_eof_release_without_display_or_lock_changes(self):
+        from turkeyworld.power_guard import KeepAwake
+        process=Mock(stdin=Mock(),stdout=io.StringIO('TURKEYWORLD_INHIBITOR_READY\n'))
+        process.poll.return_value=None;process.wait.return_value=0
+        with patch('sys.platform','linux'),patch('shutil.which',return_value='/usr/bin/systemd-inhibit'),\
+                patch('subprocess.Popen',return_value=process)as launch:
+            with KeepAwake()as guard:
+                self.assertTrue(guard.active);self.assertTrue(guard.report()['screen_lock_allowed'])
+                self.assertFalse(guard.report()['display_required'])
+                command=launch.call_args.args[0]
+                self.assertIn('--what=sleep',command);self.assertIn('--mode=block',command)
+                self.assertFalse(any('idle'in item or 'handle-lid-switch'in item for item in command))
+                self.assertIn('sys.stdin.buffer.read()',command[-1])
+                self.assertTrue(launch.call_args.kwargs['close_fds'])
+                self.assertEqual(launch.call_args.kwargs['stdin'],subprocess.PIPE)
+            self.assertFalse(guard.active);process.stdin.close.assert_called_once()
+            process.wait.assert_called_once_with(timeout=5)
+
+    def test_linux_permission_failure_does_not_claim_awake_and_cleans_helper(self):
+        from turkeyworld.power_guard import KeepAwake
+        process=Mock(stdin=Mock(),stdout=io.StringIO('Failed to inhibit: Access denied\n'))
+        process.poll.return_value=1;process.wait.return_value=1
+        with patch('sys.platform','linux'),patch('shutil.which',return_value='/usr/bin/systemd-inhibit'),\
+                patch('subprocess.Popen',return_value=process),self.assertWarnsRegex(RuntimeWarning,'Access denied'):
+            with KeepAwake()as guard:
+                self.assertFalse(guard.active);self.assertIn('Access denied',guard.error)
+        process.stdin.close.assert_called_once();process.wait.assert_called_once_with(timeout=5)
+
+    def test_linux_early_helper_death_is_reported_and_training_exception_preserved(self):
+        from turkeyworld.power_guard import KeepAwake
+        process=Mock(stdin=Mock(),stdout=io.StringIO('TURKEYWORLD_INHIBITOR_READY\n'))
+        process.poll.side_effect=[None,1];process.wait.return_value=1
+        with patch('sys.platform','linux'),patch('shutil.which',return_value='/usr/bin/systemd-inhibit'),\
+                patch('subprocess.Popen',return_value=process):
+            with self.assertRaisesRegex(ValueError,'original training'):
+                with KeepAwake()as guard:
+                    with self.assertWarnsRegex(RuntimeWarning,'exited unexpectedly'):
+                        self.assertFalse(guard.report()['active'])
+                    raise ValueError('original training')
+        process.stdin.close.assert_called_once();self.assertFalse(guard.active)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,2 @@
+# Keep Bash line endings portable between Windows and Linux.
+*.sh text eol=lf

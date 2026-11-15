@@ -6,20 +6,29 @@ import copy
 from dataclasses import asdict
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path,PureWindowsPath
 import random
 import re
 
 import numpy as np
 import torch
+from .workspace_paths import resolve_path,identity_path
 
 
 def file_sha256(path):
     digest = hashlib.sha256()
-    with Path(path).open('rb') as stream:
+    with resolve_path(path).open('rb') as stream:
         for block in iter(lambda: stream.read(1024*1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _absolute_asset_path(value):
+    # Resolve only after checking the authored reference. A relative filename
+    # must not accidentally become an accepted absolute pin during relocation.
+    if not isinstance(value,(str,Path)) or not(Path(value).is_absolute()or PureWindowsPath(value).is_absolute()):
+        raise ValueError('Pinned preview asset SHA/path requires an absolute file path')
+    return resolve_path(value)
 
 
 @contextmanager
@@ -41,7 +50,7 @@ def preserve_preview_rng(device, private_rng=None):
 
 def read_preview_assets_plan(path):
     """Verify immutable file identities before considering the preview cache."""
-    path = Path(path).resolve()
+    path = resolve_path(path)
     raw = json.loads(path.read_text(encoding='utf-8'))
     if type(raw.get('version')) is not int or raw.get('version') != 1 or raw.get('kind') != 'frozen_preview_assets_v1':
         raise ValueError('Unknown preview-assets plan protocol')
@@ -52,13 +61,13 @@ def read_preview_assets_plan(path):
         asset = raw.get(name)
         if not isinstance(asset, dict):
             raise ValueError('Preview plan requires renderer and SR assets')
-        source = Path(asset.get('checkpoint', ''))
+        source = _absolute_asset_path(asset.get('checkpoint', ''))
         expected = asset.get('file_sha256')
         if (not source.is_absolute() or not source.is_file() or not isinstance(expected, str)
                 or re.fullmatch(r'[0-9a-f]{64}', expected) is None or file_sha256(source) != expected):
             raise ValueError('Pinned preview '+name+' file SHA/path changed')
-        result[name]['checkpoint'] = str(source.resolve())
-    result['plan_path'] = str(path)
+        result[name]['checkpoint'] = identity_path(source)
+    result['plan_path'] = identity_path(path)
     result['plan_sha256'] = file_sha256(path)
     return result
 
@@ -83,7 +92,7 @@ def resolve_preview_assets_plan(initial_path, revision_path=None, saved_revision
             raise ValueError('Resume requires the saved explicit preview-assets revision plan')
         return initial, initial, None
     def resolve_revision(path, ancestors=()):
-        path=Path(path).resolve()
+        path=resolve_path(path)
         if path in ancestors or len(ancestors)>=32:
             raise ValueError('Preview-assets revision chain has a cycle or excessive depth')
         if not path.is_file():raise ValueError('Previous preview-assets revision SHA/path changed')
@@ -95,7 +104,7 @@ def resolve_preview_assets_plan(initial_path, revision_path=None, saved_revision
             raise ValueError('Preview-assets revision changed its initial immutable plan')
         parent=None
         if raw['version']==2:
-            previous=Path(raw.get('previous_revision_plan',''))
+            previous=_absolute_asset_path(raw.get('previous_revision_plan',''))
             previous_sha=raw.get('previous_revision_sha256')
             if (not previous.is_absolute()or not previous.is_file()or not isinstance(previous_sha,str)
                     or re.fullmatch(r'[0-9a-f]{64}',previous_sha)is None):
@@ -103,12 +112,12 @@ def resolve_preview_assets_plan(initial_path, revision_path=None, saved_revision
             _,parent,_=resolve_revision(previous,ancestors+(path,))
             if parent['revision_sha256']!=previous_sha:
                 raise ValueError('Previous preview-assets revision SHA/path changed')
-        selected_path=Path(raw.get('selected_plan',''));expected=raw.get('selected_plan_sha256')
+        selected_path=_absolute_asset_path(raw.get('selected_plan',''));expected=raw.get('selected_plan_sha256')
         if (not selected_path.is_absolute()or not selected_path.is_file()or not isinstance(expected,str)
                 or re.fullmatch(r'[0-9a-f]{64}',expected)is None or file_sha256(selected_path)!=expected):
             raise ValueError('Selected preview-assets plan SHA/path changed')
         selected=read_preview_assets_plan(selected_path)
-        record={'kind':raw['kind'],'revision_plan_path':str(path),
+        record={'kind':raw['kind'],'revision_plan_path':identity_path(path),
             'revision_sha256':hashlib.sha256(data).hexdigest(),'initial_plan_path':initial['plan_path'],
             'initial_plan_sha256':initial['plan_sha256'],'selected_plan_path':selected['plan_path'],
             'selected_plan_sha256':selected['plan_sha256'],'preview_only':True,

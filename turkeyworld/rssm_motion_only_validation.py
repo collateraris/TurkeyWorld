@@ -15,6 +15,7 @@ import zipfile
 import numpy as np
 
 from .rssm_main_ladder_revision import digest,file_sha
+from .workspace_paths import resolve_path,identity_path
 from .streaming_sequences import _small_fields
 from .structured_state import STATE_DIM,STATE_SCHEMA_VERSION,ENTITY_SLOTS
 
@@ -56,13 +57,13 @@ def _episode(path):
     after=path.stat()
     if(before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns):
         raise ValueError('A held-out episode changed while its identity was being read')
-    return dict(episode=path.name,path=str(path),sha256=sha,bytes=after.st_size,
+    return dict(episode=path.name,path=identity_path(path),sha256=sha,bytes=after.st_size,
         mtime_ns=after.st_mtime_ns,split='val',transitions=transitions,frames=transitions+1,
         dt=fields['dt'],array_schema=headers,declared_schema=schema)
 
 
 def _cohort(directory,settings):
-    directory=Path(directory).resolve()
+    directory=resolve_path(directory)
     if directory.name!='val'or not directory.is_dir():
         raise ValueError('Motion validation pins one explicit VAL split directory')
     paths=sorted(directory.glob('*.npz'))
@@ -81,20 +82,20 @@ def _cohort(directory,settings):
     for row in windows:
         file=files[row['episode_index']];start=row['start']
         identities.append({key:file[key]for key in('episode','bytes','mtime_ns')})
-        with np.load(file['path'],allow_pickle=False)as saved:
+        with np.load(resolve_path(file['path']),allow_pickle=False)as saved:
             for name,value in(('context_rgb',saved['frames'][start:start+context]),
                     ('states',np.asarray(saved['states'],dtype=np.float32)[start:start+context+horizon]),
                     ('actions',np.asarray(saved['actions'],dtype=np.float32)[start+context-1:start+context-1+horizon]),
                     ('map',np.asarray(saved['map'],dtype=np.int64))):
                 array=np.ascontiguousarray(value)
                 content.update(name.encode()+array.dtype.str.encode()+str(array.shape).encode()+array.tobytes())
-        after=Path(file['path']).stat()
+        after=resolve_path(file['path']).stat()
         if(after.st_size,after.st_mtime_ns)!=(file['bytes'],file['mtime_ns']):
             raise ValueError('A held-out episode changed while its fixed panel was being read')
     panel=dict(version='heldout_free_state_v1',split='val',windows=windows,context=context,horizon=horizon,
         seed=seed,source_content_sha256=content.hexdigest(),
         episode_identity_sha256=hashlib.sha256(json.dumps(identities,sort_keys=True).encode()).hexdigest())
-    return dict(directory=str(directory),split='val',episode_paths=[str(path)for path in paths],
+    return dict(directory=identity_path(directory),split='val',episode_paths=[identity_path(path)for path in paths],
         ordered_filenames=[path.name for path in paths],files=files,panel=panel,
         expected_fingerprint=hashlib.sha256(json.dumps(panel,sort_keys=True).encode()).hexdigest())
 
@@ -109,10 +110,10 @@ def _settings(*,context=1,horizon=180,count=8,batch_size=4,seed=173):
 
 
 def _build(navdir,enemydir,path,settings):
-    nav=Path(navdir).resolve();enemy=Path(enemydir).resolve()
+    nav=resolve_path(navdir);enemy=resolve_path(enemydir)
     if nav==enemy:raise ValueError('Navigation and quiet-enemy VAL pools must remain distinct')
     data=dict(navigation=_cohort(nav,settings),enemy_motion=_cohort(enemy,settings))
-    return dict(kind=PROTOCOL,version=1,plan_path=str(Path(path).resolve()),settings=settings,
+    return dict(kind=PROTOCOL,version=1,plan_path=identity_path(path),settings=settings,
         state_schema=dict(state_dim=STATE_DIM,version=STATE_SCHEMA_VERSION,entity_slots=ENTITY_SLOTS),
         **data,data_identity_sha256=digest(data))
 
@@ -134,7 +135,7 @@ def _exclusive_atomic_json(path,value):
 
 
 def bind_motion_validation_plan(navdir,enemydir,path,*,context=1,horizon=180,count=8,batch_size=4,seed=173):
-    path=Path(path).resolve();settings=_settings(context=context,horizon=horizon,count=count,batch_size=batch_size,seed=seed)
+    path=resolve_path(path);settings=_settings(context=context,horizon=horizon,count=count,batch_size=batch_size,seed=seed)
     core=_build(navdir,enemydir,path,settings)
     if path.exists():
         if json.loads(path.read_text(encoding='utf-8'))!=core:
@@ -145,7 +146,7 @@ def bind_motion_validation_plan(navdir,enemydir,path,*,context=1,horizon=180,cou
 
 def verify_motion_validation_plan(plan):
     expected=deepcopy(plan);sha=expected.pop('validation_plan_sha256',None)
-    path=Path(expected.get('plan_path',''))
+    path=resolve_path(expected.get('plan_path',''))
     if(expected.get('kind')!=PROTOCOL or not isinstance(sha,str)or not path.is_file()
             or file_sha(path)!=sha or json.loads(path.read_text(encoding='utf-8'))!=expected):
         raise ValueError('Motion validation immutable plan bytes changed')

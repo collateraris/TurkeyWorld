@@ -1,6 +1,7 @@
 """A strict restorer-only format4 overlay over an immutable format3 decoder parent."""
 from copy import deepcopy
 from pathlib import Path
+from .workspace_paths import identity_path
 
 import torch
 
@@ -172,7 +173,7 @@ def load_conditional_restorer_payload(teacher, payload, *, checkpoint,
             raise ValueError('Already loaded Base differs from the restorer parent')
         private.base_student = teacher.base_student
     metadata = deepcopy(private.flow_renderer._renderer_conditional_restorer)
-    metadata['checkpoint'] = str(Path(checkpoint).resolve())
+    metadata['checkpoint'] = identity_path(checkpoint)
     teacher.flow_renderer = private.flow_renderer
     teacher.base_student = private.base_student
     teacher.base_student_metadata = private.base_student_metadata
