@@ -14,6 +14,7 @@ from .rssm_preview_assets import preserve_preview_rng,synchronize_preview_dynami
 
 PROFILE='rf3_decoder_chain_background_detail_preview_v1'
 PATROL_PROFILE='rf3_decoder_chain_patrol_sprite_preview_v1'
+RRDB_PROFILE='rf3_decoder_chain_rrdb_material_preview_v1'
 MIGRATION_NAMES=('rssm_migration','dual_rssm_migration','enemy_rssm_resize','rssm_fusion_migration',
     'combat_rssm_migration','rssm_five_migration','rssm_five_expanded_migration',
     'rssm_spawn_conditioning_migration')
@@ -21,8 +22,9 @@ MIGRATION_NAMES=('rssm_migration','dual_rssm_migration','enemy_rssm_resize','rss
 
 def validate_image_chain_plan(plan):
     renderer=plan.get('renderer',{});sr=plan.get('sr',{})
-    patrol=plan.get('inference_profile')==PATROL_PROFILE
-    if(plan.get('inference_profile') not in (PROFILE,PATROL_PROFILE) or plan.get('preview_only')is not True
+    rrdb=plan.get('inference_profile')==RRDB_PROFILE
+    patrol=plan.get('inference_profile') in (PATROL_PROFILE,RRDB_PROFILE)
+    if(plan.get('inference_profile') not in (PROFILE,PATROL_PROFILE,RRDB_PROFILE) or plan.get('preview_only')is not True
             or plan.get('training_assets_changed')is not False or plan.get('game_assets_changed')is not False
             or plan.get('allow_unqualified_codec')is not True
             or renderer.get('format_version')!=8 or renderer.get('kind')!='decoder_rf_chain_bundle_v1'
@@ -31,7 +33,7 @@ def validate_image_chain_plan(plan):
             or type(renderer.get('training_steps'))is not int or renderer['training_steps']<=0
             or type(renderer.get('base_training_steps'))is not int or renderer['base_training_steps']<=0
             or type(renderer.get('decoder_refinement_updates'))is not int or renderer['decoder_refinement_updates']<=0
-            or sr.get('architecture')!=('patrol_sprite_detail_sr' if patrol else 'background_detail_sr')
+            or sr.get('architecture')!=('rrdb_material_sprite_sr' if rrdb else 'patrol_sprite_detail_sr' if patrol else 'background_detail_sr')
             or sr.get('inference_inputs')!=('RGB32_with_predicted_animation_veto' if patrol else 'RGB32_only')
             or sr.get('alpha_used')is not patrol or sr.get('atlas_used')is not patrol
             or sr.get('hypothesis_used')is not patrol or sr.get('input_size')!=32 or sr.get('output_size')!=128
@@ -40,6 +42,7 @@ def validate_image_chain_plan(plan):
         raise ValueError('RF3/decoder/background-detail preview requires its explicit complete image-only plan')
     if patrol and (sr.get('sprite_frames')!=[0,1,2] or sr.get('combat_animation_sprites')is not False or sr.get('navigation_sprites')is not False):
         raise ValueError('Patrol sprite preview must disable combat animations and navigation sprites')
+    if rrdb and (sr.get('model_config',{}).get('architecture')!='rrdb_material_sprite_sr' or not isinstance(sr.get('model_tensor_sha256'),str) or len(sr['model_tensor_sha256'])!=64):raise ValueError('RRDB preview needs pinned full config and tensor hash')
     return renderer,sr
 
 
@@ -66,8 +69,12 @@ def prepare_image_chain_preview_assets(model,plan,device,*,clone_factory=None):
                 or not isinstance(getattr(client.flow_renderer,'_renderer_decoder_chain',None),dict)):
             raise ValueError('Selected preview is not the exact no-restorer format8 RF3 decoder chain')
         sr,sr_metadata=load_sr_checkpoint(requested_sr['checkpoint'],'cpu')
-        patrol=plan['inference_profile']==PATROL_PROFILE
-        if patrol:
+        rrdb=plan['inference_profile']==RRDB_PROFILE
+        patrol=plan['inference_profile'] in (PATROL_PROFILE,RRDB_PROFILE)
+        if rrdb:
+            if sr.config!=requested_sr['model_config'] or _hash_tensors(sr.state_dict())!=requested_sr['model_tensor_sha256']:
+                raise ValueError('RRDB preview differs from pinned weights/config')
+        elif patrol:
             if (sr.config.get('architecture')!='patrol_sprite_detail_sr'
                     or sr.config.get('sprite_config')!=requested_sr.get('sprite_config')
                     or _hash_tensors({k:v for k,v in sr.state_dict().items()

@@ -112,6 +112,18 @@ class MotionOnlyTraining(RSSMCombatTraining):
                     activated_at_step=step)
             elif previous_drift['plan_sha256']!=file_sha(drift_path) or previous_drift['plan']!=drift_plan:
                 raise ValueError('Enemy drift revision plan changed')
+        self.first_contact_settings=None
+        contact_path=self.root/'first_contact_plan.json'
+        prior_contact=self.state.get('first_contact_revision')
+        if prior_contact is not None and not contact_path.exists():raise ValueError('Pinned first-contact plan missing')
+        if contact_path.exists():
+            from .rssm_first_contact import validate_settings as validate_contact
+            contact_plan=json.loads(contact_path.read_text())
+            self.first_contact_settings=validate_contact(contact_plan['settings'])
+            if prior_contact is None:
+                if contact_plan['source_step']!=step or contact_plan['source_checkpoint_sha256']!=loaded_sha:raise ValueError('First-contact activation must match optimizer boundary')
+                self.state['first_contact_revision']=dict(plan=contact_plan,plan_sha256=file_sha(contact_path),activated_at_step=step)
+            elif prior_contact['plan']!=contact_plan or prior_contact['plan_sha256']!=file_sha(contact_path):raise ValueError('Pinned first-contact plan changed')
         revision=bind_motion_only(self.state,plan,path=args.motion_plan,loaded_sha=loaded_sha)
         from .rssm_motion_round_schedule import read_revision
         schedule=read_revision(self.root/'motion_round_schedule.json',revision.get('round_schedule_revision'))
@@ -215,7 +227,7 @@ class MotionOnlyTraining(RSSMCombatTraining):
             player_local_protocol=self.motion_settings['player_local'],
             enemy_local_protocol=self.motion_settings['enemy_local'],
             player_local_horizon=local_horizon,enemy_local_horizon=local_horizon,
-            progress_callback=progress,enemy_drift_settings=self.enemy_drift_settings)
+            progress_callback=progress,enemy_drift_settings=self.enemy_drift_settings,first_contact_settings=self.first_contact_settings)
         norm=clip_finite_grad_norm_(model.named_parameters(),1.,context='Motion-only MAIN16')
         optimizer.step()
         metrics.update(step=self.state['global_training_step']+1,gradient_norm=float(norm),

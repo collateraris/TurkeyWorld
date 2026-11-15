@@ -2,6 +2,10 @@
 
 English | [Русский](README_RU.md)
 
+![Experimental neural upscaler](docs/images/neural-upscaler-experiment-2026-11-15.png)
+
+Experimental neural upscaler128×128: neural-renderer inputs above, textured output with separate weapon below. User screenshot; perspective and grass-edge errors remain.
+
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
 **Training resumed on Ubuntu.** World weights/Adam/RNG resumed from8111 and

@@ -44,6 +44,15 @@ class ImageChainPreviewTests(unittest.TestCase):
             bad=deepcopy(plan);bad['sr'][key]=value
             with self.assertRaises(ValueError):validate_image_chain_plan(bad)
 
+    def test_rrdb_profile_pins_full_architecture_and_weights(self):
+        from turkeyworld.rssm_preview_image_chain import RRDB_PROFILE
+        plan=profile_plan();plan['inference_profile']=RRDB_PROFILE
+        plan['sr'].update(architecture='rrdb_material_sprite_sr',inference_inputs='RGB32_with_predicted_animation_veto',alpha_used=True,atlas_used=True,hypothesis_used=True,sprite_frames=[0,1,2],combat_animation_sprites=False,navigation_sprites=False,model_config=dict(architecture='rrdb_material_sprite_sr',wall_texture_v2=True,weapon_memory=True),model_tensor_sha256='a'*64)
+        validate_image_chain_plan(plan)
+        for key,value in [('model_tensor_sha256','bad'),('model_config',{}),('navigation_sprites',True)]:
+            bad=deepcopy(plan);bad['sr'][key]=value
+            with self.assertRaises(ValueError):validate_image_chain_plan(bad)
+
     def test_explicit_chain_clone_keeps_training_ids_weights_modes_and_all_rng_untouched(self):
         source=TinyTeacher();source.combat_rssm_migration={'original_codec_lineage':'keep'}
         source_hash=_hash_tensors(source.state_dict());ids=[id(p)for p in source.parameters()]
@@ -75,6 +84,20 @@ class ImageChainPreviewTests(unittest.TestCase):
         self.assertEqual(_hash_tensors(source.state_dict()),source_hash);self.assertEqual(ids,[id(p)for p in source.parameters()])
         self.assertEqual(modes,[m.training for m in source.modules()]);self.assertTrue(torch.equal(rng,torch.get_rng_state()))
         self.assertEqual(py,random.getstate());self.assertTrue(all(np.array_equal(a,b)for a,b in zip(nr,np.random.get_state())))
+
+    def test_rrdb_private_clone_verifies_pinned_weights_and_profile(self):
+        from turkeyworld.rssm_preview_image_chain import RRDB_PROFILE
+        source=TinyTeacher();sr_model=nn.Linear(2,2);sr_model.config=dict(architecture='rrdb_material_sprite_sr',weapon_memory=True)
+        plan=profile_plan();plan['inference_profile']=RRDB_PROFILE
+        plan['sr'].update(architecture='rrdb_material_sprite_sr',training_steps=7000,selected_local_update=7000,inference_inputs='RGB32_with_predicted_animation_veto',alpha_used=True,atlas_used=True,hypothesis_used=True,sprite_frames=[0,1,2],combat_animation_sprites=False,navigation_sprites=False,model_config=sr_model.config,model_tensor_sha256=_hash_tensors(sr_model.state_dict()))
+        def renderer(client,path,**kw):
+            client.flow_renderer.kind='student';client.flow_renderer.steps=3;client.flow_renderer._renderer_decoder_chain={'format_version':8}
+            client.base_student=nn.Linear(2,2);client.base_student_bundle={'training_steps':31709}
+            return plan['renderer']
+        with patch('turkeyworld.renderer_student.load_renderer_student',side_effect=renderer),patch('turkeyworld.models.load_sr_checkpoint',return_value=(sr_model,dict(training_steps=7000))):
+            _,_,_,proof=prepare_preview_assets(source,plan,'cpu',clone_factory=lambda config:deepcopy(source))
+        self.assertEqual(proof['sr_training_steps'],7000);self.assertTrue(proof['sr_atlas_used'])
+        self.assertTrue(proof['training_model_tensors_bitexact']);self.assertFalse(proof['source_future_feedback'])
 
     def test_old_profile_cannot_silently_accept_chain_or_atlas_and_unknown_profiles_fail_closed(self):
         for mutation in(lambda p:p['renderer'].update(solver_steps=1),lambda p:p['renderer'].update(restorer_present=True),

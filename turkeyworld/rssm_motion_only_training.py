@@ -122,7 +122,7 @@ def _validate_source(states, actions, target, *, stream, horizon):
 
 def _stream_backward(model, batch, *, stream, horizon, context, observed_context,
                      player_navigation_protocol, npc_navigation_protocol, captures, enemy_captures,
-                     check_gradients, progress_callback, enemy_drift_settings=None):
+                     check_gradients, progress_callback, enemy_drift_settings=None,first_contact_settings=None,player_local_protocol=None):
     states, frames, actions, target, grid = _batch_data(batch, context)
     observed = _observed_count(context, observed_context)
     _validate_source(states[:, :context], actions, target, stream=stream, horizon=horizon)
@@ -145,6 +145,7 @@ def _stream_backward(model, batch, *, stream, horizon, context, observed_context
             current = states[:, context-1]
             initial = current
             points, respawns, router_roles, router_balances, prefix = [], [], [], [], []
+            pass_logits=[]
             for tick in range(horizon):
                 if tick % 16 == 0 and horizon-tick >= 4:
                     prefix.append((tick, current, memory))
@@ -157,6 +158,7 @@ def _stream_backward(model, batch, *, stream, horizon, context, observed_context
                 result = integrate_coordinate_gradients(current, result, COORDINATE_GRADIENT_PROTOCOL)
                 current, memory = result['state'], result['memory']
                 points.append(current)
+                if first_contact_settings is not None:pass_logits.append(result['player_pass_logits'])
                 respawns.append(result['respawn_flags'])
                 router_roles.append(role/horizon); router_balances.append(balance/horizon)
                 if progress_callback: progress_callback(stream, tick+1, horizon)
@@ -188,13 +190,22 @@ def _stream_backward(model, batch, *, stream, horizon, context, observed_context
             player = .5*(player_xy+player_wall)
             enemy = enemy_xy+enemy_wall+enemy_velocity
             router = .5*(.01*role+.001*balance)
+            first_loss=prediction.sum()*0;first_metrics={};first_enemy_metrics={}
+            if first_contact_settings is not None:
+                from .rssm_first_contact import first_contact_terms
+                first_loss,first_metrics=first_contact_terms(prediction,initial,actions,grid,torch.stack(pass_logits,1),protocol=player_local_protocol,settings=first_contact_settings)
+                player=player+first_loss
+                if stream=='enemy_motion':
+                    from .rssm_first_contact import first_enemy_terms
+                    first_enemy,first_enemy_metrics=first_enemy_terms(prediction,initial,actions,grid,settings=first_contact_settings)
+                    enemy=enemy+first_enemy
             loss = player+enemy+router
             if not bool(torch.isfinite(loss)): raise FloatingPointError('Nonfinite motion-only long objective')
             loss.backward()
             if check_gradients: finite_gradient_norm(model.named_parameters(), context='Motion-only main full-H')
             return dict(stream=stream, actors=8, horizon=horizon, tbptt=horizon,
                 player=float(player.detach()), enemy=float(enemy.detach()), router=float(router.detach()),
-                raw_player_xy=float(player_xy.detach()), raw_player_wall=float(player_wall.detach()),
+                first_wrong_contact=first_metrics,first_wrong_enemy_motion=first_enemy_metrics,raw_player_xy=float(player_xy.detach()), raw_player_wall=float(player_wall.detach()),
                 raw_enemy_xy=float(enemy_xy.detach()), raw_enemy_wall=float(enemy_wall.detach()),
                 raw_router_role=float(role.detach()), raw_router_balance=float(balance.detach()),
                 player_geometry=player_wall_metrics, npc_geometry=npc_wall_metrics,
@@ -294,7 +305,7 @@ def motion_only_backward(model, navigation_batch, enemy_batch, contact_batch=Non
                          context=1, observed_context=None, player_navigation_protocol,
                          npc_navigation_protocol, player_local_protocol, enemy_local_protocol,
                          player_local_horizon=16, enemy_local_horizon=16,
-                         check_gradients=True, progress_callback=None, enemy_drift_settings=None):
+                         check_gradients=True, progress_callback=None, enemy_drift_settings=None,first_contact_settings=None):
     """Accumulate two independent group means and MAIN-prefix local gradients.
 
     The caller owns zero_grad, clipping, Adam and the exact20-update stage gate.
@@ -324,7 +335,7 @@ def motion_only_backward(model, navigation_batch, enemy_batch, contact_batch=Non
             observed_context=observed_context, player_navigation_protocol=player_navigation_protocol,
             npc_navigation_protocol=npc_navigation_protocol, captures=captures, enemy_captures=enemy_captures,
             check_gradients=check_gradients, progress_callback=progress_callback,
-            enemy_drift_settings=enemy_drift_settings))
+            enemy_drift_settings=enemy_drift_settings,first_contact_settings=first_contact_settings,player_local_protocol=player_local_protocol))
     player_local = _player_local_backward(model, captures, horizon=player_local_horizon,
         protocol=player_local_protocol, check_gradients=check_gradients)
     enemy_local = enemy_local_recovery_backward(model, candidates=enemy_captures,
@@ -335,6 +346,7 @@ def motion_only_backward(model, navigation_batch, enemy_batch, contact_batch=Non
     total = player+enemy+router
     source_queries = (player_local.get('direct_source_attempts', 0)+player_local.get('source_probes', 0)
         +enemy_local.get('total_Source_step_queries', enemy_local.get('selection', {}).get('source_probes', 0)))
+    source_queries+=sum(row.get('first_wrong_contact',{}).get('source_probes',0)+row.get('first_wrong_enemy_motion',{}).get('source_probes',0) for row in streams)
     groups = {name: dict(raw=value, weight=1., weighted=value) for name, value in (
         ('player', player), ('enemy', enemy), ('combat', 0.), ('router', router))}
     groups['total'] = total
@@ -357,4 +369,4 @@ def motion_only_backward(model, navigation_batch, enemy_batch, contact_batch=Non
         enemy_local_loss=enemy_local['enemy_local_loss'],
         enemy_local_valid_source_labels=enemy_local.get('enemy_local_valid_source_labels', 0),
         player_local_horizon=player_local_horizon, enemy_local_horizon=enemy_local_horizon,
-        enemy_drift_settings=deepcopy(enemy_drift_settings),objective_settings=deepcopy(OBJECTIVE_SETTINGS))
+        first_contact_settings=deepcopy(first_contact_settings),enemy_drift_settings=deepcopy(enemy_drift_settings),objective_settings=deepcopy(OBJECTIVE_SETTINGS))
