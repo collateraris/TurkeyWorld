@@ -82,12 +82,26 @@ def _work_area(pygame):
     return sizes[0] if sizes else (1366, 768)
 
 
-def keyboard_action(pygame, keys):
+def keyboard_action(pygame, keys, physical=None):
     """Exactly one shared action is polled for a paired simulation tick."""
+    if physical is not None:
+        down=lambda name:getattr(pygame,'KSCAN_'+name) in physical
+        return [float(down('W') or down('UP'))-float(down('S') or down('DOWN')),
+                float(down('D'))-float(down('A')),
+                float(down('E') or down('RIGHT'))-float(down('Q') or down('LEFT')),
+                float(down('SPACE') or pygame.mouse.get_pressed(3)[0])]
     return [float(keys[pygame.K_w] or keys[pygame.K_UP])-float(keys[pygame.K_s] or keys[pygame.K_DOWN]),
             float(keys[pygame.K_d])-float(keys[pygame.K_a]),
             float(keys[pygame.K_e] or keys[pygame.K_RIGHT])-float(keys[pygame.K_q] or keys[pygame.K_LEFT]),
             float(keys[pygame.K_SPACE] or pygame.mouse.get_pressed(3)[0])]
+
+
+def shortcut_key(pygame,event):
+    """Physical controls also work with Russian and other keyboard layouts."""
+    for name in ('R','P','T','TAB','RETURN','ESCAPE'):
+        if getattr(event,'scancode',None)==getattr(pygame,'KSCAN_'+name):
+            return getattr(pygame,'K_'+(name.lower() if len(name)==1 else name))
+    return event.key
 
 
 def switch_test_environment(pair):
@@ -118,6 +132,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
     frames = (_surface(pygame, pair.source_frame, layout['panel']),
               _surface(pygame, pair.neural_frame, layout['panel']))
     paused, trial_complete, running = True, False, True
+    physical_keys = set()
     started = time.perf_counter()
     next_update = started
     last_status = None
@@ -146,6 +161,13 @@ def interactive(pair, gui, args, pygame, screen, layout):
     try:
         while running:
             for event in pygame.event.get():
+                if event.type == pygame.WINDOWFOCUSLOST:
+                    physical_keys.clear()
+                if event.type == pygame.KEYUP:
+                    physical_keys.discard(event.scancode)
+                if event.type == pygame.KEYDOWN:
+                    physical_keys.add(event.scancode)
+                    event.key = shortcut_key(pygame,event)
                 if event.type == pygame.QUIT or event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.type == pygame.KEYDOWN:
@@ -156,7 +178,12 @@ def interactive(pair, gui, args, pygame, screen, layout):
                         paused, trial_complete = False, False
                         next_update = time.perf_counter()
                         status('running', force=True)
-                    elif event.key == pygame.K_RETURN and not trial_complete:
+                    elif event.key == pygame.K_RETURN:
+                        if trial_complete:
+                            pair.reset()
+                            frames = (_surface(pygame, pair.source_frame, layout['panel']),
+                                      _surface(pygame, pair.neural_frame, layout['panel']))
+                            trial_complete = False
                         paused = False
                         next_update = time.perf_counter()
                         status('running')
@@ -181,7 +208,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
                 break
             if not paused and time.perf_counter() >= next_update:
                 update_started = time.perf_counter()
-                action = keyboard_action(pygame, pygame.key.get_pressed())
+                action = keyboard_action(pygame, pygame.key.get_pressed(), physical_keys)
                 source_rgb, neural_rgb = pair.step(action)
                 frames = (_surface(pygame, source_rgb, layout['panel']),
                           _surface(pygame, neural_rgb, layout['panel']))
