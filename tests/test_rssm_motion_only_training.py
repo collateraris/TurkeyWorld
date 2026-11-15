@@ -102,6 +102,17 @@ class MotionOnlyTrainingTests(unittest.TestCase):
             _player_local_backward=lambda *a, **kw: dict(player_contact_loss=0., branches=0),
             enemy_local_recovery_backward=lambda *a, **kw: dict(enemy_local_loss=0., branches=0))
 
+    def test_opt_in_enemy_drift_supervision_runs_on_full_main_graph(self):
+        from turkeyworld.rssm_enemy_drift import SETTINGS
+        model=TinyMotionWorld()
+        with self.local_patches():
+            result=motion_only_backward(model,batch(16),batch(16,True),enemy_drift_settings=SETTINGS,**kwargs())
+        enemy=result['motion_only_streams'][1]
+        self.assertTrue(enemy['recorded_NPC_velocity_direction_gradients'])
+        self.assertEqual(enemy['enemy_long_valid_transitions'],128)
+        self.assertGreaterEqual(enemy['enemy_long_velocity_weighted'],0)
+        self.assertTrue(any(p.grad is not None and bool(p.grad.abs().sum()>0) for p in model.enemy_head.parameters()))
+
     def test_no_combat_router_queries_or_classes_receive_direct_supervision(self):
         base = torch.randn(2, 3, 3, requires_grad=True)
         five = torch.randn(2, 5, 5, requires_grad=True)

@@ -32,6 +32,18 @@ class ImageChainPreviewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):torch.set_num_threads(2)
 
+    def test_patrol_profile_requires_explicit_veto_and_forbids_combat_navigation_sprites(self):
+        from turkeyworld.rssm_preview_image_chain import PATROL_PROFILE
+        plan=profile_plan();plan['inference_profile']=PATROL_PROFILE
+        plan['sr'].update(architecture='patrol_sprite_detail_sr',inference_inputs='RGB32_with_predicted_animation_veto',
+            alpha_used=True,atlas_used=True,hypothesis_used=True,sprite_frames=[0,1,2],
+            combat_animation_sprites=False,navigation_sprites=False)
+        validate_image_chain_plan(plan)
+        for key,value in [('sprite_frames',[0,1,2,3]),('combat_animation_sprites',True),
+                          ('navigation_sprites',True),('hypothesis_used',False)]:
+            bad=deepcopy(plan);bad['sr'][key]=value
+            with self.assertRaises(ValueError):validate_image_chain_plan(bad)
+
     def test_explicit_chain_clone_keeps_training_ids_weights_modes_and_all_rng_untouched(self):
         source=TinyTeacher();source.combat_rssm_migration={'original_codec_lineage':'keep'}
         source_hash=_hash_tensors(source.state_dict());ids=[id(p)for p in source.parameters()]

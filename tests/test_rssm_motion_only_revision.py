@@ -76,6 +76,17 @@ class MotionOnlyRevisionTests(unittest.TestCase):
             nav_train_directory=str(nav),enemy_train_directory=str(enemy),episodes=episodes,
             policy_checkpoint_sha256='a'*64,world_checkpoint_sha256='b'*64)
 
+    def test_pinned_enemy_drift_formula_commits_and_wrong_settings_are_rejected(self):
+        from turkeyworld.rssm_enemy_drift import SETTINGS
+        self.ready()
+        self.state['enemy_drift_revision']={'plan':{'settings':deepcopy(SETTINGS)}}
+        row=self.metrics(objective_formula_revision=SETTINGS['protocol'],
+            motion_only_loss_revision=SETTINGS['protocol'],enemy_drift_settings=deepcopy(SETTINGS))
+        self.update(metrics=row)
+        self.assertEqual(validate_motion_only(self.state)['gate']['updates'],1)
+        row['enemy_drift_settings']['speed_weight']=999
+        with self.assertRaisesRegex(ValueError,'pinned objective settings'):self.update(metrics=row)
+
     def test_activation_archives_raw_typed_ledgers_without_touching_model_adam_or_rng(self):
         trng=torch.get_rng_state().clone();nrng=deepcopy(np.random.get_state());prng=random.getstate()
         r=self.bind()

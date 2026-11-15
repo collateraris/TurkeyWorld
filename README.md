@@ -4,12 +4,11 @@ English | [Русский](README_RU.md)
 
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
-**Training is paused for the Ubuntu handoff.** Read the
-[continuation note in Russian](CONTINUE_ON_UBUNTU_RU.md) and final pause artifacts
-before resuming. Preserve the whole workspace, including ignored training runs
-and uncommitted code. Path/process/bootstrap/sleep guards now support Windows
-and Linux; the destination Ubuntu GPU must pass the handoff preflight before
-any explicitly requested resume.
+**Training resumed on Ubuntu.** World weights/Adam/RNG resumed from8111 and
+policy from620/actor400. Enemy-drift revision continues the world from8209.
+Dynamics: <http://127.0.0.1:8765/>, policy: <http://127.0.0.1:8787/>,
+patrol-sprite SR: <http://127.0.0.1:8786/>. See H117–H120 in the journal
+and the historical [handoff notes](CONTINUE_ON_UBUNTU_RU.md).
 
 Ubuntu environment setup: `bash scripts/setup_ubuntu.sh --dry-run`, then
 `bash scripts/setup_ubuntu.sh` installs a dedicated Python3.12 environment with

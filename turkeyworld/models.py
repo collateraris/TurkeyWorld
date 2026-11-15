@@ -765,6 +765,9 @@ def build_upscaler(config=None, **overrides):
     if architecture == 'neural_enemy_restoration_sr':
         from .neural_enemy_restoration_sr import NeuralEnemyRestorationSR
         return NeuralEnemyRestorationSR(**values)
+    if architecture == 'patrol_sprite_detail_sr':
+        from .patrol_sprite_sr import PatrolSpriteSR
+        return PatrolSpriteSR(**values)
     if architecture == 'background_detail_sr':
         from .background_detail_sr import BackgroundDetailSR
         return BackgroundDetailSR(**values)

@@ -178,5 +178,17 @@ class MotionOnlyDataTests(unittest.TestCase):
         self.write(Path(receipt['nav_train_directory'])/'unlisted.npz',marker=99)
         with self.assertRaises(ValueError):self.replay(corpora=[receipt])
 
+    def test_enemy_hard_sampling_preserves_4_original_4_latest_and_exact_resume(self):
+        from turkeyworld.rssm_enemy_drift import SETTINGS
+        receipt=self.receipt('hard')
+        first=self.replay(stream='enemy_motion',corpora=[receipt]);first.enemy_drift_settings=SETTINGS
+        saved=first.state_dict();a,row=first.batch(horizon=16)
+        second=self.replay(stream='enemy_motion',corpora=[receipt],state=saved);second.enemy_drift_settings=SETTINGS
+        b,again=second.batch(horizon=16)
+        self.assert_batches_equal(a,b);self.assertEqual(row,again)
+        self.assertEqual(row['latest_policy_actors'],4)
+        self.assertEqual(row['enemy_hard_sampling_categories'],['near_wall','turn','uniform','uniform']*2)
+        self.assertEqual(first.state_dict(),second.state_dict())
+
 
 if __name__=='__main__':unittest.main()

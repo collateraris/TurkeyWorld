@@ -286,8 +286,15 @@ class NeuralRuntime:
             self._sr_hypothesis_source = ('current_world_step_prediction' if hypothesis is not None
                                           else 'none_independent_RGB' if visual_first else 'none_RGB_only_fallback')
         def learned_sr(image):
+            if getattr(self.sr,'config',{}).get('architecture') == 'patrol_sprite_detail_sr':
+                self.sr.enemies_enabled = not bool(getattr(self.model.config,'navigation_only',False))
+                self.sr.predicted_sprite_state = predicted_state.detach() if predicted_state is not None else None
             return self.sr(image, hypothesis=hypothesis) if guided else self.sr(image)
         def sr_stage(values):
+            if getattr(self.sr,'config',{}).get('architecture') == 'patrol_sprite_detail_sr':
+                values.update(fixed_atlas_enemy=True,sprite_frames=[0,1,2],
+                    combat_animation_sprites=False,navigation_sprites=False,
+                    sprite_veto_from_current_predicted_state=True,Source_hint=False)
             if guided:
                 values.update(enemy_decoder=True, hypothesis_source=self._sr_hypothesis_source,
                     hypothesis_from_Source=False, learned_neural_confirmation=True)
@@ -445,6 +452,10 @@ class NeuralRuntime:
             "gameplay_correctness_evaluated": False,
             "note": "Predicted state and events are model outputs, not verified game facts. Timing applies only to the device reported above; no RTX 4090 result is implied.",
         }
+        if getattr(self.sr,'config',{}).get('architecture') == 'patrol_sprite_detail_sr':
+            report['sr_sprite_policy'] = dict(sprite_frames=[0,1,2],combat_animation_sprites=False,
+                navigation_sprites=False,enemies_enabled=self.sr.enemies_enabled,
+                animation_veto='current_predicted_state',Source_hint=False)
         if self._enemy_decoder_sr():
             report['sr_enemy_decoder'] = dict(architecture=self.sr.config['architecture'],
                 hypothesis_source=getattr(self, '_sr_hypothesis_source', 'not_run'),

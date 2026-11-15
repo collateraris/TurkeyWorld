@@ -4866,3 +4866,96 @@ passes as separate events. The main instructions remain in the READMEs.
 
 Most local `training_runs/` are excluded from Git: their links work in this
 workspace and do not promise data/weight availability in a clean clone.
+
+
+## H117 — Ubuntu continuation and policy recovery (2026-11-15, Moscow)
+
+**Executed.** Eight SHA and22 resume checks passed, plus both fixed VAL180 panels.
+Python3.12/Torch2.11+cu128 installed. World resumed8111→8133 with weights/Adam/RNG
+preserved; policy resumed620/actor400. Audited Linux render differences retain
+original SHA-pinned recorded initial RGB and exact state20. Pinned reward-head
+support avoids a one-ULP Windows/Linux log1p difference. Physical scancodes make
+controls layout-independent; Enter restarts a completed trial. Default180 remains;
+interactive launch explicitly uses18000. Evidence: `training_runs/ubuntu_handoff_20261115`.
+
+## H118 — Patrol sprites and SR3000 continuation (2026-11-15, Moscow)
+
+**Implemented/executed.** `PatrolSpriteSR` retains exact SR3000 weights,42 Adam states,
+sampler24000 and RNG. Frozen Atlas106105 placement overlays only idle/walk frames0–2.
+Attack/hurt/death frames3–6 are disabled. Navigation forces zero sprite alpha;
+current predicted RSSM combat/death state vetoes the overlay. No Source inference
+inputs. Only RGB detail parameters train. Separate3000→6000 run:
+`training_runs/sr_patrol_sprite_20261115`, http://127.0.0.1:8786/.
+Seven focused then17 regression tests passed; GPU navigation/attack veto smoke passed.
+A separate SR3186 game snapshot opened. Completion and quality improvement are not claimed.
+
+H118 — completed follow-up: SR reached **6000**. Fixed VAL256: SSIM0.78373391,
+foreground MAE0.14046893, enemy ROI SSIM0.29171594. These measurements do not
+establish superiority over SR3000. Final weights are under
+`training_runs/sr_patrol_sprite_20261115/checkpoints/sr_last.pt`.
+
+
+## H119 — Full-rollout enemy velocity supervision and hard TRAIN sampling (2026-11-15, Moscow)
+
+**Requested/implemented; measurement ongoing.** Opt-in `rssm_enemy_drift_v1` adds
+velocity-vector0.05, speed0.05, direction0.01 and velocity-field0.025 losses to
+full-H MAIN. Existing own-prefix local velocity/direction recovery remains.
+Recorded TRAIN labels supervise free rollout without Source corrections, memory resets
+or future RGB. Old/new aggregate loss values are not directly comparable.
+Each four-actor enemy half selects near-wall, turn and two uniform episodes,
+preserving4 original+4 latest, MAIN16 and private PCG. Missing hard classes have
+explicit uniform fallbacks. A separate pinned revision leaves the immutable parent plan intact.
+Safe checkpoint8209, round7,76/180, is pinned at
+`training_runs/enemy_drift_revision_20261115/before.pt`. Same-panel VAL180 baseline:
+NPC XY2.773396 cells, velocity error1.056748 cells/s, speed1.027155 versus0.700000,
+one living-NPC wall collision at offset180. Eight held-out starts are diagnostic,
+not gameplay qualification. Thirty-four focused tests passed. Post-update results
+will be recorded from actual artifacts; drift improvement is not yet claimed.
+
+
+H119 — **executed:**8209→8220,11 complete updates, with bitexact pre-SGD model,
+named Adam,7 groups/442 states and RNG verification. Same VAL180 fingerprint/eight
+starts: NPC XY2.773396→**2.169638 (−21.77%)**, velocity error1.056748→**0.883605
+(−16.38%)**. Speed0.615247 versus Source0.700000 now undershoots. Living-NPC wall
+collisions at offset180 worsened **1→4**. This early uncontrolled comparison does
+not establish individual causal effects or gameplay quality. Artifact:
+`training_runs/enemy_drift_revision_20261115/comparison_8209_8220.json`.
+34 focused plus19 integration/revision/VAL tests passed; continuous training resumed.
+
+## H120 — Latest SR6000 in the dynamics model preview (2026-11-15, Moscow)
+
+**Implemented.** User-requested frozen SR6000 has a SHA-pinned v6 preview revision
+chained from v5; existing plans and RF3/Base/decoder remain pinned. Explicit profile
+`rf3_decoder_chain_patrol_sprite_preview_v1` discloses Atlas/alpha and own predicted
+animation veto. Displayed offset states come from the same free rollout; no future
+Source input. Navigation disables sprite alpha; combat animation sprites remain off.
+Assets load into a private inference clone, preserving training weights/Adam/RNG.
+`preview_assets_active_revision.json` pins the new SHA for future workers. Eleven
+preview tests passed, including scoped context restoration and rejection of combat/
+navigation sprite opt-ins. Resumed8220; actual preview.json confirms deployment
+once the first new preview is published.
+
+
+H120 — **executed and verified:** preview.json at8220 reports SR6000,
+sprite_frames[0,1,2], navigation_sprites=false; full checkpoint8221 retains the v6
+binding. Port8765 serves this preview. The first restart's legacy validator rejected
+the new formula ID; the unsaved update was discarded and FULL8220 remained intact.
+The validator now accepts the new formula only with exact pinned drift settings,
+preserving every MAIN16/full-H invariant. Added successful-commit and changed-weight
+rejection coverage. All42 relevant checks passed after correcting a new test helper
+name;11 preview tests also passed. Restart8220 verified model/named Adam/RNG retention.
+
+
+## H121 — Live MAIN16 chart after enemy-loss revision, plus Player/Enemy curves (2026-11-15, Moscow)
+
+**Fixed/verified.** Dynamics continued updating while the UI discarded
+`rssm_enemy_drift_v1` because its formula filter only accepted the parent MAIN16
+revision. New rows now require the pinned drift revision, exact settings and a
+post-activation step; conflicting nested tags, wrong parent plan SHA and actor
+counts remain rejected. Different loss formulas are not joined.
+Added blue Player and orange Enemy curves, current component values, legend and
+hover values alongside total and genuine validation loss.261 existing UI tests
+passed;both new filter/canvas-hover tests passed after correcting test DOM canvas
+creation. Live API→UI probe at8256 accepted36 rows through8256: total1.18381,
+Player0.15878, Enemy1.02450. HTML is read on each request; existing tabs need a
+reload. No dynamics worker or optimizer restart was needed.

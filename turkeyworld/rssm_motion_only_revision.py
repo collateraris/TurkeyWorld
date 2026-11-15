@@ -209,10 +209,18 @@ def commit_motion_only(state,*,step,loss,nav_sampler_state,enemy_sampler_state,m
             or metrics.get('Source_future_feedback',False)is not False):
         raise ValueError('Motion-only update contained combat examples/loss or wrong actor counts')
     gate=r['gate'];horizon=gate['current_horizon'];old=gate['stage_index']
+    formula=PROTOCOL
+    drift=state.get('enemy_drift_revision')
+    if drift is not None:
+        from .rssm_enemy_drift import validate_settings
+        settings=validate_settings(drift['plan']['settings'])
+        if metrics.get('enemy_drift_settings')!=settings:
+            raise ValueError('Enemy drift update does not match its pinned objective settings')
+        formula=settings['protocol']
     if(any(metrics.get(key)!=horizon for key in('main_horizon','moe_main_horizon','nav_tbptt',
             'enemy_motion_tbptt','moe_main_tbptt'))
-            or metrics.get('objective_formula_revision')!=PROTOCOL
-            or metrics.get('motion_only_loss_revision')!=PROTOCOL):
+            or metrics.get('objective_formula_revision')!=formula
+            or metrics.get('motion_only_loss_revision')!=formula):
         raise ValueError('Motion-only MAIN16 must actually backpropagate the complete currentH')
     streams=metrics.get('motion_only_streams',[])
     if(len(streams)!=2 or {row.get('stream')for row in streams}!={'navigation','enemy_motion'}

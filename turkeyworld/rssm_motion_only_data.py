@@ -15,10 +15,11 @@ from .workspace_paths import resolve_path
 
 
 class MotionReplay:
-    def __init__(self, directory, sampler_state, *, stream, device='cpu', corpora=()):
+    def __init__(self, directory, sampler_state, *, stream, device='cpu', corpora=(), enemy_drift_settings=None):
         if stream not in ('navigation','enemy_motion'):
             raise ValueError('Motion replay requires a declared navigation/quiet cohort')
         self.stream=stream;self.device=device;self.rng=np.random.default_rng()
+        self.enemy_drift_settings=enemy_drift_settings;self._hard_cache={}
         self.protocol=sampler_state['protocol'];self.draws=sampler_state['draws']
         self.rng.bit_generator.state=deepcopy(sampler_state['rng'])
         directories=[resolve_path(directory)]
@@ -60,6 +61,27 @@ class MotionReplay:
                 selected +=[pools[-1][int(i)]for i in self.rng.integers(len(pools[-1]),size=4)]
             else:
                 selected=[pools[0][int(i)]for i in self.rng.integers(len(pools[0]),size=8)]
+            hard_categories=[];fallbacks=0
+            if self.stream=='enemy_motion' and self.enemy_drift_settings is not None:
+                from .rssm_enemy_drift import hard_episode_classes,validate_settings
+                settings=validate_settings(self.enemy_drift_settings)
+                groups=[pools[0],pools[-1]] if len(pools)>1 else [pools[0],pools[0]]
+                selected=[]
+                for pool in groups:
+                    for category in settings['sampling_order']:
+                        choices=[]
+                        if category!='uniform':
+                            for key in pool:
+                                cache_key=(*key,horizon)
+                                if cache_key not in self._hard_cache:
+                                    episode=self.data[key[0]].episodes[key[1]]
+                                    self._hard_cache[cache_key]=hard_episode_classes(episode['states'],episode['map'],horizon=horizon,settings=settings)
+                                if self._hard_cache[cache_key][category]:choices.append(key)
+                        if not choices:
+                            choices=pool
+                            if category!='uniform':fallbacks+=1
+                        selected.append(choices[int(self.rng.integers(len(choices)))])
+                        hard_categories.append(category)
             batches=[];files=[]
             for data_index,episode_index in selected:
                 data=self.data[data_index]
@@ -78,6 +100,7 @@ class MotionReplay:
             self.draws+=8
             return batch,dict(stream=self.stream,actors=8,context=1,horizon=horizon,
                 episode_files=files,start_indices=[0]*8,private_pcg_draws=self.draws,
+                enemy_hard_sampling_categories=hard_categories,enemy_hard_sampling_fallbacks=fallbacks,
                 latest_policy_actors=4 if len(pools)>1 else 0,
                 previous_replay_actors=4 if len(pools)>1 else 8,Source_future_feedback=False)
         except BaseException:

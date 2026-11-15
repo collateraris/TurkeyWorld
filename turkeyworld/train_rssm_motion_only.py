@@ -96,6 +96,22 @@ class MotionOnlyTraining(RSSMCombatTraining):
             raise ValueError('Motion round requires a complete optimizer boundary')
         self.state=deepcopy(saved['run_state']);self.plan_sha=file_sha(args.motion_plan)
         self.plan=plan
+        from .rssm_enemy_drift import validate_settings
+        drift_path=self.root/'enemy_drift_plan.json'
+        self.enemy_drift_settings=None
+        previous_drift=self.state.get('enemy_drift_revision')
+        if previous_drift is not None and not drift_path.exists():
+            raise ValueError('Enemy drift continuation lost its pinned revision plan')
+        if drift_path.exists():
+            drift_plan=json.loads(drift_path.read_text(encoding='utf-8'))
+            self.enemy_drift_settings=validate_settings(drift_plan['settings'])
+            if previous_drift is None:
+                if drift_plan['source_step']!=step or drift_plan['source_checkpoint_sha256']!=loaded_sha:
+                    raise ValueError('Enemy drift activation needs its complete pinned optimizer boundary')
+                self.state['enemy_drift_revision']=dict(plan_sha256=file_sha(drift_path),plan=drift_plan,
+                    activated_at_step=step)
+            elif previous_drift['plan_sha256']!=file_sha(drift_path) or previous_drift['plan']!=drift_plan:
+                raise ValueError('Enemy drift revision plan changed')
         revision=bind_motion_only(self.state,plan,path=args.motion_plan,loaded_sha=loaded_sha)
         if args.round_corpus is not None:
             receipt=json.loads(args.round_corpus.read_text(encoding='utf-8'))
@@ -112,7 +128,7 @@ class MotionOnlyTraining(RSSMCombatTraining):
         self.nav=MotionReplay(plan['navigation_directory'],revision['nav_sampler_state'],
             stream='navigation',device=self.device,corpora=corpora)
         self.enemy=MotionReplay(plan['enemy_motion_directory'],revision['enemy_sampler_state'],
-            stream='enemy_motion',device=self.device,corpora=corpora)
+            stream='enemy_motion',device=self.device,corpora=corpora,enemy_drift_settings=self.enemy_drift_settings)
         self.nav_val=self._data(args.navigation_data_root/'long/rgb/val')
         self.enemy_val=self._data(args.enemy_motion_data_root/'full_game/rgb/val')
         from .rssm_motion_only_validation import bind_motion_validation_plan
@@ -193,7 +209,7 @@ class MotionOnlyTraining(RSSMCombatTraining):
             player_local_protocol=self.motion_settings['player_local'],
             enemy_local_protocol=self.motion_settings['enemy_local'],
             player_local_horizon=local_horizon,enemy_local_horizon=local_horizon,
-            progress_callback=progress)
+            progress_callback=progress,enemy_drift_settings=self.enemy_drift_settings)
         norm=clip_finite_grad_norm_(model.named_parameters(),1.,context='Motion-only MAIN16')
         optimizer.step()
         metrics.update(step=self.state['global_training_step']+1,gradient_norm=float(norm),
@@ -315,7 +331,14 @@ def main(argv=None):
     parser.add_argument('--renderer-checkpoint',type=Path,default=ROOT/'training_runs/image_chain_20261114/handoffs/decoder/renderer.pt')
     parser.add_argument('--sr',type=Path,default=ROOT/'training_runs/sr_background_detail_20261114/frozen/sr_frozen_step_003000.pt')
     parser.add_argument('--preview-assets-plan',type=Path,default=ROOT/'training_runs/rssm25m_combat_20261111/preview_assets_batch128_g4398.json')
-    parser.add_argument('--preview-assets-revision-plan',type=Path,default=RUN/'preview_assets_revision_npr32317_decoder4125_sr_detail3000_v5.json')
+    default_preview=RUN/'preview_assets_revision_npr32317_decoder4125_sr_detail3000_v5.json'
+    pointer=RUN/'preview_assets_active_revision.json'
+    if pointer.exists():
+        selected=json.loads(pointer.read_text(encoding='utf-8'))
+        default_preview=resolve_path(selected['revision_plan'])
+        if file_sha(default_preview)!=selected['revision_sha256']:
+            raise ValueError('Active preview revision pointer SHA changed')
+    parser.add_argument('--preview-assets-revision-plan',type=Path,default=default_preview)
     args=parser.parse_args(argv)
     if args.updates<0:parser.error('updates must be nonnegative')
     args.batch=16
