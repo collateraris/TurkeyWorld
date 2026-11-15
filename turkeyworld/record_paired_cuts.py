@@ -37,6 +37,9 @@ def scene_factory(scene):
         game=Game(seed=seed,endless=endless,enemies_enabled=enemies_enabled)
         snapshot=game.get_state();snapshot['player'].update(x=scene['player'][0],y=scene['player'][1],angle=scene['angle'])
         if enemies_enabled:snapshot['enemies'][0].update(x=scene['enemy'][0],y=scene['enemy'][1],vx=0.,vy=0.)
+        if enemies_enabled and scene.get('walking_start'):
+            delta=np.asarray(scene['player'])-np.asarray(scene['enemy']);velocity=.7*delta/np.linalg.norm(delta)
+            snapshot['enemies'][0].update(vx=float(velocity[0]),vy=float(velocity[1]),animation_phase=.25)
         game.set_state(snapshot)
         return game
     return create
@@ -61,7 +64,8 @@ def compose(left,right,scene,tick,world_step,sr_step):
     label=('Преследование без боя' if scene['chase'] else 'Навигация без противника')
     draw.text((20,9),'Оригинал · Source512',font=font,fill=(210,240,230))
     draw.text((548,9),f'Нейроигра · новый SR{sr_step}',font=font,fill=(183,247,115))
-    draw.text((20,35),f'{scene["index"]+1}/{scene.get("total",8)} · {label} · одинаковые команды в обоих окнах',font=small,fill=(190,203,210))
+    subtitle=(f'Старт {scene["player"][0]:g}, {scene["player"][1]:g} · {label} · одинаковые команды' if scene.get("curated_candidate") else f'{scene["index"]+1}/{scene.get("total",8)} · {label} · одинаковые команды в обоих окнах')
+    draw.text((20,35),subtitle,font=small,fill=(190,203,210))
     image.paste(Image.fromarray(left),(20,60));image.paste(Image.fromarray(right),(548,60))
     draw.text((20,584),f'{(tick+1)/30:.2f} / 6.00 с симуляции · стрельба выключена · справа автономный rollout',font=small,fill=(240,210,160))
     draw.text((20,610),f'Офлайн-монтаж 30 кадров/с · не замер FPS · RSSM g{world_step} · RGB32 → SR128 → 512',font=small,fill=(165,183,192))

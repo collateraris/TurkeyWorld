@@ -15,6 +15,16 @@ Original left, autonomous neural game right: dynamics8873, experimental SR7000.
 Six6-second clips, no enemies or firing, identical controls.
 Offline simulation-time recording at30fps; this is not a performance benchmark.
 
+**Video: enemy pursuit without combat — six starts, 36 seconds.**
+
+[![Watch quiet enemy interaction](docs/videos/quiet-enemy-six-starts-8873-sr7000.jpg)](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4)
+
+[Watch / download MP4](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4) · [Verification and selection](docs/videos/quiet-enemy-six-starts-8873-sr7000.json).
+Original left, neural game right: dynamics8873/SR7000. Six complete6-second cuts from distinct positions.
+Selected6 of16 final trials for enemy visibility and lower drift. Player retreats and aims using its own RSSM prediction; both games receive identical controls.
+Source enemy visible180/180 frames per cut, unchanged HP, no firing or predicted combat events.
+Neural sprite dropouts and geometry errors remain. Offline30fps recording with no Source state corrections.
+
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
 **Training resumed on Ubuntu.** World weights/Adam/RNG resumed from8111 and
