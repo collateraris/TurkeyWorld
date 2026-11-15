@@ -306,6 +306,7 @@ class MotionCycle:
                     completed_rounds=self.state['completed_rounds']+1,phase='collect_source',
                     source_episodes=0,source_transitions=0,world_updates=0,policy_updates=0)
                 for key in('policy_actor_start','policy_actor_target'):self.state.pop(key,None)
+                self.state['world_target_updates']=self.world_budget()
                 self.publish(mirror=True)
         self.state['status']='completed';self.publish(mirror=True)
 

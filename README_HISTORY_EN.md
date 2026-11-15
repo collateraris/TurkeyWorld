@@ -4959,3 +4959,53 @@ passed;both new filter/canvas-hover tests passed after correcting test DOM canva
 creation. Live API→UI probe at8256 accepted36 rows through8256: total1.18381,
 Player0.15878, Enemy1.02450. HTML is read on each request; existing tabs need a
 reload. No dynamics worker or optimizer restart was needed.
+
+
+## H122 — Next-round H48→112→180,40 updates each (2026-11-15, Moscow)
+
+**Configured/verified; next-round execution is not yet claimed.** A separate SHA-pinned
+`motion_round_schedule.json` selects `motion_round_48_112_180_40_v1` from round_index8,
+after current round7. New rounds use H48/H112/H180 with40 full Adam updates each,
+120 world updates total. Current round retains its existing6×30=180 schedule.
+Immutable parent plans and archived gates remain intact; cumulative history uses
+each round's actual budget. Weights, named Adam, RNG, MAIN16 and4+4 replay persist.
+Policy and six-second Source collection remain serial phases.
+The refreshed controller adopted the same world worker56659 without restarting it;
+current target180, future target120 and continued updates were verified. Receipt:
+`training_runs/motion_schedule_48_112_180_20261115/activation.json`.
+Handoffs check the actual budget and UI labels support both3/40/120 and6/30/180.
+43 Python tests plus a dedicated future-budget/pin test passed;264 UI tests passed.
+A complete120-commit test verified stage transitions, sampler continuity and the
+following source boundary after180+120 updates without resetting clocks.
+
+
+## H123 — Low-LR wall PatchGAN SR6000→9000 (2026-11-15, Moscow)
+
+**Started; budget completion not claimed.** Continued full patrol SR6000 with exact
+weights,42 Adam states, sampler48000 and RNG. Generator LR deliberately reduced
+1e-4→**1e-5**; separate spectral-normalized discriminator Adam uses**5e-6**,betas(0,.99).
+Hinge plus feature matching0.1,25-update warmup,100-update ramp,GAN weight≤**0.002**.
+Weighted adversarial gradient is capped at5% of reconstruction at the RGB readout;
+this is not a bound on every parameter's gradient.
+D sees matching RGB32 conditions and real/fake32×32 crops of actual128 targets.
+Up to two strictly100%-wall-interior patches per image exclude Source NPC/weapon,
+sky and floor. TRAIN map/state provide labels only; no generator Source inputs.
+Native32 wall-label behavior is preserved. Existing detail losses remain, plus
+wall L1×.5,edge×.25,high-frequency×.25. Frozen patrol sprites retain no-combat-animation
+and no-navigation-overlay rules. Run:`training_runs/sr_wall_patchgan_20261115`,
+6000→9000,batch8,http://127.0.0.1:8786/ via active-run pointer.
+At6184 GAN was active with9 wall patches,effective weight.002 and measured readout
+ratio.000188. Complete6382 reload verified42 G-Adam/8 D-Adam states,382 D updates,
+sampler51056 and exact frozen assets. Four new tests and12 wall-label decoder/RF
+regressions passed. Pinned VAL256/detail120 and wall L1/edge/high-frequency compare
+against original SR6000. Blur removal,9000 completion and quality-pass are not claimed.
+
+## H124 — Wall PatchGAN images in the SR section (2026-11-15, Moscow)
+
+**Fixed/verified.** PNG existed but generic Source-SR filtering expected another kind
+and allowed Source inference inputs. Added a dedicated four-row NPR-conditioned
+wall-PatchGAN preview with exact report step/model/panel/data/config matching.
+Stale or Source-conditioned previews remain rejected. Rows:Source128/NPR32/frozen
+base/current detail SR with patrol sprites. Live API→UI at6789 displayed preview6700;
+GET /preview.png returned200,351064 bytes. Five focused UI tests passed. Existing
+tabs need Ctrl+F5; training did not restart for the UI fix.

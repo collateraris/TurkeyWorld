@@ -87,6 +87,26 @@ class MotionOnlyRevisionTests(unittest.TestCase):
         row['enemy_drift_settings']['speed_weight']=999
         with self.assertRaisesRegex(ValueError,'pinned objective settings'):self.update(metrics=row)
 
+    def test_new_schedule_starts_only_next_round_and_completes_exactly_120_updates(self):
+        from turkeyworld.rssm_motion_round_schedule import SETTINGS
+        self.ready();r=record=self.state['rssm_training']['motion_only_revision']
+        r['round_schedule_revision']=dict(plan_sha256='a'*64,plan=dict(effective_round=1,settings=deepcopy(SETTINGS)))
+        for _ in range(180):self.update()
+        self.assertEqual(r['gate']['current_horizon'],180)
+        old=deepcopy(r['gate']);samplers=deepcopy((r['nav_sampler_state'],r['enemy_sampler_state']))
+        begin_motion_round(self.state,self.receipt())
+        self.assertEqual(r['round_history'][0],old)
+        self.assertEqual((r['nav_sampler_state'],r['enemy_sampler_state']),samplers)
+        for h in (48,112,180):
+            self.assertEqual(current_horizon(self.state),h)
+            for _ in range(40):self.update()
+        self.assertTrue(r['gate']['completed']);self.assertEqual(r['gate']['updates'],120)
+        self.assertEqual(r['updates'],300)
+        self.assertEqual(r['gate']['horizon_update_counts'],{'48':40,'112':40,'180':40})
+        begin_motion_round(self.state,self.receipt(1))
+        self.assertEqual(r['gate']['source_optimizer_step'],r['source_optimizer_step']+300)
+        self.assertEqual(current_horizon(self.state),48)
+
     def test_activation_archives_raw_typed_ledgers_without_touching_model_adam_or_rng(self):
         trng=torch.get_rng_state().clone();nrng=deepcopy(np.random.get_state());prng=random.getstate()
         r=self.bind()

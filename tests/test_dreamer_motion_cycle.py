@@ -42,6 +42,17 @@ class MotionCycleTests(unittest.TestCase):
 
     def controller(self):return MotionCycle(self.args)
 
+    def test_future_schedule_changes_world_budget_only_after_effective_round(self):
+        from turkeyworld.rssm_motion_round_schedule import SETTINGS
+        old=self.controller();plan=old.root/'cycle_plan.json';original=plan.read_bytes()
+        path=self.args.world_run/'motion_round_schedule.json'
+        path.write_text(json.dumps(dict(effective_round=1,settings=SETTINGS)))
+        controller=self.controller();self.assertEqual(controller.world_budget(),180)
+        controller.state['round_index']=1;self.assertEqual(controller.world_budget(),120)
+        controller.publish();self.assertEqual(plan.read_bytes(),original)
+        path.write_text(json.dumps(dict(effective_round=2,settings=SETTINGS)))
+        with self.assertRaisesRegex(ValueError,'schedule changed'):self.controller()
+
     def test_exact_stage_order_and_finished_round_is_not_quality_pass(self):
         cycle=self.controller();order=[]
         cycle.collect=Mock(side_effect=lambda directory:order.append('collect_source'))
