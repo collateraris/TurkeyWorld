@@ -243,7 +243,7 @@ def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model
         device = parameter.device if parameter is not None else torch.device('cpu')
         dtype = parameter.dtype if parameter is not None else torch.float32
         with torch.inference_mode():
-            patrol=getattr(sr_model,'config',{}).get('architecture')=='patrol_sprite_detail_sr'
+            patrol=getattr(sr_model,'config',{}).get('architecture')in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr')
             old_context=None
             if patrol:
                 states=preview.get('sr_predicted_states')

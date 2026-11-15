@@ -25,6 +25,17 @@ UNUSED_PAINT_PREFIXES = ('enemy_decoder_condition.', 'enemy_decoder_seed.',
     'enemy_decoder_visual_gain.')
 
 
+def ground_anchor_box(box,size=128):
+    """Source camera prior from NN width/center-x only; no GT/world coordinates."""
+    width=((box[:,2]-box[:,0])*size).clamp(1,size*5)
+    hard_width=width.floor()
+    width=hard_width.detach()+(width-width.detach())
+    bottom=size/2+width*(.5/.93)
+    hard_bottom=bottom.floor();bottom=hard_bottom.detach()+(bottom-bottom.detach())
+    center=(box[:,0]+box[:,2])*size/2
+    return torch.stack((center-width/2,bottom-width,center+width/2,bottom),-1)/size
+
+
 def _pixel_hash(frames, sizes):
     digest = hashlib.sha256(frames.detach().cpu().contiguous().numpy().tobytes())
     digest.update(sizes.detach().cpu().contiguous().numpy().tobytes())
@@ -60,7 +71,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
                  enemy_decoder_restoration=True, restoration_blend_scale=1.,
                  atlas_asset_sha256=ASSET_SHA256, atlas_pixels_sha256=None,
                  atlas_buffer_shape=None, atlas_frame_sizes=None, atlas_asset_path=None,
-                 atlas_layout='round_4x2_Source_frames0_6',
+                 atlas_layout='round_4x2_Source_frames0_6',atlas_ground_anchor=False,
                  atlas_sampling='nearest_pixel_index_ST_bilinear_gradient',
                  atlas_phase_selection='RGB_hard_argmax_ST_softmax',
                  atlas_visibility='hard_forward_ST_sigmoid',
@@ -121,6 +132,8 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             atlas_pixels_sha256=atlas_pixels_sha256, atlas_buffer_shape=list(frames.shape),
             atlas_frame_sizes=sizes.tolist(), atlas_layout=atlas_layout, atlas_sampling=atlas_sampling,
             atlas_phase_selection=atlas_phase_selection, atlas_visibility=atlas_visibility)
+        if type(atlas_ground_anchor)is not bool:raise ValueError('Ground-anchor mode must be explicit bool')
+        if atlas_ground_anchor:self.config['atlas_ground_anchor']=True
         for name, parameter in self.named_parameters():
             if name.startswith(UNUSED_PAINT_PREFIXES): parameter.requires_grad_(False)
         if sr_moe_enabled:
@@ -241,6 +254,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
                 * (2*correction[:,2:]).exp()).clamp(1e-4,5.)
         center = heat_center + .5*size*correction[:,:2]
         visual_box = torch.cat((center-size/2, center+size/2), -1)
+        if self.config.get('atlas_ground_anchor',False):visual_box=ground_anchor_box(visual_box)
         # Optional geometry is projected only from detached *predicted* state.
         state = values[:,:20]
         sine, cosine = F.normalize(state[:,2:4], dim=-1, eps=1e-6).unbind(-1)
@@ -334,7 +348,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             atlas_composite_alpha_hr=visual_alpha+guided_alpha,
             atlas_asset_sha256=self.config['atlas_asset_sha256'],atlas_pixels_sha256=self.config['atlas_pixels_sha256'],
             fixed_atlas_enemy=True,learned_enemy_paint=False,occlusion_queries='NN_binary_visibility_only',
-            phase_source='RGB_NN_logits_only',geometry_source='RGB_NN_full_bbox_optional_predicted_RSSM_proposal',
+            phase_source='RGB_NN_logits_only',geometry_source=('RGB_NN_width_center_x_camera_ground_prior' if self.config.get('atlas_ground_anchor') else 'RGB_NN_full_bbox_optional_predicted_RSSM_proposal'),
             visual_animation_source='RGB_only',legacy_RGB_parent_frozen=True)
         result.update(guided_rgba=canonical_guided,guided_bbox=guided_box,
             guided_hypothesis_bbox=proposal,guided_hypothesis_full_bbox=proposal,

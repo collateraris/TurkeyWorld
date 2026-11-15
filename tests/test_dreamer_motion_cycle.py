@@ -53,6 +53,18 @@ class MotionCycleTests(unittest.TestCase):
         path.write_text(json.dumps(dict(effective_round=2,settings=SETTINGS)))
         with self.assertRaisesRegex(ValueError,'schedule changed'):self.controller()
 
+    def test_h180_extension_preserves_old_round_schedule(self):
+        from turkeyworld.rssm_motion_round_schedule import SETTINGS,H180_SETTINGS,read_revision,schedule_for_round,gate_schedule
+        path=self.args.world_run/'motion_round_schedule.json'
+        path.write_text(json.dumps(dict(effective_round=1,settings=SETTINGS)))
+        previous=read_revision(path)
+        path.write_text(json.dumps(dict(effective_round=3,settings=H180_SETTINGS,previous_revision=previous)))
+        current=read_revision(path,previous)
+        self.assertIsNone(schedule_for_round(current,0))
+        self.assertEqual(schedule_for_round(current,2),SETTINGS)
+        self.assertEqual(gate_schedule(dict(schedule=schedule_for_round(current,3))),((180,),100,100))
+        c=self.controller();c.state['round_index']=3;self.assertEqual(c.world_budget(),100)
+
     def test_exact_stage_order_and_finished_round_is_not_quality_pass(self):
         cycle=self.controller();order=[]
         cycle.collect=Mock(side_effect=lambda directory:order.append('collect_source'))

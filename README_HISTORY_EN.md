@@ -5009,3 +5009,67 @@ Stale or Source-conditioned previews remain rejected. Rows:Source128/NPR32/froze
 base/current detail SR with patrol sprites. Live API→UI at6789 displayed preview6700;
 GET /preview.png returned200,351064 bytes. Five focused UI tests passed. Existing
 tabs need Ctrl+F5; training did not restart for the UI fix.
+
+
+## H125 — Wall PatchGAN SR9000 completed (2026-11-15, Moscow)
+
+**Executed.** Low-LR continuation6000→9000 completed. Same VAL256 wall L1
+0.05032713 vs0.05039320 at6000;edge0.02796711 vs0.02798535;high-frequency error
+0.02441911 vs0.02443713. Improvements are small; blur removal or Source-texture
+fidelity is not established. Actual9000 weights were used in the following video.
+
+## H126 — Single8×6s video:four navigation and four quiet pursuit cuts (2026-11-15, Moscow)
+
+**Recorded/verified.** MP4 H.264/yuv420p1080×640,30fps,48.000seconds/1440 frames.
+Cuts1–4 navigation without NPC;5–8 one-enemy pursuit without combat. Source512 left,
+autonomous neural RGB32→SR128→512 right. Pinned RSSM8459,new wall-PatchGAN SR9000,
+existing RF3/Base/decoder; SHA/provenance in snapshot_receipt.json. Eight predefined
+starts/open-loop input tapes,one shared initial observation and180 independent
+transitions per side per cut. No future Source feedback or pose/memory corrections.
+Offline simulation-time montage,explicitly not a real-time FPS benchmark.
+Source player/NPC HP stayed unchanged;fire0 across1440 inputs. All predicted
+shot/hit/kill/player_hit counts are zero. Source NPC visible180/180 in each pursuit.
+Actual neural blur,geometry discrepancies and missing NPC in some frames remain;
+this is not a quality-pass. Optional initialization_factory leaves default playback
+unchanged. Ten video/control tests passed; legacy CFR encoding now supports FFmpeg4.2
+with-vsync cfr. FFprobe confirmed48s/1440frames,and full decode passed.
+Video:`training_runs/paired_video_sr9000_20261115T155953Z/navigation_and_pursuit_8_cuts.mp4`.
+Adjacent artifacts include eight posters,contact sheet,clip/report and verification JSON.
+
+
+## H127 · 2026-11-15 · Missing sprite and vertical placement diagnosis
+SR9000 never passed its visual sprite route in180 cached pursuit frames and frequently predicted death. Head refinements and a square-sprite camera ground prior produced SR12613 with RGB SR9000 frozen. Near VAL row774: Source bbox=[.046875,.078125,.9453125,.9765625], prediction=[.006306,.0625,.935994,.9921875]; the severe upward shift decreased but placement is not exact. VAL256 center-Y MAE=.6007px, bottom MAE=5.7847px; patrol recall78/144, empty FP0/51. Replaying180 cached autonomous neural inputs still yields0 final sprite frames: autonomous-renderer recognition remains unresolved. Source coordinates are not inference inputs; no quality-pass claimed.
+
+## H128 · 2026-11-15 · Brick, earth and grass-edge texture continuation
+Started material_texture_patchgan_v2 in training_runs/sr_material_texture_20261115, SR12613→15613, with pinned assets/source.pt. Continued RGB detail Adam from9000; sprite heads frozen. Five separately normalized Source-only strata: brick, mortar, earth, grass and stepped grass edge; each gets L1+2*gradient+high-frequency. Exact projected original material labels exclude NPC/weapon. Inference remains RGB32-only without Source texture inputs or a hand-painted grid. G LR1e-5, D5e-6, adversarial≤.002 and≤5% reconstruction-gradient ratio. VAL256 every100 publishes separate material errors. Early12700 versus12613: earth high-frequency .02124144→.02115776; grass L1 .13138828→.12546559. These are small early changes, not confirmation of original sharpness. Monitor8786 points directly to the new run; UI validates provenance and displays its actual four-row preview. Training continues.
+Validation:20 Python tests and266 dashboard tests passed; diff --check passed.
+
+
+## H129 · 2026-11-15 · RRDB x4 architecture with material/texture heads and separate sprites
+Implemented the explicitly requested RGB replacement: RGB32→48-channel stem→6 RRDB (three dense blocks each, growth24)→two PixelShuffle x2 stages→material/seam/color/texture heads→RGB128→frozen patrol sprites. Material classes: other, brick, earth, grass; separate mortar/grass-edge logits feed the texture head. RGB trainable parameters2645676. No EDSR/MoE in the new RGB inference branch. Previous SR is only a separate teacher for the first500 updates. Source map/pose/masks remain loss-only labels.
+Safely stopped the previous material_texture run at14923 and pinned its checkpoint via hardlink to training_runs/sr_rrdb_material_20261115/assets/source.pt. Sprite tensors transferred bit-exactly, SHA75ab568c615d769dce43dd2f9d9772d27b4279ddf1d8b763882836cda0aaddfe; combat veto/navigation disabling retained. Incompatible RGB architecture requires fresh Adam and sampler, own updates0→5000; dynamics unaffected. G LR2e-5/D5e-6, GAN warmup500/ramp500, weight≤.002 and gradient ratio≤5%. Full-image L1/edges, five texture strata, wall reconstruction, material CE and balanced seam BCE. Checkpoints every25, fixed VAL256/four-row comparison every100; resume restores optimizers/RNG/sampler.
+Factory/loader and neural_play/vjepa sprite policy accept rrdb_material_sprite_sr. Monitor8786 follows this run and validates preview provenance. Existing pinned preview plans remain intact.22 Python tests and267 UI tests passed; actual checkpoint loaded with load_sr_checkpoint, RGB128 forward and navigation-alpha0 verified. New training is active; original texture fidelity is not yet established.
+
+
+## H130 · 2026-11-15 · Weapon/hand memory and foreground occlusion
+Added optional weapon_memory to RRDBMaterialSR: three trainable RGB/alpha templates initialized from the original weapon atlas (idle and two firing poses), with a small RGB32-only phase classifier. This explicitly embeds original pixels in trainable memory; it is not RRDB learning weapon appearance from scratch. No asset load, Game call or Source state during inference. Offline initialization uses exact Source integer-nearest RGBA placement and preserves fractional alpha.
+Composition is now background/details→enemy sprite→weapon/hands. The weapon covers the enemy, including the barrel tip, while transparent pixels retain the scene. A fully opaque mock enemy test verifies the expected RGBA composite over every nonzero-alpha weapon pixel.
+Safely stopped RRDB at1748 and continued its RGB/material/sprite weights and both Adam states; added a weapon-memory optimizer group LR1e-4. Main LR2e-5/D5e-6 and GAN cap unchanged. Added phase CE, weapon L1/edge and soft-alpha BCE. Accepted run training_runs/sr_rrdb_weapon_rgba_20261115 continues1748→5000 and monitor8786 follows it. Preflight found and corrected a classifier shape mismatch; RGBA tests then caught fractional-edge loss, so a corrected RGBA continuation was created while retaining old artifacts. VAL256 at1900 weapon phase accuracy=.7461: firing-phase selection remains in training, not claimed solved. Idle weapon/hands are visibly sharp and correctly cover the enemy.25 Python tests and267 dashboard tests passed.
+
+
+## H131 · 2026-11-15 · Dynamics rounds: H180 only,100 Adam updates
+Added requested motion_round_180_100_v2: horizons=[180],updates_per_stage=100,world_updates_per_round=100. Effective internal round_index11 (UI round12); current round10 completed its previous120-update budget. Append-only sidecar embeds the exact previous revision/SHA: rounds0–7 retain6x30, rounds8–10 retain H48→112→180 x40. Arbitrary pinned-plan replacements still fail. Restarted controller adopted live world worker79313 without stopping it; after120 updates it moved to policy. No world weights/Adam/RNG reset. Validated the actual current motion ledger with the extended revision; history valid, next budget100.35 backend schedule/cycle tests and268 UI tests passed; UI supports H180/100 and chained revisions.
+
+## H132 · 2026-11-15 · Explicit wall texture memory experiment, quality not accepted
+Addressing blur and false green edges. Safely stopped weapon-RRDB at3248. Added optional wall texture memory initialized offline from original64px brick/earth textures, RGB-predicted depth/UV, Source map/pose as loss labels only. Applied before enemy and weapon composition. Green earth texture pixels occur at its top UV; added false_green_excess on non-green Source pixels. First RGB-to-UV experiment distorted geometry and was stopped. Geometry-supervised mode removes RGB gradients into UV and freezes original textures. Coherent UV integrates perspective footprints across columns; material chromaticity prior helps distinguish brick/earth. All experimental artifacts and source checkpoint retained.
+Active training_runs/sr_rrdb_wall_coherent_20261115 continues3248→6500 with original RGB/weapon/D Adam and RNG/sampler; new geometry group LR1e-4, main2e-5/D5e-6/GAN≤.002/5% unchanged. Texture is visible, but material/perspective errors remain; green tops sometimes still appear on brick and held-out edge/HF errors are currently worse. NOT a quality-pass and NOT accepted for game deployment. Monitor8786 labels this an experiment; existing pinned game previews unchanged.29 SR Python tests and268 UI tests passed, including no green from brick memory, earth grass constrained to top UV, no RGB-to-geometry gradients, coherent UV and false-green penalty.
+
+
+## H133 · 2026-11-15 · Experimental SR development: column materials and shading
+Continued experimental RRDB as requested. Found missing Source shading in texture memory and unstable per-pixel brick/earth selection. Added optional WallTextureMemoryV2: one neural material decision per column, RGB chromaticity prior over interior rows52:76 so green top pixels do not determine the whole wall type. Separate neural face-side output; shading follows Source (1-.24*side)*(1-depth*.024). Dedicated material CE/side BCE use Source-only labels; Source coordinates/maps are not inference inputs. Legacy WallTextureMemory/config behavior retained.
+Safely stopped prior run at4030; pinned checkpoint via hardlink to training_runs/sr_rrdb_wall_columns_20261115/assets/source.pt. Continued every existing Adam/RNG/sampler/D state, adding only column_head group LR1e-4. Main LR2e-5/D5e-6/GAN≤.002/5% unchanged; original wall textures frozen. Target7000, training active. Standard load_sr_checkpoint/RGB128 forward passed, navigation-alpha0. At4350 group clocks RGB4350, weapon2602, geometry1102, new-column320 confirm existing optimizer histories continued.
+Same VAL256 panel (b7dcbae68e29e4ff246e074ac938c89c2a40b912a28521edce35e9624e71a2fc), source4030→v2_4100: wall L1 .07993436→.06432490(-19.53%), wall HF .03808268→.03321376(-12.79%), false_green_excess .00713564→.00408859(-42.70%). Column material accuracy=.80155. Pinned development_comparison.json; improvement versus previous experiment, not original-quality acceptance. Perspective distortion and some edge errors remain. Monitor8786 follows current run, shows accuracy/false-green and experimental label.31 Python tests and268 UI tests passed, including red-wall protection against green pixels at its top, shading equation and column-head learning.
+
+
+## H134 · 2026-11-15 · Paired neural game launched
+Opened Source-left/autonomous-neural-right window, world8725, experimental wall-columns RRDB SR7000, RF3 decoder. Hardlinked snapshots in compare_live_20261115T173149Z/assets; training unaffected. Verified ready/window_ready true, starts paused. Enter start, T navigation/combat, E turn, P pause, R reset, Esc quit. Initial navigation disables enemy sprites. Source256 is the classical renderer; neural SR remains128. Wall quality remains experimental.
