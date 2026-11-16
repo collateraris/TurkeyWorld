@@ -81,6 +81,11 @@ The model learns movement pass fractions, NPC motion and interaction decisions. 
 
 The transition does **not** query Source collisions/raycast or repair own positions against walls. A wrong pass decision can still cross a wall and accumulate drift. Known-map geometry conditions learned networks; physical correctness is evaluated separately. Source queries used to create training labels are not an inference-time physics solver.
 
+
+## Experiment: Base → SR without Flow Matching
+
+The independent `sr_base_only_20261116` branch adapts SR7000 directly to Base32: RRDB ×4, wall material/texture recovery, separate patrol enemy sprites, weapon/hands composited last. RF and VQGAN modules are removed from execution; Base retains its calibrated private geometry network. Sprite heads adapt to Base while atlas images remain frozen. Dynamics training remains stopped. [Training page](http://127.0.0.1:8790/), [architecture and reproduction commands (RU)](docs/BASE_ONLY_SR_RU.md).
+
 ## Neural renderer: Base → latent RF3 → VQGAN decoder
 
 Implementation: [Base](turkeyworld/base_student.py), [latent flow](turkeyworld/latent_flow_renderer.py), [image MoE](turkeyworld/renderer_moe.py), [format-8 bundle](turkeyworld/decoder_rf_chain_bundle.py). This image pipeline consumes the predicted state, map/geometry and auxiliary features, and emits **RGB32×32**; it does not decide the next game state.

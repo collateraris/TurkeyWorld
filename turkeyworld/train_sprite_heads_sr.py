@@ -33,23 +33,33 @@ def run(args):
     weights=GROUND_WEIGHTS if args.ground_align else WEIGHTS
     parent=torch.load(source,map_location='cpu',weights_only=False,mmap=True)
     base_step=parent['training_steps'];head_source_updates=parent.get('sprite_updates',0)
-    if base_step<9000:raise ValueError('Expected SR9000 or its complete sprite-head descendant')
-    train=NeuralEnemyRestorationData(ROOT/'training_runs/image_chain_20261114/data/paired','train',seed=6177,device='cuda')
-    val=NeuralEnemyRestorationData(ROOT/'training_runs/image_chain_20261114/data/paired','val',seed=6178,device='cuda')
+    base_input=parent.get('training_plan',{}).get('renderer_input')=='base_only'
+    if base_step<9000 and not base_input:raise ValueError('Expected SR9000 or its complete sprite-head descendant')
+    data_root=getattr(args,'data_root',None) or ROOT/'training_runs/image_chain_20261114/data/paired'
+    if base_input:
+        manifest=json.loads((data_root/'manifest.json').read_text())
+        if manifest['cache_identity'].get('renderer_input')!='base_only':raise ValueError('Base sprites require actual Base inputs')
+    train=NeuralEnemyRestorationData(data_root,'train',seed=6177,device='cuda')
+    val=NeuralEnemyRestorationData(data_root,'val',seed=6178,device='cuda')
     if train.scene_keys&val.scene_keys:raise ValueError('TRAIN/VAL overlap')
     original=json.loads((ROOT/'training_runs/sr_background_detail_20261114/training_plan.json').read_text());panel=original['panel']
     plan=dict(protocol=protocol,source_sha256=file_sha(source),source_step=base_step,updates=args.updates,
         lr=1e-5,weights=weights,ground_alignment=args.ground_align,threshold_unchanged=.9,patrol_visible=4,combat_negative=2,empty=2,
         train_identity=train.identity,val_identity=val.identity,panel=panel,panel_fingerprint=val.panel_fingerprint(panel),
         ground_projection=args.ground_project,frozen_RGB_SR9000=True,combat_animation_sprites=False,navigation_sprites=False,Source_inputs=False)
+    if getattr(args,'patrol_grouped',False):plan['atlas_patrol_grouped']=True
+    if base_input:plan.update(renderer_input='base_only',phase_weight=4.,patrol_gate_weight=1.,frozen_RGB_SR9000=False,frozen_RGB_parent=True)
     if (root/'training_plan.json').exists() and json.loads((root/'training_plan.json').read_text())!=plan:raise ValueError('Sprite plan changed')
     atomic_json(root/'training_plan.json',plan);last=root/'checkpoints/sr_last.pt'
     saved=torch.load(last,map_location='cpu',weights_only=False,mmap=True) if last.exists() else None
     if saved is not None and saved['training_plan']!=plan:raise ValueError('Sprite checkpoint plan changed')
     config=deepcopy(parent['config'])
     if args.ground_project:config['sprite_config']['atlas_ground_anchor']=True
+    if getattr(args,'patrol_grouped',False):config['sprite_config']['atlas_patrol_grouped']=True
     plan['ground_projection']=args.ground_project
     atomic_json(root/'training_plan.json',plan)
+    from .sr_sprite_heads import base_patrol_objective
+    loss_fn=base_patrol_objective if base_input else objective
     model=build_upscaler(config);model.load_state_dict(parent['model'] if saved is None else saved['model'],strict=True)
     model.to('cuda').float();names=configure(model);parameters=dict(model.named_parameters())
     optimizer=torch.optim.Adam([parameters[n] for n in names],lr=plan['lr'])
@@ -76,7 +86,7 @@ def run(args):
             sprite_updates=head_source_updates+count,sprite_optimizer=optimizer.state_dict(),sprite_optimizer_names=names,
             source_detail_optimizer=parent.get('source_detail_optimizer') or parent.get('optimizer'),
             source_detail_optimizer_names=parent.get('source_detail_optimizer_names') or parent.get('optimizer_parameter_names'),
-            source_detail_step=9000,source_checkpoint_sha256=plan['source_sha256'],training_plan=plan,
+            source_detail_step=base_step if base_input else 9000,source_checkpoint_sha256=plan['source_sha256'],training_plan=plan,
             sprite_sampler_rng=deepcopy(rng.bit_generator.state),frozen_sha256=frozen_sha,
             rng_python=random.getstate(),rng_numpy=np.random.get_state(),rng_torch=torch.get_rng_state(),
             rng_cuda=torch.cuda.get_rng_state_all()))
@@ -85,7 +95,7 @@ def run(args):
         model.eval();bottom_errors=[];center_errors=[];numbers=dict(patrol=0,detected=0,empty=0,false_positive=0,visible=0,phase_correct=0);total=0.
         for first in range(0,len(panel),8):
             batch=val.batch(len(panel[first:first+8]),indices=panel[first:first+8])
-            raw=model.sprite_renderer.forward_with_aux(batch['lr_npr']);loss,_=objective(raw,batch,ground=args.ground_align);total+=float(loss)*len(batch['state'])
+            raw=model.sprite_renderer.forward_with_aux(batch['lr_npr']);loss,_=loss_fn(raw,batch,ground=args.ground_align);total+=float(loss)*len(batch['state'])
             target_box=source_full_sprite_geometry(batch['state'])['full_bbox'];pred_box=raw['visual_full_bbox']
             phase=enemy_animation_index(batch['state']);visible=batch['mask_hr'].flatten(1).any(-1)
             alpha=patrol_alpha(raw['visual_composite_alpha_hr'],raw['visual_animation_index'])
@@ -107,11 +117,13 @@ def run(args):
         ids=[]
         for distance in ('near','mid','far'):
             ids.append(next(i for i in panel if val.visible[i] and val.animation_labels[i]<3 and val.distance[i]==distance))
-        ids.append(next(i for i in panel if not val.visible[i]));batch=val.batch(4,indices=ids)
+        ids.append(next(i for i in panel if not val.visible[i]))
+        if base_input:ids=[774,32,519,38]
+        batch=val.batch(4,indices=ids)
         previous=reference(batch['lr_npr']);current=model(batch['lr_npr'])
         raw_near=model.sprite_renderer.forward_with_aux(batch['lr_npr'][:1]);target_near=source_full_sprite_geometry(batch['state'][:1])
         atomic_json(root/'near_geometry.json',dict(step=base_step+count,row_index=ids[0],target_bbox=target_near['full_bbox'][0].tolist(),predicted_bbox=raw_near['visual_full_bbox'][0].tolist()))
-        labels=['Оригинал Source128','Нейрорендер32',f'SR{base_step} до коррекции','SR с дообученными головами спрайта']
+        labels=['Оригинал Source128','Base32 без RF' if base_input else 'Нейрорендер32',f'SR{base_step} до коррекции','SR с дообученными головами спрайта']
         canvas=Image.new('RGB',(1024,1120),(14,22,31));draw=ImageDraw.Draw(canvas)
         font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',17)
         for row,images in enumerate((batch['hr_source'],batch['lr_npr'],previous,current)):
@@ -133,7 +145,7 @@ def run(args):
         model.eval();model.sprite_renderer.train()
         batch=train.batch(8,indices=sample_indices(train,rng,count))
         optimizer.zero_grad(set_to_none=True);raw=model.sprite_renderer.forward_with_aux(batch['lr_npr'])
-        loss,metrics=objective(raw,batch,ground=args.ground_align);loss.backward()
+        loss,metrics=loss_fn(raw,batch,ground=args.ground_align);loss.backward()
         clip_finite_grad_norm_(model.named_parameters(),context='sprite-head calibration');optimizer.step();count+=1
         metrics.update(step=base_step+count,stage='sr',objective_protocol=protocol,loss_protocol=protocol,lr=plan['lr'])
         with (root/'metrics.jsonl').open('a') as stream:stream.write(json.dumps(metrics,allow_nan=False)+'\n')
@@ -145,7 +157,7 @@ def run(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--updates',type=int,default=3000);p.add_argument('--source-checkpoint',type=Path);p.add_argument('--ground-align',action='store_true');p.add_argument('--ground-project',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--patrol-grouped',action='store_true');p.add_argument('--data-root',type=Path);p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--updates',type=int,default=3000);p.add_argument('--source-checkpoint',type=Path);p.add_argument('--ground-align',action='store_true');p.add_argument('--ground-project',action='store_true');a=p.parse_args()
     a.run_dir.mkdir(parents=True,exist_ok=True)
     from .process_runtime import pid_file_alive,write_pid_file
     if pid_file_alive(a.run_dir/'training.pid'):raise ValueError('Sprite head worker already running')

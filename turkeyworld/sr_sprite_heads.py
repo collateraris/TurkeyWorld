@@ -59,3 +59,17 @@ def sample_indices(data,rng,step):
         result.append(int(rng.choice(ids)))
     result.extend(int(i) for i in rng.choice(combat,2));result.extend(int(i) for i in rng.choice(empty,2))
     rng.shuffle(result);return result
+
+
+def base_patrol_objective(output,batch,*,ground=True):
+    """Train the actual seven-way phase and the patrol/combat routing boundary."""
+    loss,metrics=objective(output,batch,ground=ground)
+    labels=source_full_sprite_geometry(batch['state'].detach())['phase']
+    visible=batch['mask_hr'].detach().flatten(1).any(-1)
+    logits=output['visual_animation_logits'].float()
+    phase=F.cross_entropy(logits[visible],labels[visible]) if bool(visible.any()) else logits.sum()*0
+    gate_logits=logits[:,:3].logsumexp(-1)-logits[:,3:].logsumexp(-1)
+    gate=balanced_binary_loss(gate_logits[visible,None],(labels[visible]<3)[:,None]) if bool(visible.any()) else logits.sum()*0
+    loss=loss+3*phase+gate
+    metrics.update(phase_weight=4.,patrol_gate=float(gate.detach()),train_loss=float(loss.detach()))
+    return loss,metrics

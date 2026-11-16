@@ -71,7 +71,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
                  enemy_decoder_restoration=True, restoration_blend_scale=1.,
                  atlas_asset_sha256=ASSET_SHA256, atlas_pixels_sha256=None,
                  atlas_buffer_shape=None, atlas_frame_sizes=None, atlas_asset_path=None,
-                 atlas_layout='round_4x2_Source_frames0_6',atlas_ground_anchor=False,
+                 atlas_layout='round_4x2_Source_frames0_6',atlas_ground_anchor=False,atlas_patrol_grouped=False,
                  atlas_sampling='nearest_pixel_index_ST_bilinear_gradient',
                  atlas_phase_selection='RGB_hard_argmax_ST_softmax',
                  atlas_visibility='hard_forward_ST_sigmoid',
@@ -134,6 +134,8 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             atlas_phase_selection=atlas_phase_selection, atlas_visibility=atlas_visibility)
         if type(atlas_ground_anchor)is not bool:raise ValueError('Ground-anchor mode must be explicit bool')
         if atlas_ground_anchor:self.config['atlas_ground_anchor']=True
+        if type(atlas_patrol_grouped) is not bool:raise ValueError('Grouped patrol routing must be explicit bool')
+        if atlas_patrol_grouped:self.config['atlas_patrol_grouped']=True
         for name, parameter in self.named_parameters():
             if name.startswith(UNUSED_PAINT_PREFIXES): parameter.requires_grad_(False)
         if sr_moe_enabled:
@@ -212,15 +214,22 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
 
     fixed_atlas_frame = render_label_atlas
 
+    def select_phase(self,logits):
+        if not self.config.get('atlas_patrol_grouped',False):return logits.argmax(-1)
+        # Presence and pose are different decisions. Walking probability is
+        # split across three frames; compare group mass before choosing a pose.
+        patrol=logits[:,:3].logsumexp(-1)>=logits[:,3:].logsumexp(-1)
+        return torch.where(patrol,logits[:,:3].argmax(-1),3+logits[:,3:].argmax(-1))
+
     def fixed_atlas_rgba(self, boxes, phase_logits, dead_logits=None, *, size=128):
         self._validate_boxes(boxes)
         if phase_logits.shape != (len(boxes), 7) or not bool(torch.isfinite(phase_logits).all()):
             raise ValueError('Atlas phase prediction requires finite NN logits[B,7]')
         if not self.training:
             dead = None if dead_logits is None else (dead_logits.reshape(-1) >= 0)
-            return self.render_label_atlas(boxes, phase_logits.argmax(-1), dead, size=size)
+            return self.render_label_atlas(boxes, self.select_phase(phase_logits), dead, size=size)
         probability = phase_logits.float().softmax(-1)
-        hard = F.one_hot(probability.argmax(-1), 7).float()
+        hard = F.one_hot(self.select_phase(phase_logits), 7).float()
         phase = hard + (probability-probability.detach())
         frames = torch.stack([self._warp_native(boxes.float(), index, size=size, straight_through=True)
                               for index in range(7)], 1)
@@ -331,7 +340,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             enemy_applicable=applicable,projection_agreement=agreement,
             enemy_confirmation_logits=guided_confirmation,visual_confirmation_logits=visual_confirmation,
             enemy_animation_logits=guided_phase,visual_animation_logits=visual_phase,
-            enemy_animation_index=guided_phase.argmax(-1),visual_animation_index=visual_phase.argmax(-1),
+            enemy_animation_index=self.select_phase(guided_phase),visual_animation_index=self.select_phase(visual_phase),
             enemy_visible_logits_hr=visible_logits,visual_visible_logits_hr=visible_logits,
             enemy_alpha_hr=ga,visual_alpha_hr=va,enemy_composite_alpha_hr=guided_alpha,
             visual_composite_alpha_hr=visual_alpha,enemy_gain=image.new_tensor(scale),visual_gain=image.new_tensor(scale),
@@ -340,7 +349,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             visual_first=True,restoration=True,restoration_base_rgb=base,restoration_blend_scale=scale,
             guided_raw_warped_rgba=guided_rgba,visual_raw_warped_rgba=visual_rgba,
             atlas_full_bbox=chosen_box,visual_full_bbox=visual_box,guided_full_bbox=guided_box,
-            atlas_phase_logits=chosen_phase,atlas_phase_index=chosen_phase.argmax(-1),
+            atlas_phase_logits=chosen_phase,atlas_phase_index=self.select_phase(chosen_phase),
             atlas_player_dead_logits=dead_logits,atlas_player_dead_index=(dead_logits[:,0]>=0).long(),
             atlas_visibility_logits_hr=visible_logits,atlas_visible_logits_hr=visible_logits,
             atlas_visibility_probability_hr=probability,atlas_visibility_hard_hr=hard_visibility,
@@ -354,7 +363,7 @@ class AtlasEnemyEDSRUpscaler(EnemyDecoderEDSRUpscaler):
             guided_hypothesis_bbox=proposal,guided_hypothesis_full_bbox=proposal,
             guided_confirmation_logits=guided_confirmation,
             guided_applicable=applicable,guided_alpha_hr=ga,
-            guided_animation_logits=guided_phase,guided_animation_index=guided_phase.argmax(-1))
+            guided_animation_logits=guided_phase,guided_animation_index=self.select_phase(guided_phase))
         if moe is not None:
             result.update(sr_moe=moe,sr_moe_role_schema=self.config['sr_moe_role_schema'],
                 sr_moe_inference_inputs='RGB32_with_optional_existing_predicted_hint_no_Source_labels')

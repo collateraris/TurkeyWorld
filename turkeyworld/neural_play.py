@@ -33,6 +33,7 @@ EVENT_NAMES = ("shot", "hit", "kill", "player_hit")
 
 def _arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--base-only",action="store_true",help="Direct compact Base, without RF or VQGAN.")
     p.add_argument("--world", type=Path, required=True, help="World checkpoint produced by turkeyworld.train.")
     p.add_argument("--renderer-checkpoint", type=Path,
                    help="Optional RF renderer bundle; preserves teacher dynamics, validates source conditions and approved compact assets.")
@@ -178,6 +179,11 @@ class NeuralRuntime:
         self.sr, self.sr_metadata = (None, None)
         if args.sr is not None:
             self.sr, self.sr_metadata = load_sr_checkpoint(args.sr, self.device)
+        self.base_only_metadata=None
+        if getattr(args,'base_only',False):
+            if getattr(args,'rf_euler_steps',None) is not None:raise ValueError('Base-only has no RF solver')
+            from .base_only_renderer import enable_base_only
+            self.base_only_metadata=enable_base_only(self.model)
         self.rf_solver_override = configure_runtime_rf_steps(
             self.model, getattr(args, 'rf_euler_steps', None))
         if getattr(args, "two_stage_upscale", False):
@@ -395,6 +401,7 @@ class NeuralRuntime:
         training_steps = int(self.world_metadata.get("training_steps", 0))
         report = {
             "mode": "standalone_neural_world_rollout",
+            "base_only_renderer":getattr(self,"base_only_metadata",None),
             "device": str(self.device),
             "device_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU",
             "precision": "fp16" if self.args.fp16 else "fp32",
@@ -402,7 +409,7 @@ class NeuralRuntime:
             "world_checkpoint": str(self.args.world.resolve()),
             "renderer_checkpoint": str(self.args.renderer_checkpoint.resolve()) if getattr(self.args, 'renderer_checkpoint', None) else None,
             "renderer_training_steps": self.renderer_metadata.get('training_steps') if self.renderer_metadata else None,
-            "renderer_solver": 'euler' if getattr(self.model, 'flow_renderer', None) is not None and self.model.flow_renderer.kind == 'student' else 'heun' if getattr(self.model, 'flow_renderer', None) is not None else None,
+            "renderer_solver": 'euler' if getattr(self.model, 'flow_renderer', None) is not None and self.model.flow_renderer.kind == 'student' else 'base_only' if getattr(self,'base_only_metadata',None) else 'heun' if getattr(self.model, 'flow_renderer', None) is not None else None,
             "renderer_solver_steps": getattr(getattr(self.model, 'flow_renderer', None), 'steps', None),
             "renderer_solver_override": getattr(self, 'rf_solver_override', None),
             "base_student_parameters": getattr(self.model, 'base_student_metadata', {}).get('head_parameters'),

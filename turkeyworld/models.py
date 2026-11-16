@@ -602,7 +602,7 @@ class NeuralWorldModel(nn.Module):
     def render(self, state, features, map_features):
         """Render through the configured direct or conditional-flow decoder."""
         base, residual = self.render_base_with_residual(state, features, map_features)
-        if self.config.renderer_mode == "direct":
+        if self.config.renderer_mode == "direct" or getattr(self,"base_only_enabled",False):
             return base
         condition = state if self.config.spatial_combat else render_state_view(state)
         return apply_pixel_residual(self.flow_renderer.sample(base, condition), residual)
@@ -615,7 +615,7 @@ class NeuralWorldModel(nn.Module):
         else:
             base, residual = self.render_base_with_residual(state, features, map_features)
             result = {"rgb": base}
-        if self.config.renderer_mode != "direct":
+        if self.config.renderer_mode != "direct" and not getattr(self,"base_only_enabled",False):
             condition = state if self.config.spatial_combat else render_state_view(state)
             result = {**result, "base_rgb": result["rgb"],
                       "rgb": apply_pixel_residual(self.flow_renderer.sample(result["rgb"], condition), residual)}

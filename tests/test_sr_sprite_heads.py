@@ -54,3 +54,27 @@ class SpriteHeadTests(unittest.TestCase):
         self.assertGreater(float(phase.grad[:,6].sum()),0)
         self.assertLess(float(phase.grad[:,1].sum()),0)
         self.assertTrue(bool(torch.isfinite(box.grad).all()))
+
+    def test_base_patrol_gate_corrects_hurt_veto_but_keeps_attack_negative(self):
+        from unittest.mock import patch
+        from turkeyworld.sr_sprite_heads import base_patrol_objective
+        logits=torch.zeros(2,7,requires_grad=True)
+        with torch.no_grad():logits[0,4]=4;logits[1,1]=4
+        output={'visual_animation_logits':logits}
+        batch={'state':torch.zeros(2,20),'mask_hr':torch.ones(2,1,2,2)}
+        with patch('turkeyworld.sr_sprite_heads.objective',return_value=(logits.sum()*0,{})),patch('turkeyworld.sr_sprite_heads.source_full_sprite_geometry',return_value={'phase':torch.tensor([1,3])}):
+            loss,metrics=base_patrol_objective(output,batch);loss.backward()
+        self.assertGreater(float(logits.grad[0,4]),0)
+        self.assertLess(float(logits.grad[0,1]),0)
+        self.assertGreater(float(logits.grad[1,1]),0)
+        self.assertLess(float(logits.grad[1,3]),0)
+        self.assertEqual(metrics['phase_weight'],4.)
+
+    def test_group_mass_does_not_drop_patrol_because_one_hurt_class_wins(self):
+        from turkeyworld.atlas_enemy_sr import AtlasEnemyEDSRUpscaler
+        model=SimpleNamespace(config={'atlas_patrol_grouped':True})
+        probabilities=torch.tensor([[.31,.17,.12,.004,.313,.047,.036],[.03,.03,.04,.8,.04,.03,.03]])
+        phase=AtlasEnemyEDSRUpscaler.select_phase(model,probabilities.log())
+        self.assertEqual(phase.tolist(),[0,3])
+        model.config={}
+        self.assertEqual(AtlasEnemyEDSRUpscaler.select_phase(model,probabilities.log()).tolist(),[4,3])
