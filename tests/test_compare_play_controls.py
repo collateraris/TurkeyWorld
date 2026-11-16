@@ -11,7 +11,7 @@ import torch
 from test_compare_runtime import NeuralStub, SourceStub, PoseRenderer
 from test_renderer_enemy_objectives import tiny_model
 from test_rssm_runtime import arguments
-from turkeyworld.compare_play import keyboard_action, switch_test_environment
+from turkeyworld.compare_play import keyboard_action, shortcut_key, switch_test_environment
 from turkeyworld.compare_runtime import PairedRuntime
 from turkeyworld.engine import Game
 from turkeyworld.neural_play import NeuralRuntime
@@ -20,6 +20,17 @@ from turkeyworld.neural_play import NeuralRuntime
 class ComparePlayControlTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):torch.set_num_threads(2)
+
+    def test_physical_keys_work_when_logical_keys_use_russian_layout(self):
+        import pygame
+        event=SimpleNamespace(key=ord('е'),scancode=pygame.KSCAN_T)
+        self.assertEqual(shortcut_key(pygame,event),pygame.K_t)
+        event=SimpleNamespace(key=ord('к'),scancode=pygame.KSCAN_R)
+        self.assertEqual(shortcut_key(pygame,event),pygame.K_r)
+        with patch.object(pygame.mouse,'get_pressed',return_value=(False,False,False)):
+            self.assertEqual(keyboard_action(pygame,{},
+                {pygame.KSCAN_W,pygame.KSCAN_D,pygame.KSCAN_E,pygame.KSCAN_SPACE}),[1.,1.,1.,1.])
+            self.assertEqual(keyboard_action(pygame,{},set()),[0.,0.,0.,0.])
 
     def test_t_is_a_scene_key_and_e_is_right_turn_in_the_shared_action_vector(self):
         names=['K_w','K_UP','K_s','K_DOWN','K_d','K_a','K_e','K_t','K_RIGHT','K_q','K_LEFT','K_SPACE']

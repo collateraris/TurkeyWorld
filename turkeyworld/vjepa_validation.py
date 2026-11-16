@@ -243,7 +243,22 @@ def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model
         device = parameter.device if parameter is not None else torch.device('cpu')
         dtype = parameter.dtype if parameter is not None else torch.float32
         with torch.inference_mode():
-            sr = sr_model(generated[:4].to(device=device, dtype=dtype)).float()
+            patrol=getattr(sr_model,'config',{}).get('architecture')in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr')
+            old_context=None
+            if patrol:
+                states=preview.get('sr_predicted_states')
+                if not torch.is_tensor(states) or states.shape!=(len(generated),20) or not bool(torch.isfinite(states).all()):
+                    raise ValueError('Patrol preview needs matching own predicted animation states')
+                old_context=(sr_model.enemies_enabled,sr_model.predicted_sprite_state)
+                sr_model.enemies_enabled=bool(preview['sr_enemies_enabled'])
+                sr_model.predicted_sprite_state=states[:4].to(device=device).float().detach()
+                metadata.update(sr_sprite_frames=[0,1,2],sr_combat_animation_sprites=False,
+                    sr_navigation_sprites=False,sr_animation_veto_source='own_predicted_state')
+            try:
+                sr = sr_model(generated[:4].to(device=device, dtype=dtype)).float()
+            finally:
+                if old_context is not None:
+                    sr_model.enemies_enabled,sr_model.predicted_sprite_state=old_context
             middle, final = native[0]*4, native[0]*16
             if tuple(sr.shape[1:]) != (3, middle, middle) or not bool(torch.isfinite(sr).all()):
                 raise ValueError("Preview SR must produce finite RGB at exactly x4 native size")

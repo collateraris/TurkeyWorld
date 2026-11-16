@@ -17,25 +17,25 @@ WALL_PROTOCOL = {'name':'source_native_wall_boundary_v1','native_size':32,
     'normalization':'per-image region mean, then mean over present images'}
 
 
-@lru_cache(maxsize=1)
-def _gun_masks():
+@lru_cache(maxsize=2)
+def _gun_masks(native_size=32):
     # Same immutable Source atlas and exact integer-nearest rasterizer. This
     # creates no Source transitions or rendered target RGB and touches no
     # global RNG; Game owns a private generator.
     game = Game(seed=0)
-    size = int(32*.67)
+    size = int(native_size*.67)
     masks = []
     for sprite in game._guns:
         alpha = sprite.copy()
         alpha[...,:3] = 255
         alpha[...,3] = (sprite[...,3] > 0).astype(np.uint8)*255
-        canvas = np.zeros((32,32,3),np.uint8)
-        Game._blit_rgba(canvas,alpha,16-size//2,32-size,size,size)
+        canvas = np.zeros((native_size,native_size,3),np.uint8)
+        Game._blit_rgba(canvas,alpha,native_size//2-size//2,native_size-size,size,size)
         masks.append(canvas[...,0] > 0)
     return tuple(masks)
 
 
-def source_wall_masks(grid, states, object_mask):
+def source_wall_masks(grid, states, object_mask, *, native_size=32):
     """Project Source GT geometry in float64 and exclude actual occluders.
 
     A one-pixel band on either side of the wall/sky/floor boundary supervises
@@ -43,8 +43,9 @@ def source_wall_masks(grid, states, object_mask):
     corners. NPC/weapon pixels never enter either denominator. Float32 recorded
     poses are decoded as Source.set_state_vector does; no NN pose is corrected.
     """
+    if type(native_size)is not int or native_size not in (32,128):raise ValueError('Wall labels require native32 or128')
     if (states.ndim != 2 or states.shape[1] != 20 or grid.shape != (len(states),16,16)
-            or object_mask.shape != (len(states),1,32,32)
+            or object_mask.shape != (len(states),1,native_size,native_size)
             or not all(bool(torch.isfinite(v).all()) for v in (grid,states,object_mask))):
         raise ValueError('Source wall labels require finite map16, state20 and native32 NPC masks')
     maps = grid.detach().cpu().numpy()
@@ -52,8 +53,8 @@ def source_wall_masks(grid, states, object_mask):
     objects = object_mask.detach().cpu().numpy()[:,0] > .5
     all_wall, all_boundary, all_horizontal, all_vertical = [],[],[],[]
     tangent = math.tan(math.radians(68)/2)
-    screen = (np.arange(32,dtype=np.float64)+.5)/32*2-1
-    yy = np.arange(32)[:,None]
+    screen = (np.arange(native_size,dtype=np.float64)+.5)/native_size*2-1
+    yy = np.arange(native_size)[:,None]
     for tilemap, state, npc in zip(maps,poses,objects):
         x,y = state[:2]*16
         if not (0 <= x < 16 and 0 <= y < 16) or tilemap[int(y),int(x)] != 0:
@@ -61,8 +62,8 @@ def source_wall_masks(grid, states, object_mask):
         angle = math.atan2(state[2],state[3])
         c,s = math.cos(angle),math.sin(angle)
         depth = np.maximum(_wall_depths(tilemap,x,y,c-s*tangent*screen,s+c*tangent*screen,100.),.02)
-        height = (32/(2*tangent))/depth
-        v = (yy-(16-height[None,:]/2))/height[None,:]
+        height = (native_size/(2*tangent))/depth
+        v = (yy-(native_size/2-height[None,:]/2))/height[None,:]
         wall = (v >= 0) & (v < 1)
         boundary = np.zeros_like(wall)
         horizontal = wall[:,1:] != wall[:,:-1]
@@ -70,7 +71,7 @@ def source_wall_masks(grid, states, object_mask):
         boundary[:,1:] |= horizontal; boundary[:,:-1] |= horizontal
         boundary[1:] |= vertical; boundary[:-1] |= vertical
         flash = float(np.clip(state[7],0,1))*Game.FLASH_DURATION
-        gun = _gun_masks()[1 if flash > .045 else 2 if flash > 0 else 0]
+        gun = _gun_masks(native_size)[1 if flash > .045 else 2 if flash > 0 else 0]
         exposed = ~(npc | gun)
         all_wall.append(wall & exposed)
         all_boundary.append(boundary & exposed)

@@ -102,6 +102,31 @@ class MotionOnlyTrainingTests(unittest.TestCase):
             _player_local_backward=lambda *a, **kw: dict(player_contact_loss=0., branches=0),
             enemy_local_recovery_backward=lambda *a, **kw: dict(enemy_local_loss=0., branches=0))
 
+    def test_opt_in_enemy_drift_supervision_runs_on_full_main_graph(self):
+        from turkeyworld.rssm_enemy_drift import SETTINGS
+        model=TinyMotionWorld()
+        with self.local_patches():
+            result=motion_only_backward(model,batch(16),batch(16,True),enemy_drift_settings=SETTINGS,**kwargs())
+        enemy=result['motion_only_streams'][1]
+        self.assertTrue(enemy['recorded_NPC_velocity_direction_gradients'])
+        self.assertEqual(enemy['enemy_long_valid_transitions'],128)
+        self.assertGreaterEqual(enemy['enemy_long_velocity_weighted'],0)
+        self.assertTrue(any(p.grad is not None and bool(p.grad.abs().sum()>0) for p in model.enemy_head.parameters()))
+
+    def test_first_wrong_transition_losses_join_main_graph_without_extra_actors(self):
+        from turkeyworld.rssm_first_contact import SETTINGS
+        model=TinyMotionWorld()
+        with self.local_patches():
+            result=motion_only_backward(model,batch(16),batch(16,True),first_contact_settings=SETTINGS,**kwargs())
+        self.assertEqual(len(model.calls),32)
+        self.assertEqual(result['main_independent_actor_count'],16)
+        self.assertEqual(result['first_contact_settings'],SETTINGS)
+        for stream in result['motion_only_streams']:
+            self.assertLessEqual(stream['first_wrong_contact']['source_probes'],32)
+            self.assertFalse(stream['first_wrong_contact']['Source_future_feedback'])
+        self.assertIn('first_wrong_enemy_motion',result['motion_only_streams'][1])
+        self.assertGreater(result['motion_only_Source_queries'],0)
+
     def test_no_combat_router_queries_or_classes_receive_direct_supervision(self):
         base = torch.randn(2, 3, 3, requires_grad=True)
         five = torch.randn(2, 5, 5, requires_grad=True)

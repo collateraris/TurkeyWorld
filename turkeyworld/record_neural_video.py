@@ -136,7 +136,7 @@ def encode_video(ffmpeg, directory, rows, durations, output, fps=30):
     duration = sum(durations)
     command = [str(ffmpeg), '-hide_banner', '-loglevel', 'warning', '-y', '-safe', '1',
                '-i', str(concat.resolve()), '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
-               '-pix_fmt', 'yuv420p', '-r', str(fps), '-fps_mode', 'cfr', '-t', f'{duration:.9f}',
+               '-pix_fmt', 'yuv420p', '-r', str(fps), '-vsync', 'cfr', '-t', f'{duration:.9f}',
                '-movflags', '+faststart', str(output.resolve())]
     with (output.parent/'ffmpeg.stderr.log').open('w', encoding='utf-8') as log:
         subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

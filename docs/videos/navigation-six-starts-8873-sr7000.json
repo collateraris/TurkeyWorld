@@ -1,0 +1,43 @@
+{
+  "passed": true,
+  "clips": 6,
+  "seconds_per_clip": 6,
+  "duration_seconds": 36,
+  "total_frames": 1080,
+  "fps": 30,
+  "world_step": 8873,
+  "sr_step": 7000,
+  "source_left": true,
+  "neural_right": true,
+  "unique_start_positions": [
+    [
+      2.5,
+      2.5
+    ],
+    [
+      13.5,
+      2.5
+    ],
+    [
+      14.5,
+      13.5
+    ],
+    [
+      1.5,
+      2.5
+    ],
+    [
+      8.5,
+      1.5
+    ],
+    [
+      8.5,
+      14.5
+    ]
+  ],
+  "autonomous_neural": true,
+  "Source_future_feedback": false,
+  "ffmpeg_full_decode_passed": true,
+  "video_sha256": "2243d78c4225397bff518de7aff1a641ee4d7e57b1336bd8cdeb6ea48089ceec",
+  "offline_simulation_time": true
+}

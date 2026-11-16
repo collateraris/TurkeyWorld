@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import platform
 
 import numpy as np
 import torch
@@ -35,6 +36,29 @@ def file_sha(path):
 def _pixels_sha(image):return hashlib.sha256(np.asarray(image,dtype=np.uint8).tobytes()).hexdigest()
 
 
+def _transferred_initial_rgb(record, rendered):
+    """Use the unchanged recorded observation under an audited renderer transfer."""
+    receipt_path=resolve_path('training_runs/ubuntu_handoff_20261115/policy_renderer_transfer.json')
+    if not receipt_path.is_file():
+        raise ValueError('Held-out Source snapshot no longer reproduces its initial numerical state/RGB')
+    receipt=json.loads(receipt_path.read_text(encoding='utf-8'))
+    if(receipt.get('platform')!=platform.system()
+            or receipt.get('engine_sha256')!=file_sha(Path(__file__).with_name('engine.py'))):
+        raise ValueError('Policy renderer transfer platform/code changed')
+    row=receipt.get('starts',{}).get(record['episode_sha256'])
+    if(row is None or row['recorded_rgb_sha256']!=record['initial_rgb_sha256']
+            or row['native_rgb_sha256']!=_pixels_sha(rendered)):
+        raise ValueError('Policy renderer transfer does not cover this exact initial observation')
+    path=resolve_path(record['episode_path'])
+    if file_sha(path)!=record['episode_sha256']:raise ValueError('Policy held-out Source file changed')
+    with np.load(path,allow_pickle=False)as saved:
+        image=saved['frames'][0].copy()
+        if not np.array_equal(saved['states'][0],np.asarray(record['state'],np.float32)):
+            raise ValueError('Transferred initial state changed')
+    if _pixels_sha(image)!=record['initial_rgb_sha256']:raise ValueError('Transferred initial RGB changed')
+    return image
+
+
 def _source(record,source_factory=Game):
     snapshot=deepcopy(record['snapshot']);grid=np.asarray(record['map'],np.uint8)
     if grid.shape!=(16,16):raise ValueError('Policy Source start needs its actual16x16 map')
@@ -42,9 +66,10 @@ def _source(record,source_factory=Game):
         enemies_enabled=bool(snapshot.get('enemies_enabled',True)))
     game.map=grid.copy();game.map_height,game.map_width=grid.shape;game.set_state(snapshot)
     state=game.state_vector().astype(np.float32);image=game.render(size=32,overlays=False)
-    if(not np.array_equal(state,np.asarray(record['state'],np.float32))
-            or _pixels_sha(image)!=record['initial_rgb_sha256']):
+    if not np.array_equal(state,np.asarray(record['state'],np.float32)):
         raise ValueError('Held-out Source snapshot no longer reproduces its initial numerical state/RGB')
+    if _pixels_sha(image)!=record['initial_rgb_sha256']:
+        image=_transferred_initial_rgb(record,image)
     return game,image
 
 

@@ -1,15 +1,209 @@
-# TurkeyWorld: a neural game world
+# TurkeyWorld: a game with a learned world model
 
 English | [Русский](README_RU.md)
 
+**TurkeyWorld is a research project in which neural networks learn to execute a small first-person game:** move a player, respond to walls, control one persistent enemy and predict game events. Separate image models turn predicted state into pixels. The conventional game supplies training episodes and reference trajectories.
+
+There are two implementations of the environment. **Source** is the local reference game, with ordinary movement, collision, NPC and rendering code; the name does not refer to Valve's engine. The **neural game** starts from the same initial observation/state, then runs its own world-model predictions. A neural renderer produces32×32 RGB and an upscaler produces128×128 RGB. Both implementations can receive identical controls in a paired window.
+
+The current research target is an autonomous **180-transition rollout:6 seconds at30Hz**. Collision errors, coordinate drift, warped walls and disappearing enemy sprites remain. Completing a rollout or producing an attractive frame does not establish correct game execution.
+
+**Start here:** [reproduction instructions and dependency boundaries](docs/REPRODUCING_EN.md) · [verified configuration snapshot](docs/architecture-snapshot-2026-11-15.json) · [development journal](README_HISTORY_EN.md).
+
+## One neural simulation step
+
+```mermaid
+flowchart LR
+  I[Initial RGB32 and state20] --> O[Initialize three RSSMs]
+  M[Known16x16 map] --> W
+  A[Four player controls] --> W
+  O --> W[World-model prior and structured transition]
+  W --> S[Next state20 and persistent h/z]
+  S --> W
+  S --> B[Neural Base32]
+  B --> F[VQGAN encoder: RF3 Euler steps: decoder]
+  F --> R[Own RGB32]
+  R --> U[RRDB x4: wall materials and texture]
+  U --> P[Patrol enemy sprite: weapon and hands]
+  P --> V[RGB128: display resize]
+```
+
+SR output does not become a new world-model observation. Autonomous rollout advances its own numerical state and memory without future Source states/images. Initial state and map are explicit conditions: this is a hybrid game model, not an entirely pixel-only simulator.
+
+The architecture below was checked against world checkpoint **8873**, the selected **format-8 image bundle**, and **RRDB SR7000** used in the published videos. Live training continues beyond that world step. Historical config fields and independent training clocks must not be mistaken for active inference settings.
+
+## World model
+
+### Inputs, state20 and observation encoder
+
+Implementation: [RSSM backend](turkeyworld/rssm_world_backend.py), [recurrent core](turkeyworld/rssm.py), [structured transition](turkeyworld/structured_state.py). The serialized namespace remains `vjepa_backend` for checkpoint compatibility. `RSSMWorldBackend` constructs RSSMs directly; it does not construct a JEPA predictor or EMA target encoder.
+
+A transition consumes own `state20`, controls `[forward, strafe, turn, fire]`, known-map features and previous memory. Movement/turn controls are clamped to−1…1, firing to0…1. A step is1/30s. The observation encoder accepts RGB32, applies four kernel4/stride2 convolutions with32→64→128→256 channels, then flatten, Linear, LayerNorm and SiLU to produce a512D embedding.
+
+| State indices | Meaning | Encoding |
+|---|---|---|
+| 0–1 | Player X/Y | Coordinates divided by map extent16 |
+| 2–3 | Player heading | sin(angle), cos(angle) |
+| 4–7 | HP, ammunition, shot cooldown and flash | Normalized values/timers |
+| 8–9 | One NPC's X/Y | X/16,Y/16 |
+| 10–11 | NPC velocity | vx/2,vy/2 |
+| 12–13 | NPC HP and alive | HP/100,alive |
+| 14–17 | Attack cooldown, hurt/death timers, animation phase | Normalized fields |
+| 18–19 | Kills and game time | Encoding defined by `engine.py` |
+
+Map features and spatial player/NPC tokens join the explicit state in conditioning MLPs. HP and animation timers are numerical fields, not merely image effects. The map is persistent rather than regenerated every tick.
+
+### Three persistent RSSMs
+
+Each core stores deterministic h and categorical stochastic z. z consists of one-hot categorical variables, not a single Gaussian latent. Training uses straight-through categorical sampling; ordinary evaluation uses argmax. Probability distributions use uniform mixing0.01.
+
+| Core | h | z variables×classes | Packed h/z | Hidden width | Recurrent gate groups |
+|---|---:|---:|---:|---:|---:|
+| Player | 1008 | 32×32 | 2032 | 1024 | 8 |
+| Enemy | 1344 | 8×32 | 1600 | 1408 | 4 |
+| Combat | 1344 | 8×32 | 1600 | 1392 | 4 |
+
+The combined memory has **5232 FP32 values per example**. All three cores execute; routing does not choose which memory survives. Enemy/Combat adapters form their own128D conditioned actions; the Player core receives516 values: four controls plus512D context.
+
+Separate MLPs project previous h, flattened z and action. Grouped `BlockLinear`, RMSNorm and GRU-like reset/update gates produce the next deterministic state. The prior predicts z without a new image. Posterior observation steps additionally consume an image embedding during initialization/appropriate training stages. Balanced dynamics/representation KL, stop-gradients and free-nats support exist in the core; the current motion-only objective does not automatically enable every historical KL/image loss.
+
+### Shared fusion and private experts
+
+[RSSMFusionMoE](turkeyworld/rssm_fusion_moe.py) combines previous Player/Enemy memories, Combat context, own state/action, map context and two spatial tokens. Shared tokens have width256 and pass through two Transformer blocks, each with4 attention heads and FFN512. Three roles—player navigation, NPC navigation and interactions—use **top-2 routing over three FFN experts**. Their outputs are residuals to readout heads, not replacements for recurrent state.
+
+The [five-role adapter](turkeyworld/rssm_five_role_fusion.py) adds private experts for player without an enemy; player with a quiet enemy; player in combat; NPC movement/spawn; and health/hit/death events. This layer uses **soft routing**, not the shared trunk's top-2 scheme. Each expanded expert retains a d256/4-head/FF512 Transformer plus a private d256/4-head/FF288 Transformer and output projection: **1,005,088 parameters per expert**. Zero initialization of the added output projection preserved the old function at migration.
+
+Readouts supply player X/Y pass-logit residuals, NPC XY displacement, shot-target/attack logits and256 spawn-cell/nine-anchor logits. Combat readouts can remain frozen while its recurrent memory still receives motion gradients. The five dynamics experts and the five image-renderer experts are separate networks with different roles and dimensions.
+
+### Learned decisions and explicit rules
+
+The model learns movement pass fractions, NPC motion and interaction decisions. `event_v1` then performs explicit bookkeeping: action-based turning, speed bounds, cooldowns, ammunition and event-driven HP/alive/death/counters. Player motion uses separate X/Y pass fractions (`axis_fraction`). These rules prevent arbitrary regression noise from consuming health or ammo.
+
+The transition does **not** query Source collisions/raycast or repair own positions against walls. A wrong pass decision can still cross a wall and accumulate drift. Known-map geometry conditions learned networks; physical correctness is evaluated separately. Source queries used to create training labels are not an inference-time physics solver.
+
+## Neural renderer: Base → latent RF3 → VQGAN decoder
+
+Implementation: [Base](turkeyworld/base_student.py), [latent flow](turkeyworld/latent_flow_renderer.py), [image MoE](turkeyworld/renderer_moe.py), [format-8 bundle](turkeyworld/decoder_rf_chain_bundle.py). This image pipeline consumes the predicted state, map/geometry and auxiliary features, and emits **RGB32×32**; it does not decide the next game state.
+
+### Camera geometry and known map
+
+[CameraGeometry](turkeyworld/transformer_model.py) samples **64 map-feature locations along each of32 camera rays**. A learned opacity MLP produces alpha; transmittance-weighted integration yields ray tokens and expected depth. This differentiable approximation does not call the reference game's exact raycaster. Camera pose is the model's own state. Center/FOV/depth visibility is not a pixel-perfect sprite alpha mask.
+
+The selected image bundle owns a private [opacity MLP](turkeyworld/renderer_geometry_opacity.py),193→32→1 with **6241 parameters**. Its renderer calibration does not overwrite the dynamics geometry network. Base and Flow use a consistently bound rendering-geometry representation.
+
+### Compact Base
+
+The selected Base has width144, three context-reading blocks,6 heads and192D geometry tokens. Context includes learned ray/scene features, object identity/appearance tokens, state,128D auxiliary features and interaction-participant features. A16×16 query grid represents screen patches; each RGB readout emits12 values (2×2×3), rearranged and passed through sigmoid into RGB32.
+
+Its output-MoE roles are near geometry/player, far geometry, enemy movement, enemy combat and player effects. The expanded Base keeps a small legacy branch and adds a private d192/6-head/FF314 Transformer, totaling300,058 parameters per expert. Base RGB conditions flow. The selected chain has **no additional post-decoder restorer**.
+
+### Codec and velocity field
+
+The compact VQGAN has base channels24, multipliers[1,2,3], one residual block per level, attention and internal latent channels128. Its quantized embedding has16 channels and a1488-entry codebook. RGB32 encodes to an8×8×16 grid; internal channels128 and embedding dimension16 are different quantities.
+
+Flow combines noisy latents, encoded Base and previous-step self-conditioning. Its2×2 patch convolution creates a4×4 token grid. Transformer width256, depth5,8 heads and FFN hidden896 are used in the selected renderer. Time embedding, state20, spatial conditions and wall tokens from the known map condition the velocity field. A separate five-role output MoE refines image/latent outputs.
+
+Each expanded RF expert retains a d32/4-head/FF64 Transformer and adds a private d256/8-head/FF416 branch: **503,072 parameters each**,2,515,360 across five expert modules excluding shared projections. Hierarchical soft routing preserves the original three groups while splitting scene into near/far and enemy into motion/combat. This is not the dynamics top-2 router.
+
+Inference integrates from pinned noise with **three Euler steps**, dt=1/3. The terminal latent is denormalized, quantized and decoded into RGB32. RF3 refers to three main velocity evaluations. A historical `flow_steps=1` field exists in config, but the bundle/explicit inference contract selects `solver_steps=3`.
+
+Training proceeds through codec/teacher, renderer distillation, expert expansion, Base, RF3 and decoder adaptation. Depending on phase, objectives include velocity/endpoint losses, RGB L1, SSIM/edges, balanced foreground/background and geometry supervision. Decoder adaptation updates only `codec.decoder` and `post_quant_conv`, preserving encoder/quantizer and the other pinned components. NPR32317, Base31709 and decoder4125 are independent clocks, not a count of joint updates of the whole image model.
+
+## Upscaler: RRDB x4, wall texture memory and layered sprites
+
+Implementation: [RRDB](turkeyworld/rrdb_material_sr.py), [wall memory](turkeyworld/wall_texture_memory_sr.py), [patrol composition](turkeyworld/patrol_sprite_sr.py), [weapon memory](turkeyworld/weapon_memory_sr.py). Input RGB32 becomes RGB128. A256×256 upscaler is not enabled; enlarging RGB128 to the window is ordinary display resizing.
+
+### RRDB RGB branch
+
+A3×3 stem produces48 channels. The trunk has6 RRDBs, each containing three dense blocks. Each dense block has five3×3 convolutions, growth24, concatenated features and LeakyReLU. Inner and outer residual scales are0.2. A trunk convolution and stem skip feed two Conv→PixelShuffle(2)→LeakyReLU stages:32→64→128.
+
+Four readouts operate on128px features:
+
+- Four material logits: other, brick, earth, grass.
+- Two seam logits: mortar and grass boundary.
+- A color RGB correction over bilinear RGB32.
+- A texture head taking features/material/seam probabilities; it adds `0.25*tanh` RGB detail gated by predicted wall support.
+
+The original RGB branch has2,645,676 trainable parameters before weapon/wall-memory additions. This is not the full composite SR parameter count: a frozen sprite renderer is also embedded. Legacy EDSR modules remain inside that inherited sprite detector; the main RGB trunk is RRDB.
+
+### Explicit wall texture memory
+
+SR7000 embeds the original64×64 brick/earth textures initialized from `Game._make_textures()`. They are frozen in geometry-supervised mode. This is a hybrid texture-mapping design: networks select material/coordinates rather than invent every brick pixel from scratch.
+
+A Conv1d geometry head predicts per-column log-depth and horizontal UV phase represented by sin/cos. Depth and FOV68° define projected wall height and vertical UV. Coherent UV integrates perspective texel footprints across columns instead of independently selecting each horizontal coordinate. Dedicated geometry supervision trains these outputs; RGB texture-sampling gradients are detached from UV in the selected mode.
+
+V2 adds one material decision per column and a neural face-side prediction. Interior rows52…75 provide feature/color evidence; texture chromaticity is an additional prior. Shading follows `(1−0.24*side)*clamp(1−0.024*depth,0.5,1)`. Texture support combines predicted wall probability and projected wall geometry. Brick columns use the brick atlas; green pixels belong to the top UV region of the earth atlas. Wrong column types/depth can still produce false grass edges or stretched masonry.
+
+### Enemy and weapon composition
+
+The frozen AtlasEnemy renderer predicts presence/confirmation, box, phase and visibility from RGB32. Visual routing threshold is0.9. Original enemy RGBA frames are embedded in the checkpoint. Ground anchoring uses predicted width to create a square full sprite with a camera-consistent bottom; future Source coordinates do not place it. Only idle/walk frames0–2 may be composited. Attack/hurt/death sprite substitutions are disabled.
+
+Own RSSM state provides an animation/alive **veto**, not Source geometry. Navigation without an enemy disables substitution. Weak visual detection can therefore suppress the sprite despite a live predicted NPC state.
+
+Weapon/hands use three trainable RGB/alpha memories128: idle and two firing poses, initialized from original weapon assets. A small CNN over lower RGB32 selects the phase. Fractional alpha preserves edges. This is explicitly initialized pixel memory, not weapon appearance learned from scratch.
+
+Layer order is **RRDB background → wall memory → enemy sprite → weapon/hands**. Weapon pixels therefore cover an overlapping enemy. Final RGB128 never repairs world-model memory or coordinates.
+
+### SR objectives
+
+Data pairs use actual frozen-neural-renderer RGB32 and true Source128 at the same state/map/tick. Source states/materials/masks supply labels only. The previous SR served as a temporary teacher for the first500 RRDB updates.
+
+Losses include full-frame L1/edges; separately normalized brick/mortar/earth/grass/grass-edge color, gradient and high-frequency errors; material CE/seam BCE; depth/UV/column-type/side supervision; false-green penalty; and weapon phase/RGB/edge/alpha terms. Wall-only PatchGAN uses aligned real/generated32×32 patches excluding labelled NPC/weapon pixels. Main G LR2e−5, D LR5e−6; added heads/memories have separate1e−4 groups. GAN weight≤0.002, with adversarial gradient capped at5% of reconstruction gradient **at the probed RGB readout**, not every network parameter.
+
+## Current training and evaluation
+
+The [serial controller](turkeyworld/dreamer_motion_cycle.py) alternates Source TRAIN collection, world updates and actor/critic training. Current world rounds use **H180,100 Adam updates, MAIN16=8 navigation+8 quiet NPC**, with full recurrent BPTT through H. Each cohort mixes original replay and new policy-collected episodes. Combat losses/separate combat actors are disabled while Combat memory remains part of the architecture.
+
+Main objectives cover player/NPC XY, geometry/wall paths and routing. Auxiliary terms supervise enemy velocity/direction, short own-prefix recovery and [first detected wrong transitions](turkeyworld/rssm_first_contact.py). Source labels are queried **after** own rollout at its own preceding state; they supervise the retained graph without changing model inputs. Search is bounded to32 probes per stream, not exhaustive over all180 steps. No new independent actors or state repairs are introduced.
+
+Numerical state is detached before the next neural transition; additive XY credit restores coordinate integration gradients. Full BPTT H180 therefore does not imply full differentiation through every future state-dependent collision decision.
+
+The policy rebinds to a completed world checkpoint, calibrates reward/continue and trains actor/critic with the world frozen. DYN/policy/SR counters are separate. Held-out evaluation measures coordinate drift, invalid bodies/collisions, velocities, events and spawn behavior; visual fidelity/flicker are separate checks. Curated demonstrations below do not replace held-out evaluation.
+
+## Setup and reproduction
+
+See **[REPRODUCING_EN.md](docs/REPRODUCING_EN.md)** for fresh baseline training, later-stage dependencies and replay commands. [Exact configuration snapshots](docs/architecture-snapshot-2026-11-15.json) describe topology; historical migration plans/journals describe continuation lineage.
+
+Ubuntu: `bash scripts/setup_ubuntu.sh --dry-run`, then `bash scripts/setup_ubuntu.sh`. Setup creates an environment without starting training. `scripts/run_training.sh --module ...` explicitly starts computation. Use separate directories for new experiments.
+
+Local workstation dashboards: [world](http://127.0.0.1:8765/), [policy](http://127.0.0.1:8787/), [SR](http://127.0.0.1:8786/). These are local addresses. [Ubuntu migration notes](CONTINUE_ON_UBUNTU_RU.md) concern resuming an existing run, not fresh training.
+
+## Demonstrations
+
+![Experimental neural upscaler](docs/images/neural-upscaler-experiment-2026-11-15.png)
+
+Experimental neural upscaler128×128: neural-renderer inputs above, textured output with separate weapon below. User screenshot; perspective and grass-edge errors remain.
+
+**Video: navigation from six starting positions — 36 seconds.**
+
+[![Watch original versus neural gameplay](docs/videos/navigation-six-starts-8873-sr7000.jpg)](docs/videos/navigation-six-starts-8873-sr7000.mp4)
+
+[Watch / download MP4](docs/videos/navigation-six-starts-8873-sr7000.mp4) · [Recording verification](docs/videos/navigation-six-starts-8873-sr7000.json).
+Original left, autonomous neural game right: dynamics8873, experimental SR7000.
+Six6-second clips, no enemies or firing, identical controls.
+Offline simulation-time recording at30fps; this is not a performance benchmark.
+
+**Video: enemy pursuit without combat — six starts, 36 seconds.**
+
+[![Watch quiet enemy interaction](docs/videos/quiet-enemy-six-starts-8873-sr7000.jpg)](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4)
+
+[Watch / download MP4](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4) · [Verification and selection](docs/videos/quiet-enemy-six-starts-8873-sr7000.json).
+Original left, neural game right: dynamics8873/SR7000. Six complete6-second cuts from distinct positions.
+Selected6 of16 final trials for enemy visibility and lower drift. Player retreats and aims using its own RSSM prediction; both games receive identical controls.
+Source enemy visible180/180 frames per cut, unchanged HP, no firing or predicted combat events.
+Neural sprite dropouts and geometry errors remain. Offline30fps recording with no Source state corrections.
+
+
+<details>
+<summary>Historical runs, configurations and results — not the current architecture specification</summary>
+
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 
-**Training is paused for the Ubuntu handoff.** Read the
-[continuation note in Russian](CONTINUE_ON_UBUNTU_RU.md) and final pause artifacts
-before resuming. Preserve the whole workspace, including ignored training runs
-and uncommitted code. Path/process/bootstrap/sleep guards now support Windows
-and Linux; the destination Ubuntu GPU must pass the handoff preflight before
-any explicitly requested resume.
+**Training resumed on Ubuntu.** World weights/Adam/RNG resumed from8111 and
+policy from620/actor400. Enemy-drift revision continues the world from8209.
+Dynamics: <http://127.0.0.1:8765/>, policy: <http://127.0.0.1:8787/>,
+patrol-sprite SR: <http://127.0.0.1:8786/>. See H117–H120 in the journal
+and the historical [handoff notes](CONTINUE_ON_UBUNTU_RU.md).
 
 Ubuntu environment setup: `bash scripts/setup_ubuntu.sh --dry-run`, then
 `bash scripts/setup_ubuntu.sh` installs a dedicated Python3.12 environment with
@@ -2136,3 +2330,5 @@ Tests cover causality/memory, native32/64/128 shapes, frozen-codec gradients,
 Heun/GAN/R1 backward execution, accumulation, immutable training membership,
 resume budgets, preview/SR separation and gameplay checks. Passing implementation
 tests does not establish trained gameplay quality.
+
+</details>

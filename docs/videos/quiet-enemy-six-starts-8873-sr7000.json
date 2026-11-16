@@ -1,0 +1,331 @@
+{
+  "passed": true,
+  "clips": 6,
+  "seconds_per_clip": 6,
+  "total_frames": 1080,
+  "duration_seconds": 36,
+  "fps": 30,
+  "source_left": true,
+  "neural_right": true,
+  "world_step": 8873,
+  "sr_step": 7000,
+  "selection_candidates": 16,
+  "selection": "Six lower scores from complete quiet clips; visibility weighted strongly",
+  "quality_score": "enemy_xy_mean + .5*player_xy_mean + 20*(1-sprite_frames/180) + 2*wall_fault_frames/180 + .01*sprite_switches",
+  "control_policy": "Own neural NPC tracking with continuous safe retreat, same inputs to both sides",
+  "Source_future_feedback": false,
+  "engine_corrections": 0,
+  "Source_enemy_visible_frames_each": 180,
+  "Source_HP_unchanged": true,
+  "predicted_combat_events_zero": true,
+  "offline_simulation_time": true,
+  "remaining_limitations": "Neural enemy sprite still disappears in some frames; geometry and texture errors remain",
+  "video_sha256": "47dfdcc96ebc9c08f6e2ee8f272534148a50b544565ab65d4067aa129aea0018",
+  "selected": [
+    {
+      "candidate": 1,
+      "player": [
+        6.5,
+        1.5
+      ],
+      "enemy": [
+        4.0,
+        1.5
+      ],
+      "sprite_frames": 103,
+      "enemy_xy_mean": 2.2157860079780223,
+      "player_xy_mean": 0.0026998747990647745,
+      "wall_fault_frames": 0
+    },
+    {
+      "candidate": 5,
+      "player": [
+        6.5,
+        6.5
+      ],
+      "enemy": [
+        4.0,
+        6.5
+      ],
+      "sprite_frames": 100,
+      "enemy_xy_mean": 1.9485965927028004,
+      "player_xy_mean": 0.015391537468935389,
+      "wall_fault_frames": 0
+    },
+    {
+      "candidate": 11,
+      "player": [
+        6.5,
+        14.5
+      ],
+      "enemy": [
+        4.0,
+        14.5
+      ],
+      "sprite_frames": 86,
+      "enemy_xy_mean": 1.2654281355854538,
+      "player_xy_mean": 0.04390019037301601,
+      "wall_fault_frames": 0
+    },
+    {
+      "candidate": 6,
+      "player": [
+        9.5,
+        9.5
+      ],
+      "enemy": [
+        12.0,
+        9.5
+      ],
+      "sprite_frames": 84,
+      "enemy_xy_mean": 2.3129554730529582,
+      "player_xy_mean": 0.003994167923681539,
+      "wall_fault_frames": 0
+    },
+    {
+      "candidate": 15,
+      "player": [
+        14.5,
+        6.5
+      ],
+      "enemy": [
+        14.5,
+        4.0
+      ],
+      "sprite_frames": 78,
+      "enemy_xy_mean": 1.809055321291089,
+      "player_xy_mean": 0.003868026437946051,
+      "wall_fault_frames": 0
+    },
+    {
+      "candidate": 4,
+      "player": [
+        9.5,
+        6.5
+      ],
+      "enemy": [
+        12.0,
+        6.5
+      ],
+      "sprite_frames": 90,
+      "enemy_xy_mean": 2.188526047911081,
+      "player_xy_mean": 0.00553049698096907,
+      "wall_fault_frames": 124
+    }
+  ],
+  "checkpoint_sha256": {
+    "world": "15fdd58743801198c59b6b4d586ecee16100633834d44abd0cea894958f360d3",
+    "sr": "754807e8018dc3189ca5176616e2e42a793e446a3a9add1c177adc02b372a405",
+    "renderer": "40f9373125c038a200b4386c25a375fa2c32d6902447a9f8b2b8cfa1e70985b6"
+  },
+  "candidate_metrics": [
+    {
+      "candidate": 0,
+      "eligible": false,
+      "score": 16.947300452640096,
+      "player_xy_mean": 0.0016876557892020277,
+      "enemy_xy_mean": 2.109789958078827,
+      "sprite_frames": 48,
+      "sprite_switches": 17,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 1,
+      "eligible": true,
+      "score": 10.942691500933112,
+      "player_xy_mean": 0.0026998747990647745,
+      "enemy_xy_mean": 2.2157860079780223,
+      "sprite_frames": 103,
+      "sprite_switches": 17,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 2,
+      "eligible": true,
+      "score": 14.087697221587442,
+      "player_xy_mean": 0.005212563185907332,
+      "enemy_xy_mean": 1.9062020511056,
+      "sprite_frames": 73,
+      "sprite_switches": 29,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 3,
+      "eligible": false,
+      "score": 17.879895728916065,
+      "player_xy_mean": 0.00637133468052424,
+      "enemy_xy_mean": 2.1400433949091373,
+      "sprite_frames": 39,
+      "sprite_switches": 7,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 4,
+      "eligible": true,
+      "score": 13.799069074179345,
+      "player_xy_mean": 0.00553049698096907,
+      "enemy_xy_mean": 2.188526047911081,
+      "sprite_frames": 90,
+      "sprite_switches": 23,
+      "wall_fault_frames": 124,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 5,
+      "eligible": true,
+      "score": 11.195181250326156,
+      "player_xy_mean": 0.015391537468935389,
+      "enemy_xy_mean": 1.9485965927028004,
+      "sprite_frames": 100,
+      "sprite_switches": 35,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 6,
+      "eligible": true,
+      "score": 13.311619223681465,
+      "player_xy_mean": 0.003994167923681539,
+      "enemy_xy_mean": 2.3129554730529582,
+      "sprite_frames": 84,
+      "sprite_switches": 33,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 7,
+      "eligible": false,
+      "score": 16.416988684213464,
+      "player_xy_mean": 0.006484561498897774,
+      "enemy_xy_mean": 1.6259686256862353,
+      "sprite_frames": 47,
+      "sprite_switches": 1,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 8,
+      "eligible": false,
+      "score": 18.69969312805346,
+      "player_xy_mean": 0.0072097312012273426,
+      "enemy_xy_mean": 2.35942159578618,
+      "sprite_frames": 34,
+      "sprite_switches": 7,
+      "wall_fault_frames": 4,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 9,
+      "eligible": false,
+      "score": 17.63983912186463,
+      "player_xy_mean": 0.02948394005442323,
+      "enemy_xy_mean": 1.4550971518374152,
+      "sprite_frames": 36,
+      "sprite_switches": 17,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 10,
+      "eligible": true,
+      "score": 15.68833276735593,
+      "player_xy_mean": 0.008948544151563606,
+      "enemy_xy_mean": 2.2583029397245915,
+      "sprite_frames": 71,
+      "sprite_switches": 37,
+      "wall_fault_frames": 85,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 11,
+      "eligible": true,
+      "score": 11.931822675216404,
+      "player_xy_mean": 0.04390019037301601,
+      "enemy_xy_mean": 1.2654281355854538,
+      "sprite_frames": 86,
+      "sprite_switches": 20,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 12,
+      "eligible": true,
+      "score": 15.361234612885672,
+      "player_xy_mean": 0.014747813432202545,
+      "enemy_xy_mean": 2.03274959505846,
+      "sprite_frames": 62,
+      "sprite_switches": 21,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 13,
+      "eligible": true,
+      "score": 15.314459914873813,
+      "player_xy_mean": 0.1667022365297372,
+      "enemy_xy_mean": 1.7499976854978343,
+      "sprite_frames": 63,
+      "sprite_switches": 37,
+      "wall_fault_frames": 10,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 14,
+      "eligible": false,
+      "score": 16.88760550713484,
+      "player_xy_mean": 0.028355186327179486,
+      "enemy_xy_mean": 1.7700945806379116,
+      "sprite_frames": 51,
+      "sprite_switches": 17,
+      "wall_fault_frames": 54,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.512666702270508,
+      "Source_HP_unchanged": true
+    },
+    {
+      "candidate": 15,
+      "eligible": true,
+      "score": 13.314322667843394,
+      "player_xy_mean": 0.003868026437946051,
+      "enemy_xy_mean": 1.809055321291089,
+      "sprite_frames": 78,
+      "sprite_switches": 17,
+      "wall_fault_frames": 0,
+      "source_visible_frames": 180,
+      "source_min_distance": 2.5126662254333496,
+      "Source_HP_unchanged": true
+    }
+  ]
+}

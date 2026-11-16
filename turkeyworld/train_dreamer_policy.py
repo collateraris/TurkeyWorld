@@ -197,6 +197,15 @@ class PolicyTraining:
         # support avoids enormous raw expectations from untrained extreme bins.
         self.head_config = RewardContinueConfig(feature_dim=self.adapter.feature_dim,
             low=-math.log1p(2), high=math.log1p(2))
+        if plan is not None:
+            pinned = plan['reward_continue_config']
+            current = vars(self.head_config)
+            # Windows/Linux libm log1p may differ by one ULP. Retain the
+            # original distribution support and immutable plan exactly.
+            if (current.keys() == pinned.keys()
+                    and all(current[k] == pinned[k] for k in current if k not in ('low', 'high'))
+                    and all(abs(current[k]-pinned[k]) <= 4*math.ulp(current[k]) for k in ('low', 'high'))):
+                self.head_config = RewardContinueConfig(**pinned)
         self.heads = DreamerRewardContinue(config=self.head_config).to(self.device)
         self.adapter.heads = self.heads
         self.reward_config = reward_settings()

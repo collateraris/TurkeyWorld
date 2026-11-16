@@ -4866,3 +4866,241 @@ passes as separate events. The main instructions remain in the READMEs.
 
 Most local `training_runs/` are excluded from Git: their links work in this
 workspace and do not promise data/weight availability in a clean clone.
+
+
+## H117 — Ubuntu continuation and policy recovery (2026-11-15, Moscow)
+
+**Executed.** Eight SHA and22 resume checks passed, plus both fixed VAL180 panels.
+Python3.12/Torch2.11+cu128 installed. World resumed8111→8133 with weights/Adam/RNG
+preserved; policy resumed620/actor400. Audited Linux render differences retain
+original SHA-pinned recorded initial RGB and exact state20. Pinned reward-head
+support avoids a one-ULP Windows/Linux log1p difference. Physical scancodes make
+controls layout-independent; Enter restarts a completed trial. Default180 remains;
+interactive launch explicitly uses18000. Evidence: `training_runs/ubuntu_handoff_20261115`.
+
+## H118 — Patrol sprites and SR3000 continuation (2026-11-15, Moscow)
+
+**Implemented/executed.** `PatrolSpriteSR` retains exact SR3000 weights,42 Adam states,
+sampler24000 and RNG. Frozen Atlas106105 placement overlays only idle/walk frames0–2.
+Attack/hurt/death frames3–6 are disabled. Navigation forces zero sprite alpha;
+current predicted RSSM combat/death state vetoes the overlay. No Source inference
+inputs. Only RGB detail parameters train. Separate3000→6000 run:
+`training_runs/sr_patrol_sprite_20261115`, http://127.0.0.1:8786/.
+Seven focused then17 regression tests passed; GPU navigation/attack veto smoke passed.
+A separate SR3186 game snapshot opened. Completion and quality improvement are not claimed.
+
+H118 — completed follow-up: SR reached **6000**. Fixed VAL256: SSIM0.78373391,
+foreground MAE0.14046893, enemy ROI SSIM0.29171594. These measurements do not
+establish superiority over SR3000. Final weights are under
+`training_runs/sr_patrol_sprite_20261115/checkpoints/sr_last.pt`.
+
+
+## H119 — Full-rollout enemy velocity supervision and hard TRAIN sampling (2026-11-15, Moscow)
+
+**Requested/implemented; measurement ongoing.** Opt-in `rssm_enemy_drift_v1` adds
+velocity-vector0.05, speed0.05, direction0.01 and velocity-field0.025 losses to
+full-H MAIN. Existing own-prefix local velocity/direction recovery remains.
+Recorded TRAIN labels supervise free rollout without Source corrections, memory resets
+or future RGB. Old/new aggregate loss values are not directly comparable.
+Each four-actor enemy half selects near-wall, turn and two uniform episodes,
+preserving4 original+4 latest, MAIN16 and private PCG. Missing hard classes have
+explicit uniform fallbacks. A separate pinned revision leaves the immutable parent plan intact.
+Safe checkpoint8209, round7,76/180, is pinned at
+`training_runs/enemy_drift_revision_20261115/before.pt`. Same-panel VAL180 baseline:
+NPC XY2.773396 cells, velocity error1.056748 cells/s, speed1.027155 versus0.700000,
+one living-NPC wall collision at offset180. Eight held-out starts are diagnostic,
+not gameplay qualification. Thirty-four focused tests passed. Post-update results
+will be recorded from actual artifacts; drift improvement is not yet claimed.
+
+
+H119 — **executed:**8209→8220,11 complete updates, with bitexact pre-SGD model,
+named Adam,7 groups/442 states and RNG verification. Same VAL180 fingerprint/eight
+starts: NPC XY2.773396→**2.169638 (−21.77%)**, velocity error1.056748→**0.883605
+(−16.38%)**. Speed0.615247 versus Source0.700000 now undershoots. Living-NPC wall
+collisions at offset180 worsened **1→4**. This early uncontrolled comparison does
+not establish individual causal effects or gameplay quality. Artifact:
+`training_runs/enemy_drift_revision_20261115/comparison_8209_8220.json`.
+34 focused plus19 integration/revision/VAL tests passed; continuous training resumed.
+
+## H120 — Latest SR6000 in the dynamics model preview (2026-11-15, Moscow)
+
+**Implemented.** User-requested frozen SR6000 has a SHA-pinned v6 preview revision
+chained from v5; existing plans and RF3/Base/decoder remain pinned. Explicit profile
+`rf3_decoder_chain_patrol_sprite_preview_v1` discloses Atlas/alpha and own predicted
+animation veto. Displayed offset states come from the same free rollout; no future
+Source input. Navigation disables sprite alpha; combat animation sprites remain off.
+Assets load into a private inference clone, preserving training weights/Adam/RNG.
+`preview_assets_active_revision.json` pins the new SHA for future workers. Eleven
+preview tests passed, including scoped context restoration and rejection of combat/
+navigation sprite opt-ins. Resumed8220; actual preview.json confirms deployment
+once the first new preview is published.
+
+
+H120 — **executed and verified:** preview.json at8220 reports SR6000,
+sprite_frames[0,1,2], navigation_sprites=false; full checkpoint8221 retains the v6
+binding. Port8765 serves this preview. The first restart's legacy validator rejected
+the new formula ID; the unsaved update was discarded and FULL8220 remained intact.
+The validator now accepts the new formula only with exact pinned drift settings,
+preserving every MAIN16/full-H invariant. Added successful-commit and changed-weight
+rejection coverage. All42 relevant checks passed after correcting a new test helper
+name;11 preview tests also passed. Restart8220 verified model/named Adam/RNG retention.
+
+
+## H121 — Live MAIN16 chart after enemy-loss revision, plus Player/Enemy curves (2026-11-15, Moscow)
+
+**Fixed/verified.** Dynamics continued updating while the UI discarded
+`rssm_enemy_drift_v1` because its formula filter only accepted the parent MAIN16
+revision. New rows now require the pinned drift revision, exact settings and a
+post-activation step; conflicting nested tags, wrong parent plan SHA and actor
+counts remain rejected. Different loss formulas are not joined.
+Added blue Player and orange Enemy curves, current component values, legend and
+hover values alongside total and genuine validation loss.261 existing UI tests
+passed;both new filter/canvas-hover tests passed after correcting test DOM canvas
+creation. Live API→UI probe at8256 accepted36 rows through8256: total1.18381,
+Player0.15878, Enemy1.02450. HTML is read on each request; existing tabs need a
+reload. No dynamics worker or optimizer restart was needed.
+
+
+## H122 — Next-round H48→112→180,40 updates each (2026-11-15, Moscow)
+
+**Configured/verified; next-round execution is not yet claimed.** A separate SHA-pinned
+`motion_round_schedule.json` selects `motion_round_48_112_180_40_v1` from round_index8,
+after current round7. New rounds use H48/H112/H180 with40 full Adam updates each,
+120 world updates total. Current round retains its existing6×30=180 schedule.
+Immutable parent plans and archived gates remain intact; cumulative history uses
+each round's actual budget. Weights, named Adam, RNG, MAIN16 and4+4 replay persist.
+Policy and six-second Source collection remain serial phases.
+The refreshed controller adopted the same world worker56659 without restarting it;
+current target180, future target120 and continued updates were verified. Receipt:
+`training_runs/motion_schedule_48_112_180_20261115/activation.json`.
+Handoffs check the actual budget and UI labels support both3/40/120 and6/30/180.
+43 Python tests plus a dedicated future-budget/pin test passed;264 UI tests passed.
+A complete120-commit test verified stage transitions, sampler continuity and the
+following source boundary after180+120 updates without resetting clocks.
+
+
+## H123 — Low-LR wall PatchGAN SR6000→9000 (2026-11-15, Moscow)
+
+**Started; budget completion not claimed.** Continued full patrol SR6000 with exact
+weights,42 Adam states, sampler48000 and RNG. Generator LR deliberately reduced
+1e-4→**1e-5**; separate spectral-normalized discriminator Adam uses**5e-6**,betas(0,.99).
+Hinge plus feature matching0.1,25-update warmup,100-update ramp,GAN weight≤**0.002**.
+Weighted adversarial gradient is capped at5% of reconstruction at the RGB readout;
+this is not a bound on every parameter's gradient.
+D sees matching RGB32 conditions and real/fake32×32 crops of actual128 targets.
+Up to two strictly100%-wall-interior patches per image exclude Source NPC/weapon,
+sky and floor. TRAIN map/state provide labels only; no generator Source inputs.
+Native32 wall-label behavior is preserved. Existing detail losses remain, plus
+wall L1×.5,edge×.25,high-frequency×.25. Frozen patrol sprites retain no-combat-animation
+and no-navigation-overlay rules. Run:`training_runs/sr_wall_patchgan_20261115`,
+6000→9000,batch8,http://127.0.0.1:8786/ via active-run pointer.
+At6184 GAN was active with9 wall patches,effective weight.002 and measured readout
+ratio.000188. Complete6382 reload verified42 G-Adam/8 D-Adam states,382 D updates,
+sampler51056 and exact frozen assets. Four new tests and12 wall-label decoder/RF
+regressions passed. Pinned VAL256/detail120 and wall L1/edge/high-frequency compare
+against original SR6000. Blur removal,9000 completion and quality-pass are not claimed.
+
+## H124 — Wall PatchGAN images in the SR section (2026-11-15, Moscow)
+
+**Fixed/verified.** PNG existed but generic Source-SR filtering expected another kind
+and allowed Source inference inputs. Added a dedicated four-row NPR-conditioned
+wall-PatchGAN preview with exact report step/model/panel/data/config matching.
+Stale or Source-conditioned previews remain rejected. Rows:Source128/NPR32/frozen
+base/current detail SR with patrol sprites. Live API→UI at6789 displayed preview6700;
+GET /preview.png returned200,351064 bytes. Five focused UI tests passed. Existing
+tabs need Ctrl+F5; training did not restart for the UI fix.
+
+
+## H125 — Wall PatchGAN SR9000 completed (2026-11-15, Moscow)
+
+**Executed.** Low-LR continuation6000→9000 completed. Same VAL256 wall L1
+0.05032713 vs0.05039320 at6000;edge0.02796711 vs0.02798535;high-frequency error
+0.02441911 vs0.02443713. Improvements are small; blur removal or Source-texture
+fidelity is not established. Actual9000 weights were used in the following video.
+
+## H126 — Single8×6s video:four navigation and four quiet pursuit cuts (2026-11-15, Moscow)
+
+**Recorded/verified.** MP4 H.264/yuv420p1080×640,30fps,48.000seconds/1440 frames.
+Cuts1–4 navigation without NPC;5–8 one-enemy pursuit without combat. Source512 left,
+autonomous neural RGB32→SR128→512 right. Pinned RSSM8459,new wall-PatchGAN SR9000,
+existing RF3/Base/decoder; SHA/provenance in snapshot_receipt.json. Eight predefined
+starts/open-loop input tapes,one shared initial observation and180 independent
+transitions per side per cut. No future Source feedback or pose/memory corrections.
+Offline simulation-time montage,explicitly not a real-time FPS benchmark.
+Source player/NPC HP stayed unchanged;fire0 across1440 inputs. All predicted
+shot/hit/kill/player_hit counts are zero. Source NPC visible180/180 in each pursuit.
+Actual neural blur,geometry discrepancies and missing NPC in some frames remain;
+this is not a quality-pass. Optional initialization_factory leaves default playback
+unchanged. Ten video/control tests passed; legacy CFR encoding now supports FFmpeg4.2
+with-vsync cfr. FFprobe confirmed48s/1440frames,and full decode passed.
+Video:`training_runs/paired_video_sr9000_20261115T155953Z/navigation_and_pursuit_8_cuts.mp4`.
+Adjacent artifacts include eight posters,contact sheet,clip/report and verification JSON.
+
+
+## H127 · 2026-11-15 · Missing sprite and vertical placement diagnosis
+SR9000 never passed its visual sprite route in180 cached pursuit frames and frequently predicted death. Head refinements and a square-sprite camera ground prior produced SR12613 with RGB SR9000 frozen. Near VAL row774: Source bbox=[.046875,.078125,.9453125,.9765625], prediction=[.006306,.0625,.935994,.9921875]; the severe upward shift decreased but placement is not exact. VAL256 center-Y MAE=.6007px, bottom MAE=5.7847px; patrol recall78/144, empty FP0/51. Replaying180 cached autonomous neural inputs still yields0 final sprite frames: autonomous-renderer recognition remains unresolved. Source coordinates are not inference inputs; no quality-pass claimed.
+
+## H128 · 2026-11-15 · Brick, earth and grass-edge texture continuation
+Started material_texture_patchgan_v2 in training_runs/sr_material_texture_20261115, SR12613→15613, with pinned assets/source.pt. Continued RGB detail Adam from9000; sprite heads frozen. Five separately normalized Source-only strata: brick, mortar, earth, grass and stepped grass edge; each gets L1+2*gradient+high-frequency. Exact projected original material labels exclude NPC/weapon. Inference remains RGB32-only without Source texture inputs or a hand-painted grid. G LR1e-5, D5e-6, adversarial≤.002 and≤5% reconstruction-gradient ratio. VAL256 every100 publishes separate material errors. Early12700 versus12613: earth high-frequency .02124144→.02115776; grass L1 .13138828→.12546559. These are small early changes, not confirmation of original sharpness. Monitor8786 points directly to the new run; UI validates provenance and displays its actual four-row preview. Training continues.
+Validation:20 Python tests and266 dashboard tests passed; diff --check passed.
+
+
+## H129 · 2026-11-15 · RRDB x4 architecture with material/texture heads and separate sprites
+Implemented the explicitly requested RGB replacement: RGB32→48-channel stem→6 RRDB (three dense blocks each, growth24)→two PixelShuffle x2 stages→material/seam/color/texture heads→RGB128→frozen patrol sprites. Material classes: other, brick, earth, grass; separate mortar/grass-edge logits feed the texture head. RGB trainable parameters2645676. No EDSR/MoE in the new RGB inference branch. Previous SR is only a separate teacher for the first500 updates. Source map/pose/masks remain loss-only labels.
+Safely stopped the previous material_texture run at14923 and pinned its checkpoint via hardlink to training_runs/sr_rrdb_material_20261115/assets/source.pt. Sprite tensors transferred bit-exactly, SHA75ab568c615d769dce43dd2f9d9772d27b4279ddf1d8b763882836cda0aaddfe; combat veto/navigation disabling retained. Incompatible RGB architecture requires fresh Adam and sampler, own updates0→5000; dynamics unaffected. G LR2e-5/D5e-6, GAN warmup500/ramp500, weight≤.002 and gradient ratio≤5%. Full-image L1/edges, five texture strata, wall reconstruction, material CE and balanced seam BCE. Checkpoints every25, fixed VAL256/four-row comparison every100; resume restores optimizers/RNG/sampler.
+Factory/loader and neural_play/vjepa sprite policy accept rrdb_material_sprite_sr. Monitor8786 follows this run and validates preview provenance. Existing pinned preview plans remain intact.22 Python tests and267 UI tests passed; actual checkpoint loaded with load_sr_checkpoint, RGB128 forward and navigation-alpha0 verified. New training is active; original texture fidelity is not yet established.
+
+
+## H130 · 2026-11-15 · Weapon/hand memory and foreground occlusion
+Added optional weapon_memory to RRDBMaterialSR: three trainable RGB/alpha templates initialized from the original weapon atlas (idle and two firing poses), with a small RGB32-only phase classifier. This explicitly embeds original pixels in trainable memory; it is not RRDB learning weapon appearance from scratch. No asset load, Game call or Source state during inference. Offline initialization uses exact Source integer-nearest RGBA placement and preserves fractional alpha.
+Composition is now background/details→enemy sprite→weapon/hands. The weapon covers the enemy, including the barrel tip, while transparent pixels retain the scene. A fully opaque mock enemy test verifies the expected RGBA composite over every nonzero-alpha weapon pixel.
+Safely stopped RRDB at1748 and continued its RGB/material/sprite weights and both Adam states; added a weapon-memory optimizer group LR1e-4. Main LR2e-5/D5e-6 and GAN cap unchanged. Added phase CE, weapon L1/edge and soft-alpha BCE. Accepted run training_runs/sr_rrdb_weapon_rgba_20261115 continues1748→5000 and monitor8786 follows it. Preflight found and corrected a classifier shape mismatch; RGBA tests then caught fractional-edge loss, so a corrected RGBA continuation was created while retaining old artifacts. VAL256 at1900 weapon phase accuracy=.7461: firing-phase selection remains in training, not claimed solved. Idle weapon/hands are visibly sharp and correctly cover the enemy.25 Python tests and267 dashboard tests passed.
+
+
+## H131 · 2026-11-15 · Dynamics rounds: H180 only,100 Adam updates
+Added requested motion_round_180_100_v2: horizons=[180],updates_per_stage=100,world_updates_per_round=100. Effective internal round_index11 (UI round12); current round10 completed its previous120-update budget. Append-only sidecar embeds the exact previous revision/SHA: rounds0–7 retain6x30, rounds8–10 retain H48→112→180 x40. Arbitrary pinned-plan replacements still fail. Restarted controller adopted live world worker79313 without stopping it; after120 updates it moved to policy. No world weights/Adam/RNG reset. Validated the actual current motion ledger with the extended revision; history valid, next budget100.35 backend schedule/cycle tests and268 UI tests passed; UI supports H180/100 and chained revisions.
+
+## H132 · 2026-11-15 · Explicit wall texture memory experiment, quality not accepted
+Addressing blur and false green edges. Safely stopped weapon-RRDB at3248. Added optional wall texture memory initialized offline from original64px brick/earth textures, RGB-predicted depth/UV, Source map/pose as loss labels only. Applied before enemy and weapon composition. Green earth texture pixels occur at its top UV; added false_green_excess on non-green Source pixels. First RGB-to-UV experiment distorted geometry and was stopped. Geometry-supervised mode removes RGB gradients into UV and freezes original textures. Coherent UV integrates perspective footprints across columns; material chromaticity prior helps distinguish brick/earth. All experimental artifacts and source checkpoint retained.
+Active training_runs/sr_rrdb_wall_coherent_20261115 continues3248→6500 with original RGB/weapon/D Adam and RNG/sampler; new geometry group LR1e-4, main2e-5/D5e-6/GAN≤.002/5% unchanged. Texture is visible, but material/perspective errors remain; green tops sometimes still appear on brick and held-out edge/HF errors are currently worse. NOT a quality-pass and NOT accepted for game deployment. Monitor8786 labels this an experiment; existing pinned game previews unchanged.29 SR Python tests and268 UI tests passed, including no green from brick memory, earth grass constrained to top UV, no RGB-to-geometry gradients, coherent UV and false-green penalty.
+
+
+## H133 · 2026-11-15 · Experimental SR development: column materials and shading
+Continued experimental RRDB as requested. Found missing Source shading in texture memory and unstable per-pixel brick/earth selection. Added optional WallTextureMemoryV2: one neural material decision per column, RGB chromaticity prior over interior rows52:76 so green top pixels do not determine the whole wall type. Separate neural face-side output; shading follows Source (1-.24*side)*(1-depth*.024). Dedicated material CE/side BCE use Source-only labels; Source coordinates/maps are not inference inputs. Legacy WallTextureMemory/config behavior retained.
+Safely stopped prior run at4030; pinned checkpoint via hardlink to training_runs/sr_rrdb_wall_columns_20261115/assets/source.pt. Continued every existing Adam/RNG/sampler/D state, adding only column_head group LR1e-4. Main LR2e-5/D5e-6/GAN≤.002/5% unchanged; original wall textures frozen. Target7000, training active. Standard load_sr_checkpoint/RGB128 forward passed, navigation-alpha0. At4350 group clocks RGB4350, weapon2602, geometry1102, new-column320 confirm existing optimizer histories continued.
+Same VAL256 panel (b7dcbae68e29e4ff246e074ac938c89c2a40b912a28521edce35e9624e71a2fc), source4030→v2_4100: wall L1 .07993436→.06432490(-19.53%), wall HF .03808268→.03321376(-12.79%), false_green_excess .00713564→.00408859(-42.70%). Column material accuracy=.80155. Pinned development_comparison.json; improvement versus previous experiment, not original-quality acceptance. Perspective distortion and some edge errors remain. Monitor8786 follows current run, shows accuracy/false-green and experimental label.31 Python tests and268 UI tests passed, including red-wall protection against green pixels at its top, shading equation and column-head learning.
+
+
+## H134 · 2026-11-15 · Paired neural game launched
+Opened Source-left/autonomous-neural-right window, world8725, experimental wall-columns RRDB SR7000, RF3 decoder. Hardlinked snapshots in compare_live_20261115T173149Z/assets; training unaffected. Verified ready/window_ready true, starts paused. Enter start, T navigation/combat, E turn, P pause, R reset, Esc quit. Initial navigation disables enemy sprites. Source256 is the classical renderer; neural SR remains128. Wall quality remains experimental.
+
+
+## H135 · 2026-11-15 · RRDB SR7000 in dynamics model-output preview
+Added frozen profile rf3_decoder_chain_rrdb_material_preview_v1 verifying full config and tensor SHA. Pinned wall-columns SR7000 to preview_assets/sr_rrdb_wall_columns_007000.pt, appended revision v7, retained v1–v6. RGB32→RRDB128, wall textures v2, weapon above enemies; patrol frames0–2 with own-animation veto and navigation disabled. Saved worker at8737 and resumed through controller; actual resume verification confirms bitexact model tensors, named Adam/order/groups/states and RNG. Fresh preview8737 carries rrdb_material_sprite_sr/SR7000, verified live UI8765 images and RRDB caption; subsequent SGD advanced8738+. H180/100 unchanged; Source future feedback=false and assets loaded only into a private clone.18 backend preview tests and268 UI tests passed.
+
+
+## H136 · 2026-11-15 · First wrong player/NPC transitions and README screenshot
+Added requested rssm_first_wrong_contact_v1. After the own MAIN rollout, bounded actor-balanced probes (32 per stream) find a first detected wrong wall crossing, false stop or near-wall displacement. Source labels exact XY/axis pass fractions from that own preceding state. Loss joins the retained MAIN graph instead of depending only on16-tick prefix snapshots; no extra model rollouts/actors/observations or state corrections. Quiet NPCs receive analogous first detected own-state velocity/direction supervision; invalid states skipped. Probe counts and selected ticks reported. This is bounded first-detected-error search, not exhaustive Source verification of all180 transitions.
+Pinned first_contact_plan.json at complete boundary8758, retained first_contact_boundary.pt. Controller resumed the same H180/100 round; model/Adam names/order/groups/states and RNG verified bitexact before SGD. Selected NAV/quiet-player/NPC events at8759:7/8/8; at8763:5/6/8. Gradients active, Source future feedback=false, own_states_corrected=0. Held-out drift improvement not yet verified; new TOTAL is not directly comparable to the earlier objective. UI filters pre-activation metrics and validates exact settings while retaining separate Player/Enemy chart lines.26 backend and269 UI tests passed. Actual preview8763 with SR7000 verified.
+Copied the exact user PNG Screenshot from2026-11-15 20-38-47.png unchanged to docs/images/neural-upscaler-experiment-2026-11-15.png; source/copy SHA match. Embedded near the top of README.md and README_RU.md with experimental-quality caption.
+
+
+## H137 · 2026-11-15 · Neural game after completed world round
+Waited for round_index12,H180100/100 and world_complete.json handoff at8873 as requested. Verified full world snapshot SHA against handoff, then automatically opened Source-left/autonomous-neural-right game with wall-columns SR7000 and RF3 decoder. Hardlinked snapshots in after_round_game_20261115T182837Z/assets; PID104407. Verified ready/window_ready and neural_training_step8873. Classical Source256 does not change neural SR128. Training controller continues; no gameplay quality-pass claimed.
+
+
+## H138 · 2026-11-15 · Six navigation starts video in README
+Recorded one36s MP4,6 cuts×6s/180 transitions,1080 frames1080×640 at30fps. Distinct starts(2.5,2.5),(13.5,2.5),(14.5,13.5),(1.5,2.5),(8.5,1.5),(8.5,14.5); each cut shares initialization only. Source512 left, autonomous RGB32→RRDB SR128→512 right; dynamics8873, SR7000, RF3 decoder. No enemies/firing, identical controls, corrections0/future feedback=false. Checkpoints pinned from after-round game with snapshot receipt hashes.
+Extended record_paired_cuts with optional navigation-six profile; mixed default unchanged. Three tests passed, including six distinct legal starts and180 quiet Source steps each. Actual clip reports confirm180 Source/neural transitions each and zero predicted events. FFprobe verified36s/1080frames/30fps; full decode passed. MP4(11214347bytes), contact sheet and verification JSON copied to docs/videos/navigation-six-starts-8873-sr7000.* and linked with clickable preview in README.md and README_RU.md. Offline simulation-time recording, not FPS/quality certification. Source run:training_runs/navigation_six_8873_sr7000_20261115T183547Z.
+
+
+## H139 · 2026-11-15 · Six quiet enemy-interaction cuts, curation and README video
+Published docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4:36s/1080frames1080×640/30fps,6 complete6-second cuts from distinct starts, Source512 left and autonomous dynamics8873+SR7000 right. Preliminary distant/near trials had disappearing sprites; early tracking trials also had Source damage and were rejected. Final16 scenes use walking initial pose, continuous retreat-.3…-.45 and own-NPC aiming limited to±.2rad. Both sides receive the same180 saved controls; no Source poses enter neural inference or its input controller.
+Selected six full cuts by published score strongly weighting sprite visibility, then XY drift, physical faults and flicker. Source NPC visible180/180 each, player/NPC HP unchanged, no firing and zero predicted combat events. No state/memory correction or frame replacement. Actual neural sprite overlay frames103/100/86/84/78/90 out of180: dropouts/NPC errors remain, not a stability-pass. README discloses6-of16 curation and limitations; all16 final-trial metrics and asset hashes published. Original SR7000/dynamics8873 unchanged for recording.
+FFprobe verified36s/1080frames/30fps; full decode passed. MP412532245bytes, contact sheet and verification JSON linked in both README files; earlier navigation video retained. Seven recorder/scenario/controller tests passed. Final run:training_runs/quiet_enemy_safe_six_8873_sr7000_20261115T190439Z; preliminary trials retained separately. Offline simulation-time recording, not FPS benchmarking.
+
+
+## H140 · 2026-11-15 · README purpose, current architecture and fresh reproduction guide
+Both README files now lead with project purpose, Source/reference semantics and autonomous-runtime boundaries. Detailed state20/controls, three RSSMs/h-z dimensions5232, grouped gates, prior/posterior, shared top-2 MoE and separate five soft private experts. Renderer documentation covers32×64 learned-opacity ray sampling/private6241 MLP, Base144/3/6heads and300058-parameter experts, VQGAN8×8×16/codebook1488, RF256/5/8heads/FF896 and503072-parameter experts, actual Euler3/format8. SR section explains RRDB48/growth24/6blocks/x4 PixelShuffle,4+2 material/seam heads, frozen original64 textures/UV/shading, sprite detection/ground/veto, weapon memories/alpha/layering, label-only Source use and objective/LR/GAN readout-gradient scope. Current H180/100 and first-contact training separated from archived protocols. Previous README content retained in folded historical archive; screenshot/videos retained.
+Added docs/REPRODUCING_RU.md and EN: setup/data, executable historical zero-weight baseline, later migration dependencies, renderer/SR/policy requirements, replay/video and exact-resume/VAL checks. Explicitly discloses missing one-command late-stack clean-room automation and historical trainer data/parent/plan dependencies; no invented flags or exact-reproduction claims. No training restarted.
+Added actual world8873/renderer/Base/codec/SR7000 configs, clocks, expert profiles, Git revision and asset hashes in docs/architecture-snapshot-2026-11-15.json. Verified15 CLI help entrypoints,72 new-document relative links, memory/expert dimensions against source, WorldModelConfig validation and diff whitespace checks. Full clean-room training not executed.

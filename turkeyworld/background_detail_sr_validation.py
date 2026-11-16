@@ -38,7 +38,7 @@ ROW_LABELS=('Оригинал Source128','Вход нейрорендера32',
 def _validate_inputs(model,data,panel,step,batch_size,detail_panel):
     if type(step)is not int or step<0 or type(batch_size)is not int or batch_size<1:
         raise ValueError('Background detail validation requires completed local step and positive batch')
-    if(getattr(model,'config',{}).get('architecture')!='background_detail_sr'
+    if(getattr(model,'config',{}).get('architecture') not in ('background_detail_sr','patrol_sprite_detail_sr')
             or getattr(data,'split',None)!='val' or not panel or any(type(i)is not int for i in panel)
             or len(set(panel))!=len(panel)or any(i<0 or i>=len(data.rows)for i in panel)):
         raise ValueError('Background detail validation needs its RGB architecture and unique held-out VAL rows')
@@ -123,7 +123,7 @@ def _metadata(batch,indices):
 def _preview(cases,report,step):
     return dict(cases=cases,metadata=dict(kind=PREVIEW_KIND,objective_protocol=PROTOCOL,step=step,row_count=4,
         row_labels=list(ROW_LABELS),input_kind='npr_rgb',source_held_out=True,world_rollout=False,
-        inference_rgb_only=True,Source_or_RSSM_hint_as_input=False,new_model_uses_fixed_atlas=False,
+        inference_rgb_only=True,Source_or_RSSM_hint_as_input=False,new_model_uses_fixed_atlas=report.get('new_model_uses_fixed_atlas',False),
         source_input_allowed_for_sr=False,source_targets_are_labels_only=True,
         background_ablation=deepcopy(BACKGROUND_ABLATION),
         **{key:report[key]for key in('data_identity_sha256','panel_fingerprint','model_config_sha256','model_sha256','preferred_background_sha256')},
@@ -193,7 +193,7 @@ def evaluate_background_detail_sr(model,data,panel,*,step,batch_size=8,baseline_
     report=dict(kind=KIND,objective_protocol=PROTOCOL,step=step,frames=len(panel),model_sha256=weights_before,**identity,
         input_kind='npr_rgb',source_held_out=True,world_rollout=False,inference_rgb_only=True,
         source_input_allowed_for_sr=False,source_targets_are_labels_only=True,Source_or_RSSM_hint_as_input=False,
-        new_model_uses_fixed_atlas=False,models=models,temporal=temporal,background_ablation=deepcopy(BACKGROUND_ABLATION),
+        new_model_uses_fixed_atlas=model.config.get('architecture')=='patrol_sprite_detail_sr',models=models,temporal=temporal,background_ablation=deepcopy(BACKGROUND_ABLATION),
         preferred_baseline_scope='exact_model_background_same_RGB_forward_not_Atlas_or_old_enemy_RGB_head',
         source_background_edge_scope='Source_RGB_edges_above_0.04_outside_5x5_dilated_true_NPC_mask_not_semantic_wall_labels',
         low_frequency_change_scope='per_frame_mean_abs_8x8_average_pool_of_image_minus_exact_preferred_background',
