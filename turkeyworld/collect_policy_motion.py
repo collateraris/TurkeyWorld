@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from .dreamer_actor_critic import ActorCriticConfig, FactorizedActor
-from .dreamer_policy_world import RSSMImaginationAdapter
+from .vjepa_policy_world import imagination_adapter as RSSMImaginationAdapter
 from .engine import Game, BEHAVIOR_VERSION, ENTITY_SLOTS
 from .models import load_world_checkpoint
 from .power_guard import KeepAwake
@@ -146,8 +146,9 @@ def _write_episode(path, tape, *, stream, index, attempt, seed, policy_pin, worl
 
 @torch.no_grad()
 def _collect_batch(actor, adapter, jobs, *, stream, transitions, exploration, device,
-                   progress_callback, output_dir):
-    games = [_initial_source(job['seed'], stream) for job in jobs]
+                   progress_callback, output_dir, target_hard_cases=False):
+    from .motion_hard_collection import initial,CATEGORIES
+    games = [initial(_initial_source(job['seed'],stream),job['seed'],CATEGORIES[job['index']%5],stream) if target_hard_cases else _initial_source(job['seed'], stream) for job in jobs]
     tapes = [dict(initial=game.get_state(), map=game.map.copy(), states=[game.state_vector().copy()],
         frames=[game.render(size=32, overlays=False)], actions=[], events=[], hit_ids=[], attack_flags=[],
         respawn_flags=[], exploration=[], fire_masked=[]) for game in games]
@@ -168,6 +169,8 @@ def _collect_batch(actor, adapter, jobs, *, stream, transitions, exploration, de
                     exploring[index] = bool(rng.random() < exploration)
                     if exploring[index]: held[index] = EXPLORATION_ACTIONS[int(rng.integers(len(EXPLORATION_ACTIONS)))].copy()
                 control = held[index].copy() if exploring[index] else proposed[index].astype(np.float32).copy()
+                category=CATEGORIES[jobs[index]['index']%5]
+                if target_hard_cases and category!='uniform' and tick<96:control=np.asarray([1.,.6 if category=='corner' and tick>=48 else 0.,0.,0.],np.float32)
                 masked = bool(control[3] != 0)
                 control[3] = 0.
                 before = np.asarray([enemy['alive'] for enemy in game.enemies])
@@ -195,10 +198,10 @@ def _collect_batch(actor, adapter, jobs, *, stream, transitions, exploration, de
 def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cycle_index,
                           episodes_per_stream=16, transitions=180, seedbase=1200000000,
                           exploration=.3, max_attempts=16, inference_batch_size=16,
-                          device='cuda', progress_callback=None):
+                          device='cuda', progress_callback=None, target_hard_cases=False):
     if (type(cycle_index) is not int or cycle_index < 0
             or any(type(value) is not int or value < 1 for value in (episodes_per_stream, transitions, max_attempts, inference_batch_size))
-            or transitions > 180 or episodes_per_stream > 128 or max_attempts > 128
+            or transitions > (360 if target_hard_cases else 180) or episodes_per_stream > 128 or max_attempts > 128
             or type(seedbase) is not int or seedbase < 0
             or type(exploration) not in (int, float) or not math.isfinite(exploration) or not 0 <= exploration <= 1):
         raise ValueError('Invalid bounded policy-motion Source collection contract')
@@ -220,6 +223,12 @@ def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cy
         max_attempts_per_episode=max_attempts, inference_batch_size=inference_batch_size,
         quiet_HP_change_rejection=True, initial_enemy_min_distance_tiles=8., Source_state_repairs=0,
         behavior_version=BEHAVIOR_VERSION, real_Source_dt=1/30, native_size=32))
+    if target_hard_cases:plan.update(target_hard_cases=True,hard_prefix_ticks=96)
+    world_header=torch.load(resolve_path(world_pin['path']),map_location='cpu',weights_only=False,mmap=True)
+    if world_header.get('vjepa_sr_feedback'):
+        plan.update(controller_observation='Source_state20_through_frozen_Base_SR_with_causal_VJEPA_memory',raw_Source_RGB_to_encoder=False,
+            vjepa_sr_feedback=world_header['vjepa_sr_feedback'])
+    del world_header
     _immutable_json(root/'collection_plan.json', plan)
     receipt_path = root/'collection_receipt.json'
     if receipt_path.exists():
@@ -282,9 +291,13 @@ def collect_policy_motion(policy_checkpoint, world_checkpoint, output_dir, *, cy
                     atomic_json(root/'collection_progress.json', value)
                     if progress_callback: progress_callback(value)
                 tapes = _collect_batch(actor, adapter, jobs, stream=stream, transitions=transitions,
-                    exploration=exploration, device=device, progress_callback=progress, output_dir=root)
+                    exploration=exploration, device=device, progress_callback=progress, output_dir=root, target_hard_cases=target_hard_cases)
                 for job, tape in zip(jobs, tapes):
                     valid, reason = _cohort_valid(tape['states'], tape['actions'], stream)
+                    if valid and target_hard_cases:
+                        from .motion_hard_collection import metrics,CATEGORIES
+                        category=CATEGORIES[job['index']%5];category='axis_stop' if category=='enemy_turn' and stream=='navigation' else category
+                        if category!='uniform' and metrics(tape['states'],tape['actions'],tape['map'])[category]<1:valid,reason=False,'hard_case_not_measured'
                     if not valid:
                         rejected.append(dict(stream=stream, **job, reason=reason)); continue
                     path = directories[stream]/f'episode_{job["seed"]:012d}.npz'
@@ -322,6 +335,7 @@ def main(argv=None):
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--cycle-index', type=int, required=True)
     parser.add_argument('--episodes-per-stream', type=int, default=16)
+    parser.add_argument('--target-hard-cases',action='store_true')
     parser.add_argument('--transitions', type=int, default=180)
     parser.add_argument('--seedbase', type=int, default=1200000000)
     parser.add_argument('--exploration', type=float, default=.3)

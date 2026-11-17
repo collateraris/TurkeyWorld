@@ -199,19 +199,21 @@ class ActionConditionedPredictor(nn.Module):
 class CompactVJEPA2AC(nn.Module):
     def __init__(self, image_size=128, patch_size=16, width=512, encoder_depth=10,
                  predictor_depth=6, heads=8, context_frames=4, mlp_ratio=4,
-                 gradient_checkpointing=False):
+                 gradient_checkpointing=False,pooled_memory=False):
         super().__init__()
+        self.pooled_memory=pooled_memory
         self.width, self.context_frames = width, context_frames
         self.encoder = CausalVideoEncoder(image_size, patch_size, width, encoder_depth, heads, mlp_ratio,
                                          gradient_checkpointing)
-        self.predictor = ActionConditionedPredictor(width, predictor_depth, heads, self.encoder.grid, mlp_ratio,
+        self.predictor = ActionConditionedPredictor(width, predictor_depth, heads, 1 if pooled_memory else self.encoder.grid, mlp_ratio,
                                                    gradient_checkpointing)
-        self.visual_tokens = self.encoder.tokens_per_frame
+        self.visual_tokens = 1 if pooled_memory else self.encoder.tokens_per_frame
         self.block_tokens = self.visual_tokens+2
         self.memory_tokens = context_frames*self.block_tokens
 
     def encode_video(self, video):
-        return self.encoder(video)
+        tokens=self.encoder(video)
+        return tokens.mean(2,keepdim=True) if self.pooled_memory else tokens
 
     def predict(self, latents, actions, states):
         return self.predictor(latents, actions, states)
@@ -283,7 +285,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         self.renderer = CameraTransformerWorldModel(config, render_only=True)
         self.core = CompactVJEPA2AC(config.image_size, config.vjepa_patch_size, width,
             encoder_depth, predictor_depth, heads, config.vjepa_context_frames, config.vjepa_mlp_ratio,
-            config.vjepa_gradient_checkpointing)
+            config.vjepa_gradient_checkpointing,getattr(config,'vjepa_pooled_memory',False))
         map_channels = 192 if config.kind == 'teacher' else 128
         rank = min(128, width)
         self.map_projection = nn.Sequential(nn.Linear(map_channels*6, rank), nn.GELU(),

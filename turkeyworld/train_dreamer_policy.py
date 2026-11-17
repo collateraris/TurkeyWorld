@@ -22,7 +22,7 @@ import torch
 from .dreamer_actor_critic import ActorCriticConfig, DreamerActorCritic
 from .dreamer_actor_critic_math import imagination_weights
 from .dreamer_policy_data import PolicyReplay, digest, file_sha
-from .dreamer_policy_world import RSSMImaginationAdapter
+from .vjepa_policy_world import imagination_adapter as RSSMImaginationAdapter
 from .dreamer_reward_continue import (DreamerRewardContinue, RewardContinueConfig,
     source_reward_continue, reward_continue_loss, reward_settings)
 from .models import load_world_checkpoint
@@ -161,6 +161,11 @@ class PolicyTraining:
     def load_world(self, identity):
         model, _ = load_world_checkpoint(resolve_path(identity['path']), self.device)
         model.requires_grad_(False).eval()
+        if model.config.architecture=='vjepa2_ac':
+            from dataclasses import replace
+            for module in (model,model.vjepa_backend):module.config=replace(module.config,navigation_only=False)
+            self.state.update(world_adapter='vjepa_action_conditioned_prior_v1',main_dynamics_run=str(resolve_path(self.args.world_source).parent.parent),
+                model='V-JEPA 2-AC · actor/critic',world_environment_override='one_enemy_enabled_for_policy')
         # The adapter controls stochastic prior sampling without training NN assets.
         if hasattr(self, 'world'):
             if digest(model.config.to_dict() if hasattr(model.config, 'to_dict')
@@ -227,7 +232,7 @@ class PolicyTraining:
         self.validation_panel = panel
         declared_reward_settings = self.reward_config
         proposed = dict(protocol=PROTOCOL, world_initial=plan['world_initial'] if plan else identity,
-            world_source=identity_path(self.args.world_source), actor_critic=config.to_dict(),
+            world_source=(plan['world_source'] if plan and resolve_path(plan['world_source'])==resolve_path(self.args.world_source) else identity_path(self.args.world_source)), actor_critic=config.to_dict(),
             reward_settings=declared_reward_settings, reward_continue_config=vars(self.head_config),
             data=self.replay.identities,
             head_event_data=self.head_replay.identities,
@@ -247,7 +252,7 @@ class PolicyTraining:
                 reward_head_importance='uniform-window target with exact rare-stratum importance',
                 online_collection=False, policy_controls_game=False))
         if plan is not None and plan != proposed:
-            raise ValueError('Policy arguments or immutable training plan changed')
+            raise ValueError('Policy arguments or immutable training plan changed: '+', '.join(k for k in proposed if proposed[k]!=plan.get(k)))
         if plan is None: atomic_json(plan_path, proposed)
         self.plan, self.plan_sha = proposed, digest(proposed)
         self.state.update(plan_sha256=self.plan_sha, data_identity_sha256=self.replay.identity_sha256,

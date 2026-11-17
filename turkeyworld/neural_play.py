@@ -219,11 +219,24 @@ class NeuralRuntime:
             raise ValueError(f"initial state must have {STATE_DIM} values")
         self.initial_state = torch.as_tensor(initial_state, device=self.device, dtype=self.state_dtype)[None]
         grid = torch.as_tensor(initial_map, device=self.device, dtype=torch.long)[None]
+        self.feedback_settings=self.world_metadata.get('vjepa_sr_feedback')
+        self.feedback_renderer=None
+        if self.feedback_settings:
+            from .vjepa_sr_feedback import FrozenBaseSR
+            self.feedback_renderer=FrozenBaseSR(self.feedback_settings,self.device)
+            self.feedback_grid=grid
+            self.model.render=lambda state,features,map_features:self.feedback_renderer.base(state,self.feedback_grid,navigation_only=self.model.config.navigation_only)
+            # No legacy image decoder is used by the feedback world.
+            from torch import nn
+            self.model.flow_renderer=nn.Module();self.model.flow_renderer.kind='base_only';self.model.flow_renderer.steps=0
+
         with torch.inference_mode():
             self.map_features = self.model.encode_map(grid)
             if initial_rgb is not None:
                 image = torch.as_tensor(initial_rgb, device=self.device).permute(2, 0, 1)[None]
                 image = image.to(dtype=self.dtype).div(255)
+                if self.feedback_renderer is not None:
+                    image=self.feedback_renderer.observation(self.initial_state,grid,navigation_only=self.model.config.navigation_only)
                 initial_memory = self.model.initialize_from_image(image, self.initial_state, self.map_features)
             else:
                 initial_memory = self.model.initial_memory(1, self.device, self.dtype)
@@ -354,6 +367,12 @@ class NeuralRuntime:
         if not bool(torch.isfinite(result["state"]).all()) or not bool(torch.isfinite(output).all()):
             raise FloatingPointError(f"non-finite neural prediction at step {self.steps + 1}")
         next_memory = result['memory']
+        if self.feedback_renderer is not None:
+            from .vjepa_sr_feedback import feedback_active,blend_memory
+            active=feedback_active(result['state'],self.feedback_settings)
+            if bool(active.any()):
+                observation=self.feedback_renderer.observation(result['state'],self.feedback_grid,navigation_only=self.model.config.navigation_only)
+                next_memory=blend_memory(self.model,next_memory,observation,self.feedback_settings,active)
         if self.world_architecture == 'dreamer_rssm':
             if (not torch.is_tensor(next_memory) or next_memory.shape != self.initial_memory.shape
                     or not bool(torch.isfinite(next_memory).all())):
@@ -402,6 +421,7 @@ class NeuralRuntime:
         report = {
             "mode": "standalone_neural_world_rollout",
             "base_only_renderer":getattr(self,"base_only_metadata",None),
+            "vjepa_sr_feedback":getattr(self,"feedback_settings",None),
             "device": str(self.device),
             "device_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU",
             "precision": "fp16" if self.args.fp16 else "fp32",

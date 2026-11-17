@@ -25,8 +25,9 @@ def _sha(value):return isinstance(value,str)and re.fullmatch('[0-9a-f]{64}',valu
 
 
 class WorkspacePaths:
-    def __init__(self,root,origin_root):
+    def __init__(self,root,origin_root,allowed_native_roots=()):
         self.root=Path(root).resolve()
+        self.allowed_native_roots=tuple(Path(p).resolve() for p in allowed_native_roots)
         raw=_text(origin_root);origin=PureWindowsPath(raw)
         if not self.root.is_dir()or not origin.is_absolute()or not re.fullmatch('[A-Za-z]:',origin.drive):
             raise ValueError('Relocation needs an existing native root and an absolute Windows workspace origin')
@@ -55,7 +56,7 @@ class WorkspacePaths:
 
     def _native(self,parts,*,must_exist=False):
         native=self.root.joinpath(*parts).resolve(strict=must_exist)
-        if not native.is_relative_to(self.root):raise ValueError('Workspace symlink escapes the declared native root')
+        if not any(native.is_relative_to(base) for base in (self.root,*self.allowed_native_roots)):raise ValueError('Workspace symlink escapes the declared native root')
         return native
 
     def relative(self,value):
@@ -94,9 +95,11 @@ def load_workspace_paths(root=None):
     if not config.is_file():return None
     value=json.loads(config.read_text(encoding='utf-8-sig'))
     if(not isinstance(value,dict)or value.get('protocol',PROTOCOL)!=PROTOCOL
-            or set(value)-{'protocol','version','origin_root'}or value.get('version',1)!=1):
+            or set(value)-{'protocol','version','origin_root','allowed_native_roots'}or value.get('version',1)!=1):
         raise ValueError('Unknown explicit workspace portability configuration')
-    return WorkspacePaths(root,value['origin_root'])
+    allowed=value.get('allowed_native_roots',[])
+    if not isinstance(allowed,list) or any(not isinstance(p,str) or not Path(p).is_absolute() for p in allowed):raise ValueError('Explicit native storage roots must be absolute paths')
+    return WorkspacePaths(root,value['origin_root'],allowed)
 
 
 def resolve_path(value,*,root=None,must_exist=False):

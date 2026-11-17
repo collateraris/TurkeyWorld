@@ -77,6 +77,7 @@ class WorldModelConfig:
     vjepa_mlp_ratio: int = 4
     vjepa_readout_mlp_ratio: int = 4
     vjepa_gradient_checkpointing: bool = False
+    vjepa_pooled_memory: bool = False
     spatial_entities: bool = False
     spatial_combat: bool = False
     game_training_v5: bool = False
@@ -865,6 +866,7 @@ def load_world_checkpoint(path, device="cpu"):
     config.setdefault("simulation_hz", 30.0)
     model = NeuralWorldModel(WorldModelConfig(**config)).to(device)
     model.load_state_dict(checkpoint["model"])
+    model.vjepa_sr_feedback=checkpoint.get('vjepa_sr_feedback')
     model.rssm_migration = checkpoint.get('rssm_migration')
     model.dual_rssm_migration = checkpoint.get('dual_rssm_migration')
     model.enemy_rssm_resize = checkpoint.get('enemy_rssm_resize')

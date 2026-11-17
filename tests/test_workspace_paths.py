@@ -16,6 +16,16 @@ class WorkspacePathsTests(unittest.TestCase):
         (self.root/'training_runs').mkdir();self.file=self.root/'training_runs'/'weights.pt';self.file.write_bytes(b'unchanged tensors')
         self.old=self.origin+r'\training_runs\weights.pt'
 
+    def test_explicit_storage_root_only_allows_declared_external_subtree(self):
+        storage=Path(self.temp.name)/'storage';storage.mkdir()
+        (self.root/'mounted').symlink_to(storage,target_is_directory=True)
+        with self.assertRaises(ValueError):self.paths.resolve('mounted/file')
+        explicit=WorkspacePaths(self.root,self.origin,[storage])
+        self.assertEqual(explicit.resolve('mounted/file'),storage/'file')
+        other=Path(self.temp.name)/'other';other.mkdir()
+        (self.root/'undeclared').symlink_to(other,target_is_directory=True)
+        with self.assertRaises(ValueError):explicit.resolve('undeclared/file')
+
     def configure(self):
         (self.root/'workspace_portability.json').write_text(json.dumps(dict(protocol='workspace_paths_v1',origin_root=self.origin)),encoding='utf-8')
 

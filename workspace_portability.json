@@ -1,5 +1,9 @@
 {
   "protocol": "workspace_paths_v1",
   "version": 1,
-  "origin_root": "E:\\nau\\TurkeyWorld"
+  "origin_root": "E:\\nau\\TurkeyWorld",
+  "allowed_native_roots": [
+    "/home/collateraris/turkeyworld_run_storage/active_vjepa_sr_cycle_20261117",
+    "/home/collateraris/turkeyworld_run_storage/vjepa_sr_cycle_20261117"
+  ]
 }

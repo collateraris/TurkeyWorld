@@ -10,6 +10,13 @@ The current research target is an autonomous **180-transition rollout:6 seconds 
 
 **Start here:** [reproduction instructions and dependency boundaries](docs/REPRODUCING_EN.md) · [verified configuration snapshot](docs/architecture-snapshot-2026-11-15.json) · [development journal](README_HISTORY_EN.md).
 
+## Current experiment: V-JEPA with SR observations
+
+The independent `vjepa_sr_cycle_20261117` branch restores V-JEPA2-AC and trains pooled12-token memory with soft Base → SR128 → RGB32 feedback. Base/SR remain frozen; Source future frames are labels only. Unlimited rounds:100 H180 dynamics updates →50 actor/critic updates →64+64 real Source episodes of360 steps →repeat until user stop. No game window launches automatically.
+
+[Live dynamics, previews and drift map](http://127.0.0.1:8792/). NAV/enemy map selectors expose181 states and the same four moments as the image. [Protocol, limitations and commands (RU)](docs/VJEPA_SR_DYNAMICS_RU.md). Quality is unproven; RSSM/RF descriptions below retain project history.
+
+
 ## One neural simulation step
 
 ```mermaid
