@@ -94,7 +94,8 @@ def player_command_delta(state, action, dt=1/30):
 
 def structured_transition(previous, candidate, action, target_logits,
                           attack_logits, dt=1 / 30, training=False,
-                          endless=False, spawn_positions=None, spawn_valid=None, respawn_enabled=True):
+                          endless=False, spawn_positions=None, spawn_valid=None, respawn_enabled=True,
+                          *, player_clamp_ste=None):
     """Return a coherent 20D state and accepted events without a simulator.
 
     Args:
@@ -115,6 +116,8 @@ def structured_transition(previous, candidate, action, target_logits,
             gradients through NPC speed clipping and softmax/sigmoid damage.
             Train the two heads with their target-CE/attack-BCE labels;
             ``events`` itself is hard-valued.
+        player_clamp_ste: optional override for the endless player XY constraint
+            only. None preserves the original behavior (follows training).
 
     Return values include state[B,20], events[B,4], event_probs/event_logits,
     accepted_target[B] (-1 for no accepted hit), accepted_attacks[B,1] bool,
@@ -215,8 +218,16 @@ def structured_transition(previous, candidate, action, target_logits,
                                      torch.minimum(commanded, zero))
         # Preserve gradients to an incorrectly signed/oversized NN proposal.
         # Without this straight-through term clipping can strand it at zero.
-        player_delta = (proposed_delta + (constrained-proposed_delta).detach()
-                        if training else constrained)
+        if player_clamp_ste is None:
+            player_delta = (proposed_delta + (constrained-proposed_delta).detach()
+                            if training else constrained)
+        elif player_clamp_ste:
+            # Exactly the hard forward, including at saturation. An axis that
+            # cannot move even in principle must not receive a proposal gradient.
+            proxy = proposed_delta * commanded.ne(0).to(dtype)
+            player_delta = constrained.detach() + (proxy - proxy.detach())
+        else:
+            player_delta = constrained
         player_xy = previous[:, :2]+player_delta*movement_requested[:, None].to(dtype)
 
     fire_cd = (previous[:, 6].clamp(0, 1) - dt / FIRE_INTERVAL).clamp_min(0)

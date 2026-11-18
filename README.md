@@ -10,11 +10,20 @@ The current research target is an autonomous **180-transition rollout:6 seconds 
 
 **Start here:** [reproduction instructions and dependency boundaries](docs/REPRODUCING_EN.md) · [verified configuration snapshot](docs/architecture-snapshot-2026-11-15.json) · [development journal](README_HISTORY_EN.md).
 
+## Neural gameplay videos
+
+The original game runs on the left and V-JEPA 2-AC at step 2507 with 4× upscaling runs on the right. Each video shows six six-second runs from different starts. Both games receive the same controls.
+
+| Navigation without an enemy | Enemy pursuit without combat |
+| --- | --- |
+| [![Original game and V-JEPA navigating the same map](docs/videos/navigation-six-starts-vjepa2507-sr2987.jpg)](docs/videos/navigation-six-starts-vjepa2507-sr2987.mp4) | [![Original game and V-JEPA showing an enemy in pursuit](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.jpg)](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.mp4) |
+| [Watch MP4](docs/videos/navigation-six-starts-vjepa2507-sr2987.mp4) · [Metrics](docs/videos/navigation-six-starts-vjepa2507-sr2987.json) | [Watch MP4](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.mp4) · [Metrics](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.json) |
+
 ## Current experiment: V-JEPA with SR observations
 
 The independent `vjepa_sr_cycle_20261117` branch restores V-JEPA2-AC and trains pooled12-token memory with soft Base → SR128 → RGB32 feedback. Base/SR remain frozen; Source future frames are labels only. Unlimited rounds:100 H180 dynamics updates →50 actor/critic updates →64+64 real Source episodes of360 steps →repeat until user stop. No game window launches automatically.
 
-[Live dynamics, previews and drift map](http://127.0.0.1:8792/). NAV/enemy map selectors expose181 states and the same four moments as the image. [Protocol, limitations and commands (RU)](docs/VJEPA_SR_DYNAMICS_RU.md). Quality is unproven; RSSM/RF descriptions below retain project history.
+[Live dynamics, previews and drift map](http://127.0.0.1:8792/). NAV/enemy map selectors expose181 states and the same four moments as the image. [Protocol, limitations and commands (RU)](docs/VJEPA_SR_DYNAMICS_RU.md). At step 2506, mean drift after 180 steps across 24 fresh noncombat chases was 0.0000084 tiles for the player and 0.00319 for the enemy. Evaluation covers one map. [Results and limitations (RU)](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/quiet_pair_20261118T125552Z/refined/REPORT_RU.md).
 
 
 ## One neural simulation step
@@ -186,28 +195,10 @@ Local workstation dashboards: [world](http://127.0.0.1:8765/), [policy](http://1
 
 Experimental neural upscaler128×128: neural-renderer inputs above, textured output with separate weapon below. User screenshot; perspective and grass-edge errors remain.
 
-**Video: navigation from six starting positions — 36 seconds.**
-
-[![Watch original versus neural gameplay](docs/videos/navigation-six-starts-8873-sr7000.jpg)](docs/videos/navigation-six-starts-8873-sr7000.mp4)
-
-[Watch / download MP4](docs/videos/navigation-six-starts-8873-sr7000.mp4) · [Recording verification](docs/videos/navigation-six-starts-8873-sr7000.json).
-Original left, autonomous neural game right: dynamics8873, experimental SR7000.
-Six6-second clips, no enemies or firing, identical controls.
-Offline simulation-time recording at30fps; this is not a performance benchmark.
-
-**Video: enemy pursuit without combat — six starts, 36 seconds.**
-
-[![Watch quiet enemy interaction](docs/videos/quiet-enemy-six-starts-8873-sr7000.jpg)](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4)
-
-[Watch / download MP4](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4) · [Verification and selection](docs/videos/quiet-enemy-six-starts-8873-sr7000.json).
-Original left, neural game right: dynamics8873/SR7000. Six complete6-second cuts from distinct positions.
-Selected6 of16 final trials for enemy visibility and lower drift. Player retreats and aims using its own RSSM prediction; both games receive identical controls.
-Source enemy visible180/180 frames per cut, unchanged HP, no firing or predicted combat events.
-Neural sprite dropouts and geometry errors remain. Offline30fps recording with no Source state corrections.
-
-
 <details>
 <summary>Historical runs, configurations and results — not the current architecture specification</summary>
+
+Archived RSSM recordings at step 8873 · [Navigation without an enemy](docs/videos/navigation-six-starts-8873-sr7000.mp4) · [Enemy pursuit without combat](docs/videos/quiet-enemy-six-starts-8873-sr7000.mp4).
 
 Development and results journal: [English](README_HISTORY_EN.md) | [Русский](README_HISTORY_RU.md).
 

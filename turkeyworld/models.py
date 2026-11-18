@@ -199,8 +199,11 @@ class WorldModelConfig:
             raise ValueError('Separate enemy memory requires Dreamer RSSM player dynamics')
         if not isinstance(self.navigation_only, bool):
             raise ValueError('navigation_only must be a boolean environment profile')
-        if self.player_motion_mode not in {'delta', 'axis_fraction'}:
-            raise ValueError('player_motion_mode must be delta or axis_fraction')
+        if self.player_motion_mode in ('learned_axis_collision','learned_axis_collision_nav','learned_axis_quiet_pair') and (self.architecture != 'vjepa2_ac'
+                or not self.endless or self.simulation_hz != 30 or self.transition_mode != 'event_v1'):
+            raise ValueError('Learned local collision requires 30 Hz endless V-JEPA event_v1')
+        if self.player_motion_mode not in {'delta', 'axis_fraction', 'learned_axis_collision','learned_axis_collision_nav','learned_axis_quiet_pair'}:
+            raise ValueError('Unknown player_motion_mode')
         if self.player_motion_mode == 'axis_fraction' and (self.architecture not in {'vjepa2_ac', 'dreamer_rssm'}
                 or not self.spatial_entities or not self.endless or self.transition_mode != 'event_v1'):
             raise ValueError('Axis-fraction motion requires spatial endless V-JEPA event_v1 dynamics')

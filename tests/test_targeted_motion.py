@@ -9,7 +9,7 @@ class TargetedTests(unittest.TestCase):
    self.assertTrue(np.all(actions[:180]==actions[0]))
    self.assertTrue(np.all(actions[:,3]==0))
    self.assertTrue(np.isfinite(actions).all())
-   self.assertFalse(np.array_equal(actions[0],actions[180]))
+   if name!='idle':self.assertFalse(np.array_equal(actions[0],actions[180]))
   np.testing.assert_array_equal(control('forward',0),[1,0,0,0])
   np.testing.assert_array_equal(control('left',0),[0,-1,0,0])
   np.testing.assert_array_equal(control('right',0),[0,1,0,0])
@@ -32,3 +32,12 @@ class TargetedTests(unittest.TestCase):
    data=SequenceData(root,device='cpu',split='train',image_size=32)
    batch=data.batch(1,context=1,horizon=180,indices=np.asarray([[0,0]]))
    np.testing.assert_array_equal(batch['target_states'][0].numpy(),p['states'][1:181])
+
+ def test_idle_is_real_source_stop(self):
+  for name in ('idle','idle_turn'):
+   p=episode(2041,'navigation',name,0)
+   np.testing.assert_allclose(p['states'][:,:2],np.repeat(p['states'][:1,:2],361,axis=0),rtol=0,atol=1e-7)
+  for name in ('idle_then_forward','forward_then_idle'):
+   a=np.stack([control(name,tick) for tick in range(360)])
+   stopped=a[:180] if name=='idle_then_forward' else a[180:]
+   self.assertFalse(stopped[:,:2].any())

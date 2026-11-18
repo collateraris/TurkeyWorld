@@ -16,7 +16,8 @@ from .renderer_student import _hash_tensors
 from .distill_renderer import _save
 from .training_pipeline import atomic_json,now
 from .power_guard import KeepAwake
-from .vjepa_motion_aux import REVISION,window_kind,player_auxiliary
+from .vjepa_motion_aux import REVISION,PREVIOUS_REVISION,segmented_player_auxiliary
+from .vjepa_balanced_windows import motion_window_index,draw_available
 
 PROTOCOL='vjepa_pooled_SR_motion_H180_v1'
 NAV=ROOT/'training_runs/staged_single_20261110/data_navigation_recovery_v1/long/rgb/train'
@@ -29,9 +30,11 @@ class Replay:
         paths=sorted((ROOT/'training_runs/dreamer_motion_cycle_20261114/cycles').glob('*/source/collection_receipt.json'))
         paths+=sorted((ROOT/'training_runs/vjepa_sr_cycle_20261117/cycles').glob('*/source/collection_receipt.json'))
         paths+=sorted((ROOT/'training_runs/vjepa_sr_cycle_20261117/cycles').glob('*/targeted/collection_receipt.json'))
+        paths+=sorted((ROOT/'training_runs/vjepa_sr_cycle_20261117/cycles').glob('*/targeted_v2/collection_receipt.json'))
         self.corpora=[json.loads(p.read_text()) for p in paths]
         state=dict(protocol=PROTOCOL,draws=0,rng=self.rng.bit_generator.state)
         self.data=MotionReplay(NAV if stream=='navigation' else ENEMY,state,stream=stream,corpora=self.corpora).data
+        self.window_pools=[motion_window_index(data.episodes) for data in self.data]
     def draw(self):
         rows=[]
         self.balance_rotation=int(self.rng.integers(3))
@@ -39,20 +42,16 @@ class Replay:
             if actor<2 or len(self.data)==1:index=0
             elif actor<4:index=int(self.rng.integers(1,len(self.data)-1)) if len(self.data)>2 else 0
             else:index=len(self.data)-1
-            data=self.data[index];pool=[i for i,e in enumerate(data.episodes) if len(e['actions'])>=180]
-            desired=('moving','blocked','idle')[(actor+self.balance_rotation)%3]
-            for attempt in range(24):
-                episode=int(self.rng.choice(pool));e=data.episodes[episode];start=int(self.rng.integers(len(e['actions'])-180+1))
-                end=start+32
-                kind=window_kind(torch.as_tensor(e['states'][start:end]).float(),torch.as_tensor(e['actions'][start:end]).float(),torch.as_tensor(e['states'][start+1:end+1]).float())
-                if kind==desired:break
+            data=self.data[index]
+            episode,start,kind,available=draw_available(self.window_pools[index],self.rng,actor+self.balance_rotation)
+            e=data.episodes[episode]
             batch=data.batch(1,context=1,horizon=180,indices=np.asarray([[episode,start]]))
             # Source past only; the four-frame context is rendered through SR.
             initial=[max(0,start-3+i) for i in range(4)]
             batch['initial_states']=torch.as_tensor(np.asarray(e['states'][initial]))[None].float()
             batch['initial_frames']=torch.as_tensor(np.asarray(e['frames'][initial])).permute(0,3,1,2)[None].float()/255
             batch['offset']=start;batch['file']=e['path'];batch['corpus']=index
-            batch['motion_kind']=kind;batch['requested_motion_kind']=desired;batch['sampling_attempts']=attempt+1
+            batch['motion_kind']=kind;batch['requested_motion_kind']=kind;batch['sampling_attempts']=1;batch['available_motion_kinds']=available
             rows.append(batch)
         return rows
 
@@ -64,6 +63,11 @@ def run(a):
     if not model.config.vjepa_pooled_memory:raise ValueError('SR-feedback trainer requires pooled V-JEPA memory')
     settings=saved['vjepa_sr_feedback'];renderer=FrozenBaseSR(settings,'cuda')
     old=saved.get('vjepa_sr_training',{});step=saved['training_steps'];updates=old.get('updates',0)
+    clamp_gradient=a.player_clamp_gradient or old.get('player_clamp_gradient','hard')
+    if clamp_gradient not in ('hard','ste'):raise ValueError(f'Unknown player clamp gradient {clamp_gradient!r}')
+    # Instance-only override for the H180 optimizer. Inference and all NPC /
+    # combat gradients continue to use the checkpoint's ordinary eval forward.
+    model.vjepa_backend.train_player_clamp_ste=(clamp_gradient=='ste')
     names=saved['optimizer_parameter_names'];names=names if isinstance(names[0],list) else [names]
     parameters=dict(model.named_parameters());groups=[dict(params=[parameters[n] for n in group]) for group in names]
     optimizer=torch.optim.AdamW(groups,lr=1e-5);optimizer.load_state_dict(saved['optimizer'])
@@ -85,11 +89,11 @@ def run(a):
         context='four_observed_past_states_rendered_Base_SR',full_memory_BPTT=True,GT_future_inputs=False,
         encoder_last_blocks_trainable=len(model.core.encoder.blocks)-16,capacity_growth=saved.get('vjepa_capacity_growth'),latent_label_stride=16,latent_weight=.1,lr=1e-5,
         parent_Adam_moments_preserved=True,renderer_frozen=True,feedback=settings,
-        motion_revision=REVISION,player_velocity_weight=.25,player_contact_weight=.1,auxiliary_prefix=16,sampling_attempts=24)
+        motion_revision=REVISION,player_velocity_weight=.25,player_contact_weight=.1,auxiliary_mode='blocks16',auxiliary_block_size=16,player_clamp_gradient=clamp_gradient,wall_coefficient=a.wall_weight,sampler='exact_available_window_classes')
     plan_path=root/'training_plan.json'
     if plan_path.exists() and json.loads(plan_path.read_text())!=plan:
         previous=json.loads(plan_path.read_text())
-        if previous.get('motion_revision') not in (None,REVISION):raise ValueError('Unknown dynamics plan revision')
+        if previous.get('motion_revision') not in (None,PREVIOUS_REVISION,REVISION):raise ValueError('Unknown dynamics plan revision')
         atomic_json(root/('training_plan_before_'+REVISION+'_'+str(step)+'.json'),previous)
     atomic_json(plan_path,plan)
     status=dict(stage='world',model='V-JEPA pooled state dynamics + frozen SR feedback',run_id=root.name,
@@ -98,7 +102,7 @@ def run(a):
     def save():
         ledger=dict(protocol=PROTOCOL,source_step=source_step,updates=updates,
             samplers={k:copy.deepcopy(v.rng.bit_generator.state) for k,v in replay.items()},frozen_parameters_sha256=frozen_hash,
-            replay_sampling_revision=REVISION)
+            replay_sampling_revision=REVISION,auxiliary_mode='blocks16',player_clamp_gradient=clamp_gradient,wall_coefficient=a.wall_weight)
         payload={**saved,'model':model.state_dict(),'config':vars(model.config),'optimizer':optimizer.state_dict(),
             'training_steps':step,'global_training_step':step,'step':step,'run_state':dict(global_training_step=step),
             'vjepa_sr_training':ledger,'rng_torch':torch.get_rng_state(),'rng_cuda':torch.cuda.get_rng_state_all(),'rng_numpy_global':np.random.get_state()}
@@ -106,15 +110,16 @@ def run(a):
     if 'rng_torch' in saved:torch.set_rng_state(saved['rng_torch'].cpu())
     if saved.get('rng_cuda'):torch.cuda.set_rng_state_all([v.cpu() for v in saved['rng_cuda']])
     if saved.get('rng_numpy_global') is not None:np.random.set_state(saved['rng_numpy_global'])
+    from .learned_axis_collision import verify_frozen_resume
     atomic_json(root/'resume_verification.json',dict(step=step,world_updates=updates,
         optimizer_states=len(optimizer.state),parent_Adam_moments_preserved=True,
-        frozen_parameters_unchanged=not old.get('frozen_parameters_sha256') or old['frozen_parameters_sha256']==frozen_hash,
+        frozen_parameters_unchanged=verify_frozen_resume(model,saved,frozen(),frozen_hash),
         sampler_states_restored=all(not old.get('samplers',{}).get(k) or v.rng.bit_generator.state==old['samplers'][k] for k,v in replay.items()),
-        torch_rng_restored='rng_torch' in saved,replay_sampling_revision=REVISION))
+        torch_rng_restored='rng_torch' in saved,replay_sampling_revision=REVISION,auxiliary_mode='blocks16',player_clamp_gradient=clamp_gradient,wall_coefficient=a.wall_weight))
     publish(world_updates=updates,round_target=a.until_updates,parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
     # Sparse Source RGB labels are EMA-only; never supplied to the live prior.
     while updates<a.until_updates and not (root/'stop_training').exists():
-        began=time.perf_counter();optimizer.zero_grad(set_to_none=True);totals=dict(player_loss=0.,enemy_loss=0.,latent_loss=0.);aux_totals=dict(player_velocity_loss=0.,player_contact_loss=0.);receipts=[]
+        began=time.perf_counter();optimizer.zero_grad(set_to_none=True);totals=dict(player_loss=0.,enemy_loss=0.,latent_loss=0.);aux_totals=dict(player_velocity_loss=0.,player_contact_loss=0.);block_totals={};receipts=[]
         for stream,sampler in replay.items():
             rows=sampler.draw()
             for first in range(0,8,a.microbatch):
@@ -146,26 +151,29 @@ def run(a):
                         points.append(state)
                         if tick%30==29:publish(micro_progress=dict(stream=stream,actors_completed=first,tick=tick+1,horizon=180))
                     prediction=torch.stack(points,1)
-                    player=F.smooth_l1_loss(prediction[...,:2]*16,target[...,:2]*16)+.25*circle_wall_penalty(prediction[...,:2]*16,grid,.20).mean()/(.20**2)
-                    velocity,contact=player_auxiliary(prediction,target,batch['states'][:,0],actions)
+                    player=F.smooth_l1_loss(prediction[...,:2]*16,target[...,:2]*16)+a.wall_weight*circle_wall_penalty(prediction[...,:2]*16,grid,.20).mean()/(.20**2)
+                    velocity,contact,blocks=segmented_player_auxiliary(prediction,target,batch['states'][:,0],actions)
                     player=player+.25*velocity+.1*contact
                     enemy=player*0
                     if not nav:
-                        enemy=F.smooth_l1_loss(prediction[...,8:10]*16,target[...,8:10]*16)+.25*circle_wall_penalty(prediction[...,8:10]*16,grid,.22).mean()/(.22**2)
+                        enemy=F.smooth_l1_loss(prediction[...,8:10]*16,target[...,8:10]*16)+a.wall_weight*circle_wall_penalty(prediction[...,8:10]*16,grid,.22).mean()/(.22**2)
                         source_previous=torch.cat((batch['states'][:,:1,8:10],target[:,:-1,8:10]),1)
                         own_previous=torch.cat((batch['states'][:,:1,8:10],prediction[:,:-1,8:10]),1)
                         enemy=enemy+.25*F.smooth_l1_loss((prediction[...,8:10]-own_previous)*480,(target[...,8:10]-source_previous)*480)
                     loss=(.5*player+(enemy if not nav else 0)+.1*latent)*count/8
                     loss.backward()
+                for begin,end,v,c in blocks:
+                    values=block_totals.setdefault(f'{begin}-{end}',dict(velocity=0.,contact=0.))
+                    values['velocity']+=float(v.detach())*.5*count/8;values['contact']+=float(c.detach())*.5*count/8
                 aux_totals['player_velocity_loss']+=float(velocity.detach())*.5*count/8
                 aux_totals['player_contact_loss']+=float(contact.detach())*.5*count/8
                 totals['player_loss']+=float(player.detach())*.5*count/8
                 totals['enemy_loss']+=float(enemy.detach())*count/8
                 totals['latent_loss']+=float(latent.detach())*.1*count/8
-                receipts.extend(dict(stream=stream,file=r['file'],start=r['offset'],corpus=r['corpus'],motion_kind=r['motion_kind'],requested_motion_kind=r['requested_motion_kind'],sampling_attempts=r['sampling_attempts']) for r in selected)
+                receipts.extend(dict(stream=stream,file=r['file'],start=r['offset'],corpus=r['corpus'],motion_kind=r['motion_kind'],requested_motion_kind=r['requested_motion_kind'],sampling_attempts=r['sampling_attempts'],available_motion_kinds=r['available_motion_kinds']) for r in selected)
         norm=torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad],1.,error_if_nonfinite=True)
         optimizer.step();step+=1;updates+=1
-        metrics=dict(loss_protocol=PROTOCOL,stage='world',step=step,world_updates=updates,train_loss=sum(totals.values()),**totals,**aux_totals,motion_revision=REVISION,gradient_norm=float(norm),
+        metrics=dict(loss_protocol=PROTOCOL,stage='world',step=step,world_updates=updates,train_loss=sum(totals.values()),**totals,**aux_totals,auxiliary_blocks=block_totals,player_clamp_gradient=clamp_gradient,wall_coefficient=a.wall_weight,motion_revision=REVISION,gradient_norm=float(norm),
             update_seconds=time.perf_counter()-began,horizon=180,main_actors=16,feedback_every=8,Source_future_feedback=False,samples=receipts)
         with (root/'metrics.jsonl').open('a') as f:f.write(json.dumps(metrics,allow_nan=False)+'\n')
         if _hash_tensors(frozen())!=frozen_hash or _hash_tensors(renderer.sr.state_dict())!=render_hash:raise AssertionError('Frozen renderer/encoder/atlas changed')
@@ -175,7 +183,7 @@ def run(a):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--until-updates',type=int,required=True);p.add_argument('--microbatch',type=int,default=2);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--until-updates',type=int,required=True);p.add_argument('--microbatch',type=int,default=2);p.add_argument('--wall-weight',type=float,choices=[.25,.5],default=.25);p.add_argument('--player-clamp-gradient',choices=['hard','ste'],help='Player XY clamp backward only; default: inherit checkpoint (legacy: hard)');a=p.parse_args()
     try:
         with KeepAwake():run(a)
     except BaseException as error:

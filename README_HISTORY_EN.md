@@ -5162,3 +5162,65 @@ Added16 scenarios ×4 starts ×2 streams:128 episodes ×360 steps,46080 real Sou
 
 ## H152 · 2026-11-17 · V-JEPA dynamics expanded to298.5M
 Grew encoder18→34 and predictor12→59 atwidth512/pooled12 tokens. Dynamics298532884 parameters;378671317 stored including unused legacy image components.63 identity residual blocks retain all old weights,1420 Adam states and EMA; exact encoder/predictor outputs checked.756 new parameter tensors added to Adam. Original2133 snapshot pinned as checkpoints/vjepa_pre300.pt. H180/100 updates/MAIN16/LR1e-5/short16 auxiliaries retained; encoder blocks16–33 trainable.21 targeted tests passed, including data alignment/schema,identity outputs,Adam/EMA retention and new-block gradients. No VAL improvement claimed; current game retains its own prior snapshot.
+
+## H153 · 2026-11-17 · 300M audit and policy capacity compatibility
+Pinned2233 vs2133,identical8+8 H180: NAV2.780→1.254,quiet player3.421→2.763,NPC2.290→1.883; motion VAL excluding latent1.2434→0.7208. Improved windows8/8,6/8,4/8. Source wall control0; predicted14.25/29.625 ticks. Latest standing19.4%/17.3%;110/320 latest idle requests fallback. Full report /home/collateraris/turkeyworld_run_storage/vjepa_sr_cycle_20261117/dynamics/diagnostics/capacity_audit_20261117T170835Z/REPORT_RU.md. No objective hyperparameter changes; validator now reports motion components. Policy guard permits only proven interface-preserving depth growth and preserves policy weights/Adam; other architecture changes still rejected.22 targeted tests passed;cycle resumed.
+
+## H154 · 2026-11-17 · Blocks16 auxiliaries, feasible quotas, idle and isolated wall A/B
+Player loss covers1–16,17–32,…,177–180 with length weighting; separate own/Source previous states preserve correct boundaries and fullH180 BPTT. Twelve block metrics recorded. Exact available-class pools replace24 retries/random fallback; original2/history2/latest4 preserved. Targeted_v2 completed80NAV+80quiet episodes/57600 Source transitions with idle,stop→move,move→stop,idle→turn;2104 idle starts per stream available. Old trainer stopped cleanly at2234/601 with Adam/RNG retained. Isolated wall0.25/0.5 pilot running:4 fullH180 MAIN16 updates per branch,same checkpoint/RNG/windows,LR1e-5,common0.25/blocks16 VAL and conservative automatic promotion/resume. No winning0.5 claim yet. First v3 update2235 completed,saved checkpoint reopened,finite loss1.2264/grad norm63.51 and all12 blocks verified.26 targeted Python,22 server and274 UI tests passed; dashboard8792 shows A/B separately from main clocks. Artifacts /media/collateraris/New Volume/nau/TurkeyWorld/training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/wall_blocks16_20261117T172819Z.
+
+## H155 · 2026-11-18 · V-JEPA drift audit at step 2314
+Fixed 8 NAV + 8 quiet H180 windows, generated SR feedback, no future Source frames: motion VAL 0.6901 excluding latent; final mean NAV player / quiet player / quiet NPC errors 1.158 / 2.506 / 1.724 tiles. Player mean speed was below Source on 8/8 NAV and 6/8 quiet windows. Step 2287 scored 0.630 on the same panel. The 0.5 wall pilot did not reduce overlaps versus 0.25. Candidate for an isolated A/B: training in eval mode suppresses the direct player coordinate gradient for out-of-command proposals. No training settings changed. Report and figure: `training_runs/vjepa_sr_cycle_20261117/dynamics/validation/{vjepa_sr_002314.json,drift_2314.png}`.
+Adjacent snapshot (`training_steps=2315`): 64 one-step probes from true contexts, four positions per window. Of 36 erroneous active axes (threshold 0.0032 tiles), 29 were clipped with zero direct gradient: 22/24 NAV, 7/12 quiet. Separate from the step-2314 H180 panel.
+
+## H156 · 2026-11-18 · Player clamp gradient pilot and pursuit target diagnostic
+
+Started a four-update hard/STE comparison from step 2315 with the original optimizer and sampler states, H180/MAIN16, LR 1e-5 and wall weight 0.25. Only the player XY clamp backward changes; the ongoing training cycle supplies the control. No live weights are overwritten. Independent validation uses 8+8 other VAL episodes, separate free H180 trajectories and 192 locally initialized one-step probes. Matching checks cover all TRAIN samples and the held-out panel fingerprint. See `dynamics/diagnostics/clamp_2315/{progress,result}.json`.
+At 2315, feeding only reference player XY to the diagnostic pursuit branch changed H180 NPC drift from 1.6391 to 1.6258 tiles (4/8 windows improved). No reference NPC or future Source images are fed back. See `dynamics/diagnostics/npc_target_2315/report.json`.
+
+A separate local NPC head (6,530 parameters, 64 quiet TRAIN episodes / 28,864 transitions) reduced one-step velocity error from 0.566 to 0.129 tiles/s on 67 occluded post-turn ticks. Conditional H180 with reference player XY worsened from 1.627 to 1.666 tiles. Carrying velocity scored 1.447 tiles but overlapped walls on 29.25 ticks per H180 window. Lowering the NPC speed bound alone from 1.20 to 0.70 reduced local velocity error but did not improve free H180 (1.643 to 1.656 tiles). Neither intervention was deployed. Artifacts: `dynamics/diagnostics/npc_direction_2315/conditional_H180.json`, `dynamics/diagnostics/npc_speed_2315/comparison.json`.
+
+A/B complete at 2319: all 64 TRAIN samples matched; independent panel fingerprint verified. Hard → STE: H180 drift of player NAV 1.305→1.268 and quiet 1.574→1.514; NPC 2.134→2.419. False stops 127→128 of 314; false passes 24→24 of 36. Wall overlap ticks rose in both streams (14.750→15.375; 29.625→30.375). Pilot criteria failed; ongoing training retains the original hard gradient and LR 1e-5. See `dynamics/diagnostics/clamp_2315/{REPORT_RU.md,drift_H180.png}`.
+
+## H157 · 2026-11-18 · Updated V-JEPA gameplay videos
+
+Refreshed both README gameplay videos: original on the left, autonomous V-JEPA 2325, Base32 (31709) and RRDB SR128 (2987) on the right. Each H.264 video has 6 distinct starts × 6 seconds at 30 fps, 1080 frames, 1080×640. Enemy-free navigation and six of 16 quiet pursuit trials, with no combat events on either side. Source replay matched every recorded step, full video decode and SHA-256 checked. Neural sprite present for 180 / 180 frames in the selected pursuit clips. Earlier recordings remain archived.
+
+## H158 · 2026-11-18 · Drift: video snapshot 2325 versus live snapshot 2495
+
+Both checkpoints reevaluated on 32 paired held-out H180 trajectories with identical Base/SR, episode hashes, starts and controls. Mean endpoint error in tiles: NAV player 1.233→1.277; pursuit player 2.082→1.790; pursuit NPC 2.294→1.967. Improved windows: 6/16, 9/16 and 10/16 respectively. Motion VAL excluding latent 0.8780→0.7374; false passes unchanged at 24/36, false stops 125→99 of 314. Separately, with the exact six pursuit action tapes from the README: player 3.490→0.292, NPC 3.102→3.211. Selected demo scenes excluded from held-out scores. No training settings changed.
+
+[REPORT_RU.md](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/paired_drift_20261118T121519Z/REPORT_RU.md) · [H180](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/paired_drift_20261118T121519Z/drift.png).
+
+## H159 · 2026-11-18 · Navigation kinematics control
+
+Navigation diagnostic on the same 16 NAV windows as H158: replay 180 commands from initial pose. Command kinematics ignoring walls: mean H180 error 0.7185 tiles; with the exact engine X-then-Y collision rule: 0.00000046. This is a known-rule control rather than a trained model result (1.277). Independent NAV probes: 72/153 false stops, 0/9 false passes; pursuit has 24/27 false passes. CPU evaluation only; live training unchanged. [JSON](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/paired_drift_20261118T121519Z/nav_collision_reference.json).
+
+## H160 · 2026-11-18 · Learned axis motion for enemy-free navigation
+
+Trained nine local head parameters for 10,000 AdamW steps at LR 1e-5 on a frozen step-2500 world. TRAIN used 57,728 actual transitions, 346,477 augmented poses, and 122,880 on-policy head poses. The engine only supplied labels; inference uses the static map, own position and controls. The 24 held-out wall-slide/corner H180 cases improved from 2.754 to 0.213 tiles; false stops 249→8 of 376, false passes 26→0 of 200, mean overlap 34.42→0 ticks. The all-stream candidate regressed fixed-panel NPC drift (1.709→2.055), so only the NAV profile was released. On live boundary 2502 NAV errors on the fixed and independent panels were 1.277→0.157 and 1.421→0.296 tiles. Both pursuit reports matched the original exactly. The working cycle resumed with 2,176 Adam states, RNG, sampler, SR and original weights preserved.
+
+[REPORT_RU.md](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/nav_axis_20261118T123814Z/REPORT_RU.md) · [H180](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/nav_axis_20261118T123814Z/nav_drift.png).
+
+
+## H161 · 2026-11-18 · Player and enemy drift in noncombat pursuit
+
+At production step 2506, separate learned player and NPC contact decisions and a map-conditioned chase module were installed. Using the predicted player's next position as its goal, the NPC can go directly or follow a route around a wall. Refitting NPC contact eliminated a false stop at a convex corner. Across 24 fresh six-second chases, player endpoint error fell from 1.996 to 0.0000084 tiles and enemy error from 2.613 to 0.00319. On 24 episodes including closer approaches, the reductions were 1.813 to 0.0334 and 2.938 to 0.0240. Both actors also improved on both standard validation panels. All panels cover the project's 16×16 map. Training resumed with LR 1e-5 and all 2176 Adam slots. Dashboard preview and drift maps were updated to step 2506.
+
+[Report (RU)](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/quiet_pair_20261118T125552Z/refined/REPORT_RU.md) · [Drift by horizon](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/quiet_pair_20261118T125552Z/refined/quiet_drift.png) · [Reproduction (RU)](docs/VJEPA_SR_DYNAMICS_RU.md#воспроизведение).
+
+The first complete optimizer update and checkpoint save were verified at step 2507. Its training batch yielded player loss 0.00996 and enemy loss 0.000368.
+
+## H162 · 2026-11-18 · Navigation and pursuit videos on the updated V-JEPA
+
+Both videos replay the same 12 starts and action tapes in the same order as the step 2325 recordings. The original runs on the left. The autonomous model at step 2507 renders its own states on the right with Base32 step 31709 and SR128 step 2987. Each video contains six six-second cuts and 1,080 frames at 30 fps. All controls and 2,160 original state vectors matched the archived recordings. Both MP4 files were decoded in full. The enemy sprite is visible in all 1,080 pursuit frames with zero combat events or health changes.
+
+Mean player error over all navigation frames fell from 0.355 to 0.085 tiles. Mean endpoint error was 0.455 tiles and the worst endpoint error was 1.491 tiles. In pursuit, mean error across frames fell from 1.625 to 0.0000023 tiles for the player and from 1.594 to 0.0000065 for the enemy. These results cover the recorded demonstration scenes. The recorder accepts the original capture directory via `turkeyworld.record_vjepa_demos --replay-capture`.
+
+[Navigation](docs/videos/navigation-six-starts-vjepa2507-sr2987.mp4) · [Pursuit](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.mp4) · [Navigation measurements](docs/videos/navigation-six-starts-vjepa2507-sr2987.json) · [Pursuit measurements](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.json).
+
+## H163 · 2026-11-18 · V-JEPA step 2507 video gallery
+
+Both READMEs now open with clickable previews of navigation and pursuit. Both step 2325 recordings and their duplicate video exports were removed. The original control tapes remain available for replay.
+
+[Navigation](docs/videos/navigation-six-starts-vjepa2507-sr2987.mp4) · [Pursuit](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.mp4).

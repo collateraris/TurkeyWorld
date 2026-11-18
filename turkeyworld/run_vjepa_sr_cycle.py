@@ -35,12 +35,14 @@ def run(a):
     while not (root/'stop.request').exists():
         i=state['round_index'];directory=root/'cycles'/f'cycle_{i:06d}';directory.mkdir(parents=True,exist_ok=True)
         if state['phase']=='world_training':
-            targeted=directory/'targeted'
+            targeted=directory/'targeted_v2'
             if not (targeted/'collection_receipt.json').exists():
                 publish(phase='world_training',world_target=(i+1)*100)
                 execute('turkeyworld.collect_targeted_motion',['--output-dir',targeted,'--cycle-index',i],f'targeted_{i:06d}',targeted/'stop.request')
             publish(phase='world_training',world_target=(i+1)*100)
-            execute('turkeyworld.train_vjepa_sr_dynamics',['--run-dir',root/'dynamics','--until-updates',(i+1)*100],f'world_{i:06d}',root/'dynamics/stop_training')
+            selection=root/'dynamics/wall_selection.json'
+            wall=json.loads(selection.read_text()).get('wall_coefficient',.25) if selection.exists() else .25
+            execute('turkeyworld.train_vjepa_sr_dynamics',['--run-dir',root/'dynamics','--until-updates',(i+1)*100,'--wall-weight',wall],f'world_{i:06d}',root/'dynamics/stop_training')
             v=json.loads((root/'dynamics/status.json').read_text())
             if v.get('world_updates',0)<(i+1)*100:raise RuntimeError('World did not complete its optimizer budget')
             publish(phase='policy_training')

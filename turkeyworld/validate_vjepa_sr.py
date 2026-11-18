@@ -17,6 +17,9 @@ from .training_pipeline import atomic_json,now
 from .workspace_paths import ROOT
 from .rssm_drift_preview import build_drift_preview
 from .structured_state import player_command_delta
+from .vjepa_motion_aux import player_auxiliary,segmented_player_auxiliary
+from torch.nn import functional as F
+from .vjepa_independent_panel import independent_windows, common_start_probes, summarize_probes, fingerprint, INDEPENDENT_FINGERPRINT
 
 def configure_memory_mode(model,mode):
     """Read-only architecture ablation; parameter values/shapes stay unchanged."""
@@ -30,9 +33,12 @@ def configure_memory_mode(model,mode):
 
 @torch.no_grad()
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--world',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--preview-dir',type=Path);p.add_argument('--memory-mode',choices=['checkpoint','pooled','spatial'],default='checkpoint');p.add_argument('--feedback-config',type=Path);p.add_argument('--feedback-mode',choices=['on','off'],default='on');p.add_argument('--observation-domain',choices=['sr','source'],default='sr');a=p.parse_args();torch.set_num_threads(2)
+    p=argparse.ArgumentParser();p.add_argument('--panel',choices=['fixed','independent'],default='fixed');p.add_argument('--auxiliary-mode',choices=['checkpoint','prefix16','blocks16'],default='checkpoint');p.add_argument('--wall-weight',type=float,choices=[.25,.5],default=.25);p.add_argument('--world',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--preview-dir',type=Path);p.add_argument('--memory-mode',choices=['checkpoint','pooled','spatial'],default='checkpoint');p.add_argument('--feedback-config',type=Path);p.add_argument('--feedback-mode',choices=['on','off'],default='on');p.add_argument('--observation-domain',choices=['sr','source'],default='sr');a=p.parse_args();torch.set_num_threads(2)
     if a.observation_domain=='source' and (a.feedback_mode!='off' or a.preview_dir is not None):p.error('Source-context diagnostic requires feedback off and no production preview')
-    model,saved=load_world_checkpoint(a.world,'cuda');step=saved['training_steps'];del saved
+    if a.panel=='independent' and (a.observation_domain!='sr' or a.feedback_mode!='on' or a.preview_dir is not None):p.error('Independent panel requires SR feedback and a separate report, without production preview')
+    model,saved=load_world_checkpoint(a.world,'cpu');step=saved['training_steps'];aux_mode=saved.get('vjepa_sr_training',{}).get('auxiliary_mode','prefix16') if a.auxiliary_mode=='checkpoint' else a.auxiliary_mode;del saved
+    # Adam, RNG, and EMA are training-only; never copy their storage to the GPU.
+    model.to('cuda')
     configure_memory_mode(model,a.memory_mode)
     if a.feedback_config:model.vjepa_sr_feedback=json.loads(a.feedback_config.read_text())
     if a.observation_domain=='source':model.vjepa_sr_feedback=None
@@ -40,11 +46,14 @@ def main():
     if a.feedback_mode=='off' and adapter.feedback_settings:adapter.feedback_settings={**adapter.feedback_settings,'every':10**15}
 
     reference=json.loads((ROOT/'training_runs/rssm_moe_nav15_enemy25_cap20_20261113/rssm_validation_latest.json').read_text())
-    report=dict(protocol='vjepa_SR_motion_heldout_v1',step=step,horizon=180,Source_future_feedback=False,Source_RGB_encoder_inputs=a.observation_domain=='source',observation_domain=a.observation_domain,source_held_out=True,generated_at=now(),memory_tokens=model.core.memory_tokens,visual_tokens=model.core.visual_tokens,feedback_mode=a.feedback_mode)
+    report=dict(panel=a.panel,objective_auxiliary_mode=aux_mode,objective_wall_coefficient=a.wall_weight,protocol='vjepa_SR_motion_heldout_v1',step=step,horizon=180,Source_future_feedback=False,Source_RGB_encoder_inputs=a.observation_domain=='source',observation_domain=a.observation_domain,source_held_out=True,generated_at=now(),memory_tokens=model.core.memory_tokens,visual_tokens=model.core.visual_tokens,feedback_mode=a.feedback_mode)
+    identities={}
     preview_rows=[];map_drifts={};snapshots=[1,60,120,180]
     for stream,folder in [('navigation',NAV),('enemy_motion',ENEMY)]:
         data=SequenceData(folder.parent/'val',split='val',image_size=32,mode='stream',device='cpu');windows=reference[stream]['panel']['windows']
-        errors=[];npc=[];walls=[];files=[];per_window=[];offset_errors={str(t):dict(player=[],enemy=[]) for t in [1,8,16,48,112,180]};speeds=[];kinematics=[]
+        if a.panel=='independent':windows=independent_windows(data, windows, stream)
+        probes=[]
+        errors=[];npc=[];walls=[];files=[];per_window=[];offset_errors={str(t):dict(player=[],enemy=[]) for t in [1,8,16,48,112,180]};speeds=[];kinematics=[];objective=[]
         with environment_profile(model,navigation_only=stream=='navigation'):
             for first in range(0,len(windows),2):
                 group=windows[first:first+2];batch=[];past=[];past_rgb=[]
@@ -60,6 +69,7 @@ def main():
                 current=adapter.initialize(states,grid,rgb);initial_state=current.state.detach().clone();actions=torch.cat([b['actions'] for b in batch]).to('cuda');target=torch.cat([b['target_states'] for b in batch]).to('cuda');points=[]
                 for tick in range(180):current=adapter.transition_prior(current,actions[:,tick]);points.append(current.state)
                 predicted=torch.stack(points,1)
+                if a.panel=='independent':probes.append(common_start_probes(adapter,states,grid,actions,target))
                 if a.preview_dir is not None and first==0:
                     drift=build_drift_preview(batch[0],dict(context=1,horizon=180,display_offsets=snapshots),torch.cat((initial_state[:1],predicted[0]),0),step=step)
                     drift['kind']='vjepa_preview_map_drift_v1';drift['model']='V-JEPA pooled SR feedback';map_drifts[stream]=drift
@@ -89,6 +99,20 @@ def main():
                     index=int(tick)-1
                     values['player'].extend(((predicted[:,index,:2]-target[:,index,:2])*16).norm(dim=-1).cpu().tolist())
                     if stream=='enemy_motion':values['enemy'].extend(((predicted[:,index,8:10]-target[:,index,8:10])*16).norm(dim=-1).cpu().tolist())
+                for actor in range(len(group)):
+                    pr=predicted[actor:actor+1];gt=target[actor:actor+1];gr=grid[actor:actor+1]
+                    velocity,contact=(segmented_player_auxiliary(pr,gt,initial_state[actor:actor+1],actions[actor:actor+1])[:2] if aux_mode=='blocks16' else player_auxiliary(pr,gt,initial_state[actor:actor+1],actions[actor:actor+1]))
+                    terms=dict(player_xy=float(F.smooth_l1_loss(pr[...,:2]*16,gt[...,:2]*16)),
+                        player_wall=float(a.wall_weight*circle_wall_penalty(pr[...,:2]*16,gr,.20).mean()/.20**2),
+                        player_velocity=float(velocity),player_contact=float(contact))
+                    terms['player_combined']=terms['player_xy']+terms['player_wall']+.25*terms['player_velocity']+.1*terms['player_contact']
+                    if stream=='enemy_motion':
+                        terms.update(enemy_xy=float(F.smooth_l1_loss(pr[...,8:10]*16,gt[...,8:10]*16)),
+                            enemy_wall=float(a.wall_weight*circle_wall_penalty(pr[...,8:10]*16,gr,.22).mean()/.22**2),
+                            enemy_velocity=float(F.smooth_l1_loss((pr[...,8:10]-previous[actor:actor+1,:,8:10])*480,(gt[...,8:10]-source_previous[actor:actor+1,:,8:10])*480)))
+                        terms['enemy_combined']=terms['enemy_xy']+terms['enemy_wall']+.25*terms['enemy_velocity']
+                    terms['weighted_motion_loss']=.5*terms['player_combined']+terms.get('enemy_combined',0)
+                    objective.append(terms)
                 for actor,row in enumerate(group):
                     own_speed=((predicted[actor,:,:2]-previous[actor,:,:2])*480).norm(dim=-1).mean()
                     source_speed=((target[actor,:,:2]-source_previous[actor,:,:2])*480).norm(dim=-1).mean()
@@ -98,7 +122,7 @@ def main():
                         player_speed_tiles_s=float(own_speed),Source_player_speed_tiles_s=float(source_speed),
                         player_final_error_xy_tiles=((predicted[actor,-1,:2]-target[actor,-1,:2])*16).cpu().tolist()))
 
-        report[stream]=dict(count=len(windows),player_XY_H180_mean_tiles=float(np.mean(errors)),enemy_XY_H180_mean_tiles=float(np.mean(npc)) if npc else None,
+        report[stream]=dict(objective_mean={k:float(np.mean([row[k] for row in objective])) for k in objective[0]},objective_excludes_latent=True,count=len(windows),player_XY_H180_mean_tiles=float(np.mean(errors)),enemy_XY_H180_mean_tiles=float(np.mean(npc)) if npc else None,
             player_wall_overlap_ticks_mean=float(np.mean(walls)),windows=files,per_window=per_window,
             offsets={k:dict(player_XY_mean_tiles=float(np.mean(v['player'])),enemy_XY_mean_tiles=float(np.mean(v['enemy'])) if v['enemy'] else None) for k,v in offset_errors.items()},
             player_speed_tiles_s=float(np.mean([v[0] for v in speeds])),Source_player_speed_tiles_s=float(np.mean([v[1] for v in speeds])),
@@ -108,6 +132,12 @@ def main():
                 speed_limit_exceeded_fraction=sum(v['excess'] for v in kinematics)/sum(v['steps'] for v in kinematics),
                 Source_speed_limit_exceeded_fraction=sum(v['source_excess'] for v in kinematics)/sum(v['steps'] for v in kinematics),
                 mean_direction_cosine=sum(v['direction_cosine_sum'] for v in kinematics)/max(1,sum(v['direction_count'] for v in kinematics))))
+        identities[stream]=[dict(episode=Path(f['path']).name,sha256=f['sha256'],start=f['start']) for f in files]
+        if probes:report[stream]['common_start_axis']=summarize_probes(probes)
+        if len(identities)==2:
+            report['panel_fingerprint']=fingerprint(identities)
+            if a.panel=='independent' and report['panel_fingerprint']!=INDEPENDENT_FINGERPRINT:
+                raise ValueError('Independent VAL corpus/windows changed since the experiment was registered')
         atomic_json(a.output,report)
     if a.preview_dir is not None:
         root=a.preview_dir;root.mkdir(parents=True,exist_ok=True)

@@ -140,6 +140,19 @@ def archive_unsaved_history(root, completed_step):
         os.replace(temporary,path)
 
 
+def compatible_vjepa_depth_growth(previous, current, proof):
+    """Only an explicitly recorded, interface-preserving depth expansion."""
+    if previous.architecture!='vjepa2_ac' or current.architecture!='vjepa2_ac':return False
+    if not isinstance(proof,dict) or proof.get('protocol')!='vjepa_dynamics300_depth_growth_v1':return False
+    if not all(proof.get(k) is True for k in ('old_weights_exact','new_blocks_identity','encoder_output_exact','predictor_output_exact')):return False
+    allowed={'vjepa_encoder_depth','vjepa_predictor_depth'}
+    if any(vars(previous)[k]!=vars(current)[k] for k in vars(previous) if k not in allowed):return False
+    for name in ('encoder','predictor'):
+        old=getattr(previous,'vjepa_'+name+'_depth');new=getattr(current,'vjepa_'+name+'_depth')
+        if proof.get('old_depths',{}).get(name)!=old or proof.get(name+'_depth')!=new or new<old:return False
+    return proof.get('width')==current.vjepa_width
+
+
 class PolicyTraining:
     def __init__(self, args):
         self.args, self.root = args, resolve_path(args.run_dir)
@@ -159,7 +172,7 @@ class PolicyTraining:
         atomic_json(self.root/'status.json', self.state)
 
     def load_world(self, identity):
-        model, _ = load_world_checkpoint(resolve_path(identity['path']), self.device)
+        model, header = load_world_checkpoint(resolve_path(identity['path']), self.device)
         model.requires_grad_(False).eval()
         if model.config.architecture=='vjepa2_ac':
             from dataclasses import replace
@@ -170,7 +183,24 @@ class PolicyTraining:
         if hasattr(self, 'world'):
             if digest(model.config.to_dict() if hasattr(model.config, 'to_dict')
                     else vars(model.config)) != self.world_config_sha:
-                raise ValueError('Refreshed world architecture changed; explicit policy migration required')
+                proof=header.get('vjepa_capacity_growth')
+                if compatible_vjepa_depth_growth(self.world.config,model.config,proof):
+                    key='world_capacity_migration'
+                else:
+                    from .learned_axis_collision import compatible_policy_refresh
+                    from .quiet_pair_profile import compatible_policy_refresh as compatible_quiet
+                    if compatible_policy_refresh(self.world.config,model,header):
+                        proof=header['local_axis_head_migration']
+                        key='world_player_motion_migration'
+                    elif compatible_quiet(self.world.config,model,header):
+                        proof=header['quiet_pair_migration']
+                        key='world_quiet_motion_migration'
+                    else:
+                        raise ValueError('Refreshed world architecture changed; explicit policy migration required')
+                self.state[key]=dict(protocol=proof['protocol'],from_config_sha256=self.world_config_sha,
+                    to_config_sha256=digest(vars(model.config)),world_step=identity['step'],policy_weights_preserved=True,
+                    policy_optimizer_preserved=True,feature_interface='state20_plus_readout128',updated_at=now())
+                atomic_json(self.root/(key+'.json'),self.state[key])
         self.world, self.world_identity = model, identity
         self.world_config_sha = digest(vars(model.config))
         self.adapter = RSSMImaginationAdapter(model, getattr(self, 'heads', None), sample_latents=True)

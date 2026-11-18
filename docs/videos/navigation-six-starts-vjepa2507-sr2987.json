@@ -1,0 +1,662 @@
+{
+  "passed": true,
+  "profile": "nav",
+  "source_left": true,
+  "neural_right": true,
+  "clips": 6,
+  "seconds_per_clip": 6,
+  "duration_seconds": 36,
+  "total_frames": 1080,
+  "fps": 30,
+  "world_step": 2507,
+  "sr_step": 2987,
+  "models": {
+    "step": 2507,
+    "world_step": 2507,
+    "base_step": 31709,
+    "sr_step": 2987,
+    "sr_architecture": "rrdb_material_sprite_sr",
+    "architecture": "vjepa2_ac",
+    "player_motion_mode": "learned_axis_quiet_pair",
+    "checkpoint_sha256": "6c34c6f7eb0c4b4d5e78fac2b1e5f16027e5a75b6deb4a50af20929fb5386b5f",
+    "settings": {
+      "protocol": "vjepa_pooled_SR_feedback_v1",
+      "every": 8,
+      "blend": 0.1,
+      "initial_observation": "generated_Base_SR",
+      "Source_future_feedback": false,
+      "world": "training_runs/sr_base_only_20261116/assets/world.pt",
+      "renderer": "training_runs/sr_base_only_20261116/assets/renderer.pt",
+      "sr": "training_runs/sr_base_patrol_grouped_20261116/checkpoints/sr_last.pt",
+      "world_sha256": "4098b474c2f3699b015342d2646aa90a536844776e3ff16de0c612c2d5a5a50f",
+      "renderer_sha256": "40f9373125c038a200b4386c25a375fa2c32d6902447a9f8b2b8cfa1e70985b6",
+      "sr_sha256": "b032c833e734100157a4c70a9bb2bfa95d8029014e18010f97e4d2fecfa32078"
+    },
+    "event_names": [
+      "shot",
+      "hit",
+      "kill",
+      "player_hit"
+    ]
+  },
+  "autonomous_neural": true,
+  "Source_future_feedback": false,
+  "engine_corrections": 0,
+  "Source_replay_verified_each_frame": true,
+  "ffmpeg_full_decode_passed": true,
+  "stream": {
+    "codec_name": "h264",
+    "width": 1080,
+    "height": 640,
+    "avg_frame_rate": "30/1",
+    "duration": "36.000000",
+    "nb_frames": "1080"
+  },
+  "replay": {
+    "world_step": 2325,
+    "video_sha256": "e1dbd62a6949b0d24250e4039d38a061b57a58234397fd114729d74bb5ace974",
+    "manifest_sha256": "d3fdcec73a41f28d51116ae94dc10b00f77cd1be616625a6e9e2887e837c9716",
+    "action_tapes_verified": true,
+    "original_source_states_verified": true,
+    "previous_selection_order_preserved": true
+  },
+  "selection_priority": [
+    "previously_published_order"
+  ],
+  "quality_score": null,
+  "selection_candidates": 6,
+  "selected": [
+    {
+      "scene": {
+        "index": 0,
+        "total": 6,
+        "chase": false,
+        "player": [
+          2.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 0.0,
+        "seed": 19000
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.10696177129737204,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 3.094529939815402,
+        "predicted_player_travel": 4.2871914599090815,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.2001827955245972
+      },
+      "eligible": true,
+      "score": 0.10696177129737204,
+      "tape_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source_states_sha256": "0ef114ce51e3199fac638571da21badd0bbaa514b5c72cd3543072e399fb1747"
+    },
+    {
+      "scene": {
+        "index": 1,
+        "total": 6,
+        "chase": false,
+        "player": [
+          13.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 3.141592653589793,
+        "seed": 19001
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 6.193580025461e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 3.8400007225573063,
+        "predicted_player_travel": 3.8400107622146606,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 2.8709398520732066e-06
+      },
+      "eligible": true,
+      "score": 6.193580025461e-06,
+      "tape_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source_states_sha256": "c437162e9211dd0e0a59d4f8b14c735527069df60e5bfaaf511f3d60a9ac3efa"
+    },
+    {
+      "scene": {
+        "index": 2,
+        "total": 6,
+        "chase": false,
+        "player": [
+          14.5,
+          13.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": -1.5707963267948966,
+        "seed": 19002
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 9.889175938345335e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.199999380856752,
+        "predicted_player_travel": 4.200016837567091,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.8094697225023992e-05
+      },
+      "eligible": true,
+      "score": 9.889175938345335e-06,
+      "tape_sha256": "05da1535f97c90d25500d6ea509ef7fb70cd274cbd66c753e9764aaa01930bb6",
+      "source_states_sha256": "1e1cbca2ca74bd97ed0862bcaf3d37be3e60d9fd4095a5c6fe9a2ebc2710292a"
+    },
+    {
+      "scene": {
+        "index": 3,
+        "total": 6,
+        "chase": false,
+        "player": [
+          1.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 1.5707963267948966,
+        "seed": 19003
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.38970452229837393,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.579196278005838,
+        "predicted_player_travel": 3.0886309444904327,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.4905648231506348
+      },
+      "eligible": true,
+      "score": 0.38970452229837393,
+      "tape_sha256": "901e0af438d7c7f836d693bd166b3a83f4c2ac7a96ae80963347f67222b1222f",
+      "source_states_sha256": "c10ffafaab8e7dd0356e245a89498f9e21a29caeac9a8c105f7e5689b1c466ec"
+    },
+    {
+      "scene": {
+        "index": 4,
+        "total": 6,
+        "chase": false,
+        "player": [
+          8.5,
+          1.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 1.5707963267948966,
+        "seed": 19004
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 3.750387677175444e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.679999895393848,
+        "predicted_player_travel": 4.679993838071823,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 8.489843821735121e-06
+      },
+      "eligible": true,
+      "score": 3.750387677175444e-06,
+      "tape_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source_states_sha256": "91cc735c7578cbe043bac98dc5dc699b5b1b12aabfaf3272c962a513ae8f75aa"
+    },
+    {
+      "scene": {
+        "index": 5,
+        "total": 6,
+        "chase": false,
+        "player": [
+          8.5,
+          14.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": -1.5707963267948966,
+        "seed": 19005
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.01565247923449028,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 1.752001166343689,
+        "predicted_player_travel": 1.7213392332196236,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 0.03701851889491081
+      },
+      "eligible": true,
+      "score": 0.01565247923449028,
+      "tape_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source_states_sha256": "2a181da471ad81b6db01007d35bf64bf244c0192eca8d913ee3a3eb8eee466ce"
+    }
+  ],
+  "candidate_metrics": [
+    {
+      "scene": {
+        "index": 0,
+        "total": 6,
+        "chase": false,
+        "player": [
+          2.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 0.0,
+        "seed": 19000
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.10696177129737204,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 3.094529939815402,
+        "predicted_player_travel": 4.2871914599090815,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.2001827955245972
+      },
+      "eligible": true,
+      "score": 0.10696177129737204,
+      "tape_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source_states_sha256": "0ef114ce51e3199fac638571da21badd0bbaa514b5c72cd3543072e399fb1747"
+    },
+    {
+      "scene": {
+        "index": 1,
+        "total": 6,
+        "chase": false,
+        "player": [
+          13.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 3.141592653589793,
+        "seed": 19001
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 6.193580025461e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 3.8400007225573063,
+        "predicted_player_travel": 3.8400107622146606,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 2.8709398520732066e-06
+      },
+      "eligible": true,
+      "score": 6.193580025461e-06,
+      "tape_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source_states_sha256": "c437162e9211dd0e0a59d4f8b14c735527069df60e5bfaaf511f3d60a9ac3efa"
+    },
+    {
+      "scene": {
+        "index": 2,
+        "total": 6,
+        "chase": false,
+        "player": [
+          14.5,
+          13.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": -1.5707963267948966,
+        "seed": 19002
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 9.889175938345335e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.199999380856752,
+        "predicted_player_travel": 4.200016837567091,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.8094697225023992e-05
+      },
+      "eligible": true,
+      "score": 9.889175938345335e-06,
+      "tape_sha256": "05da1535f97c90d25500d6ea509ef7fb70cd274cbd66c753e9764aaa01930bb6",
+      "source_states_sha256": "1e1cbca2ca74bd97ed0862bcaf3d37be3e60d9fd4095a5c6fe9a2ebc2710292a"
+    },
+    {
+      "scene": {
+        "index": 3,
+        "total": 6,
+        "chase": false,
+        "player": [
+          1.5,
+          2.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 1.5707963267948966,
+        "seed": 19003
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.38970452229837393,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.579196278005838,
+        "predicted_player_travel": 3.0886309444904327,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 1.4905648231506348
+      },
+      "eligible": true,
+      "score": 0.38970452229837393,
+      "tape_sha256": "901e0af438d7c7f836d693bd166b3a83f4c2ac7a96ae80963347f67222b1222f",
+      "source_states_sha256": "c10ffafaab8e7dd0356e245a89498f9e21a29caeac9a8c105f7e5689b1c466ec"
+    },
+    {
+      "scene": {
+        "index": 4,
+        "total": 6,
+        "chase": false,
+        "player": [
+          8.5,
+          1.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": 1.5707963267948966,
+        "seed": 19004
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 3.750387677175444e-06,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 4.679999895393848,
+        "predicted_player_travel": 4.679993838071823,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 8.489843821735121e-06
+      },
+      "eligible": true,
+      "score": 3.750387677175444e-06,
+      "tape_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source_states_sha256": "91cc735c7578cbe043bac98dc5dc699b5b1b12aabfaf3272c962a513ae8f75aa"
+    },
+    {
+      "scene": {
+        "index": 5,
+        "total": 6,
+        "chase": false,
+        "player": [
+          8.5,
+          14.5
+        ],
+        "enemy": [
+          5.5,
+          2.5
+        ],
+        "angle": -1.5707963267948966,
+        "seed": 19005
+      },
+      "metrics": {
+        "sprite_frames": 0,
+        "sprite_switches": 0,
+        "player_xy_mean": 0.01565247923449028,
+        "enemy_xy_mean": 0.0,
+        "wall_fault_frames": 0,
+        "source_min_distance": 100.0,
+        "source_visible_frames": 0,
+        "source_player_travel": 1.752001166343689,
+        "predicted_player_travel": 1.7213392332196236,
+        "source_enemy_travel": 0.0,
+        "predicted_enemy_travel": 0.0,
+        "Source_HP_unchanged": true,
+        "predicted_HP_unchanged": true,
+        "predicted_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_events": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "player_H180": 0.03701851889491081
+      },
+      "eligible": true,
+      "score": 0.01565247923449028,
+      "tape_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source_states_sha256": "2a181da471ad81b6db01007d35bf64bf244c0192eca8d913ee3a3eb8eee466ce"
+    }
+  ],
+  "video_sha256": "d3cb3d8239eee438ddd6c950efce81d3fe121b77f4ce16589759244da78f7fbc",
+  "offline_simulation_time": true
+}

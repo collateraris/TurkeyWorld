@@ -341,6 +341,13 @@ class VJEPA2ACWorldBackend(nn.Module):
             self.player_pass_head = nn.Sequential(nn.Linear(2*width+6, 128), nn.GELU(), nn.Linear(128, 2))
             nn.init.zeros_(self.player_pass_head[-1].weight)
             nn.init.zeros_(self.player_pass_head[-1].bias)
+        if config.player_motion_mode in ('learned_axis_collision','learned_axis_collision_nav','learned_axis_quiet_pair'):
+            from .learned_axis_collision import LocalAxisCollisionHead
+            self.local_axis_head = LocalAxisCollisionHead()
+        if config.player_motion_mode == 'learned_axis_quiet_pair':
+            from .learned_quiet_pursuit import QuietPursuitHead
+            self.quiet_player_head = LocalAxisCollisionHead()
+            self.quiet_pursuit_head = QuietPursuitHead()
 
     def encode_map(self, grid):
         return self.renderer.encode_map(grid)
@@ -526,8 +533,28 @@ class VJEPA2ACWorldBackend(nn.Module):
             player_delta = command*fraction
             spatial_result.update(player_pass_logits=logits, player_pass_fraction=fraction,
                 player_command_delta=command, raw_player_delta=player_delta)
+        if (self.config.player_motion_mode == 'learned_axis_collision' or
+                self.config.player_motion_mode in ('learned_axis_collision_nav','learned_axis_quiet_pair') and self.config.navigation_only):
+            local = self.local_axis_head(state, action, ~self.renderer._spawn_walkable, dt=1/self.config.simulation_hz)
+            player_delta = local['raw_player_delta']
+            spatial_result.update(local)
         old_entities = state[:, GLOBAL_DIM:-2].reshape(batch, ENTITY_SLOTS, ENTITY_DIM)
-        candidate_entities = torch.cat([old_entities[:, :, :2]+.1*motion[:, 2:].reshape(batch, ENTITY_SLOTS, 2),
+        npc_delta = .1*motion[:, 2:].reshape(batch, ENTITY_SLOTS, 2)
+        if self.config.player_motion_mode=='learned_axis_quiet_pair' and not self.config.navigation_only:
+            from .quiet_pair_profile import quiet_mask
+            dt=1/self.config.simulation_hz
+            eligible=quiet_mask(state,action,dt)
+            grid=~self.renderer._spawn_walkable
+            if bool(eligible.any()):
+                # These are own states and the immutable map of this stream;
+                # the NPC goal is computed after the player's predicted movement.
+                learned=self.quiet_player_head(state,action,grid,dt=dt)['raw_player_delta']
+                player_delta=torch.where(eligible[:,None],learned,player_delta)
+                quiet_npc=self.quiet_pursuit_head(state,state[:,:2]+player_delta,grid)
+                if quiet_npc.shape!=(batch,2):raise ValueError('Invalid quiet NPC displacement')
+                npc_delta=torch.where(eligible[:,None,None],quiet_npc[:,None,:],npc_delta)
+            spatial_result['quiet_pair_active']=eligible
+        candidate_entities = torch.cat([old_entities[:, :, :2]+npc_delta,
                                         old_entities[:, :, 2:]], -1)
         candidate = torch.cat([state[:, :2]+player_delta, state[:, 2:8],
                                candidate_entities.flatten(1), state[:, -2:]], -1)
@@ -551,6 +578,7 @@ class VJEPA2ACWorldBackend(nn.Module):
         from .structured_state import structured_transition
         result = structured_transition(state, candidate, action.float(), targets, attacks,
             dt=1/self.config.simulation_hz, training=self.training, endless=self.config.endless,
+            player_clamp_ste=getattr(self, 'train_player_clamp_ste', None),
             respawn_enabled=not getattr(self.config, 'navigation_only', False),
             spawn_positions=spawn.get('spawn_positions'), spawn_valid=spawn.get('spawn_valid'))
         next_block = self.core.pack_context(prediction[:, None], action.new_zeros(batch, 1, 4), result['state'][:, None])
