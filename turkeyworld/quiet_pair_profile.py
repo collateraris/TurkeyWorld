@@ -90,6 +90,12 @@ def verified_quiet_migration(model, saved):
     backend = model.vjepa_backend
     weights = _weights(backend.quiet_player_head, backend.quiet_pursuit_head)
     retained = len(saved["model"]) - len(weights)
+    if getattr(model.config, 'vjepa_spawn_phase_head', False):
+        from .spawn_phase_head import verified_migration
+        if not verified_migration(model, saved):
+            return False
+        # The historical quiet-pair receipts predate this independently signed tensor.
+        retained -= 1
     nav_keys = sorted(NAV_PREFIX + name for name in backend.local_axis_head.state_dict())
     nav_digest = head_digest(backend.local_axis_head)
     guarantees = ("parent_adam_unchanged", "parent_rng_and_clocks_unchanged", "no_reference_future")

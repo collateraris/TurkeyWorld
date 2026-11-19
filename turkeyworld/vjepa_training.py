@@ -289,7 +289,7 @@ class VJEPAExperiment(Experiment):
                 loss_protocol=self.state.get('loss_protocol'), scope='held_out_quality_preview',
                 quality_gate_evaluated=True)
             self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-                step=self.global_step, every=self.preview_interval(), **self._prediction_sr_options(contact))
+                step=self.global_step, every=self.preview_interval(), sr_base_model=model, **self._prediction_sr_options(contact))
         self.state['visual_quality'] = report
         self.state['validation_progress'] = {'status': 'complete', 'step': self.global_step, 'frames': 256,
                                               'seconds': report['seconds']}
@@ -358,7 +358,7 @@ class VJEPAExperiment(Experiment):
         contact['metadata'].update(model_kind=model.config.kind, phase=self.state['stage'],
             scope='training_preview', quality_gate_evaluated=False, loss_protocol=self.state.get('loss_protocol'))
         self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-            step=self.global_step, every=interval, **self._prediction_sr_options(contact))
+            step=self.global_step, every=interval, sr_base_model=model, **self._prediction_sr_options(contact))
         self.state['prediction_progress'] = {'status': 'complete', 'step': self.global_step,
             'frames': len(panel)*self.args.horizon, 'seconds': report['seconds']}
         atomic_json(self.root/'status.json', self.state)

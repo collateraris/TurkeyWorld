@@ -231,8 +231,9 @@ class RSSMTraining:
         def rgb(value):
             return value.detach().float().clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         preview = {'context': rgb(batch['context_frames'][0]),
+            'sr_map': batch['map'][:1].detach(),
             'sr_predicted_states': own_states.index_select(0,torch.tensor(offsets,device=own_states.device)),
-            'sr_enemies_enabled': not bool(getattr(client.config,'navigation_only',False)),
+            'sr_enemies_enabled': not bool(getattr(getattr(client, 'config', None), 'navigation_only', False)),
             'source': rgb(source), 'generated': rgb(generated),
             'generated_float': generated.cpu(), 'metadata': {
                 'step': self.state['global_training_step'], 'every': 10, 'context': context, 'horizon': horizon,
@@ -261,7 +262,7 @@ class RSSMTraining:
                     'generated': 'RSSM MODEL: free H'+str(horizon)+' | offsets '+offset_label+' | frozen renderer'+(' | '+renderer_label+' SR '+str(pinned['sr_training_steps']) if pinned else '')}}}
         self.state['prediction_preview'] = save_autoregressive_preview(preview,
             self.root/'preview.png', step=self.state['global_training_step'], every=10,
-            sr_model=self.sr, sr_metadata=self.sr_metadata)
+            sr_model=self.sr, sr_metadata=self.sr_metadata, sr_base_model=client)
         self.publish()
 
     def validate(self, model):

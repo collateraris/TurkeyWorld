@@ -5224,3 +5224,33 @@ Mean player error over all navigation frames fell from 0.355 to 0.085 tiles. Mea
 Both READMEs now open with clickable previews of navigation and pursuit. Both step 2325 recordings and their duplicate video exports were removed. The original control tapes remain available for replay.
 
 [Navigation](docs/videos/navigation-six-starts-vjepa2507-sr2987.mp4) · [Pursuit](docs/videos/quiet-enemy-six-starts-vjepa2507-sr2987.mp4).
+
+## H164 · 2026-11-18 · Three-mode V-JEPA world training
+
+From step 2512 the main world optimizer draws six navigation windows without an enemy, five quiet pursuit windows and five combat windows per update. Each window covers 180 steps at LR 1e-5. Every round collects 64 combat episodes and runs a 12-window held-out combat evaluation. The first new collection contains 23,040 transitions. At step 2513 all three streams contributed, the combat heads changed and all 2176 Adam slots were retained. Held-out combat loss fell from 5.484 to 5.331. The model still missed all 21 hits and 12 kills at their reference ticks. Endpoint error on the fixed navigation and quiet pursuit panels was unchanged.
+
+[H180](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/three_modes_20261118T134134Z/REPORT_RU.md) · [JSON](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/three_modes_20261118T134134Z/first_update.json).
+
+## H165 · 2026-11-18 · Combat sprites and fine-tuned Base32
+
+The V‑JEPA cycle stopped at saved step 2523. The Base32 combat RGB head received 1,200 updates. The upscaler received 1,400 updates on the previous Base and 2,800 on the new Base. The final RRDB ×4 compositor selects one of seven original enemy poses from the predicted state, projects it using the camera and tests wall depth per screen column. The weapon and hands cover the enemy wherever they overlap. Navigation without an enemy has an empty sprite layer.
+
+Across 448 frames from 66 new episodes, mean absolute RGB error on visible enemy pixels in the five combat groups fell from 0.1125 with learned reconstruction to 0.0393 with sprites. The selected pose matched the original on all 292 frames with a visible enemy. On 35 of these frames the stored coordinates placed the enemy one pixel to the right. No sprite showed through walls on the 77 fully occluded or 54 partially occluded frames. Background error increased from 0.0530 to 0.0586. A 16-step gameplay check confirmed identical world states and memory with either display pipeline.
+
+[Image comparison](docs/images/combat-sprite-sr-2026-11-18.png) · [Playback instructions](docs/BASE_ONLY_SR_RU.md) · [Full report](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/combat_visual_20261118T143817Z/REPORT_RU.md).
+
+## H166 · 2026-11-18 · V-JEPA dynamics resumed
+
+Round nine resumed from step 2523 after 890 world updates. Adam and the navigation, pursuit and combat samplers were restored. The round had ten H180 world updates left at a learning rate of 1e-5. [Training dashboard](http://127.0.0.1:8792/) · [Launch record](training_runs/vjepa_sr_cycle_20261117/process_history/resume_20261118T175254Z/resume.json).
+
+## H167 · 2026-11-19 · Corrected enemy respawn placement
+
+At step 2622 the recorded game respawned the enemy on tick 133 behind the neural camera, 13.6 tiles from the reference location. The model learned spawn selection on 4,820 game transitions and uses its trained player motion head between death and respawn. It chose the correct cell on 128 of 128 held-out respawn transitions, up from zero. The H180 panel matched all ten correctly timed respawns to their reference cells. Four reference events still missed their tick, and the model predicted six extra. After transfer to the working checkpoint at step 2625 the respawned enemy was visible on all 74 remaining frames of the gameplay replay. [Frames](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/respawn_validation_20261119T021524Z/display/final/replay_before_after.png) · [Validation report](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/respawn_validation_20261119T021524Z/REPORT_RU.md) · [Checkpoint migration](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/respawn_validation_20261119T021524Z/release/world2625.migration.json).
+
+## H168 · 2026-11-19 · Gameplay reels and measured neural FPS
+
+Recorded the autonomous V-JEPA step 2625 with combat Base32 step 32909 and sprite SR128 step 7187. The 72-second reel contains four fights, four pursuits and four navigation runs. In all 720 pursuit frames the enemy was visible on both sides. The separate 36-second reel has six combat starts selected for a visible first life, death and respawn in both panels. The first respawns occurred on ticks 116, 119, 122, 125, 128 and 116, respectively, with the reference and model agreeing in these clips.
+
+The live HUD counts newly presented neural frames. The recordings show neural computation speed over the last 30 frames, including visual feedback, Base, upscaling and GPU readback. The six fights averaged 17.13 neural FPS on a GeForce RTX 4090 during training. All videos play at 30 fps. For the social post we verified 300,057,860 parameters in V-JEPA dynamics including the map encoder, 4,193,085 in the active Base32 rendering path, and 2,982,920 in SR128.
+
+[12-scene reel](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4) · [Six fights](docs/videos/combat-six-starts-vjepa2625/combat-six-starts.mp4) · [English post](docs/videos/turkeyworld-12-scenes-vjepa2625/post-en.md).

@@ -16,7 +16,9 @@ class WeaponMemory(nn.Module):
         nn.init.zeros_(self.phase_head[-1].weight);nn.init.zeros_(self.phase_head[-1].bias)
         with torch.no_grad():self.phase_head[-1].bias[0]=2.
     def forward(self,low):
-        logits=self.phase_head(low[:,:,20:32,:]);prob=logits.softmax(-1)
+        return self.compose(self.phase_head(low[:,:,20:32,:]))
+    def compose(self,logits):
+        prob=logits.softmax(-1)
         hard=F.one_hot(logits.argmax(-1),3).to(prob)
         weights=hard.detach()+prob-prob.detach() if self.training else hard
         rgb=torch.einsum('bk,kchw->bchw',weights,self.rgb_logits.sigmoid())

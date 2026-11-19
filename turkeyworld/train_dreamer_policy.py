@@ -189,12 +189,16 @@ class PolicyTraining:
                 else:
                     from .learned_axis_collision import compatible_policy_refresh
                     from .quiet_pair_profile import compatible_policy_refresh as compatible_quiet
+                    from .spawn_phase_head import compatible_policy_refresh as compatible_spawn_phase
                     if compatible_policy_refresh(self.world.config,model,header):
                         proof=header['local_axis_head_migration']
                         key='world_player_motion_migration'
                     elif compatible_quiet(self.world.config,model,header):
                         proof=header['quiet_pair_migration']
                         key='world_quiet_motion_migration'
+                    elif compatible_spawn_phase(self.world.config,model,header):
+                        proof=header['vjepa_spawn_phase_migration']
+                        key='world_spawn_phase_migration'
                     else:
                         raise ValueError('Refreshed world architecture changed; explicit policy migration required')
                 self.state[key]=dict(protocol=proof['protocol'],from_config_sha256=self.world_config_sha,

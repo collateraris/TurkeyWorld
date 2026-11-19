@@ -12,6 +12,20 @@ The current research target is an autonomous **180-transition rollout:6 seconds 
 
 ## Neural gameplay videos
 
+### V-JEPA step 2625 on a GeForce RTX 4090
+
+[![Original and neural gameplay with a live neural frame-rate counter](docs/videos/turkeyworld-12-scenes-vjepa2625/poster.jpg)](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4)
+
+[Watch the 72-second reel](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4) · [English social post](docs/videos/turkeyworld-12-scenes-vjepa2625/post-en.md) · [Scene measurements](docs/videos/turkeyworld-12-scenes-vjepa2625/manifest.json)
+
+The reel opens with four fights (0:00), followed by four enemy pursuits without gunfire (0:24) and four navigation runs without an enemy (0:48). Each scene lasts six seconds. The original game is on the left. On the right, the 300.1M-parameter V-JEPA dynamics model rolls forward from the same start and controls, using its own predictions after initialization.
+
+The FPS counter above the right panel measures neural frame computation on the RTX 4090 during training. It includes the world update, rendering, upscaling and frame readback, averaged over the last 30 frames. The video plays at 30 frames per second.
+
+**Six combat starts.** Each clip shows the first enemy, its death, and its respawn on both sides. [Watch all six fights in 36 seconds](docs/videos/combat-six-starts-vjepa2625/combat-six-starts.mp4) · [Respawn ticks and measurements](docs/videos/combat-six-starts-vjepa2625/manifest.json)
+
+### Earlier navigation and pursuit recordings
+
 The original game runs on the left and V-JEPA 2-AC at step 2507 with 4× upscaling runs on the right. Each video shows six six-second runs from different starts. Both games receive the same controls.
 
 | Navigation without an enemy | Enemy pursuit without combat |
@@ -21,7 +35,7 @@ The original game runs on the left and V-JEPA 2-AC at step 2507 with 4× upscali
 
 ## Current experiment: V-JEPA with SR observations
 
-The independent `vjepa_sr_cycle_20261117` branch restores V-JEPA2-AC and trains pooled12-token memory with soft Base → SR128 → RGB32 feedback. Base/SR remain frozen; Source future frames are labels only. Unlimited rounds:100 H180 dynamics updates →50 actor/critic updates →64+64 real Source episodes of360 steps →repeat until user stop. No game window launches automatically.
+The current V-JEPA 2-AC world model predicts 180 steps using its own state and frozen Base/SR image feedback. Each optimizer update includes six navigation windows without an enemy, five with a pursuing enemy and five with combat. Each round collects 64 new combat episodes and runs 100 dynamics updates, combat validation, then the existing actor–critic and Source collection phases. The learning rate is `1e-5`. The cycle repeats until stopped.
 
 [Live dynamics, previews and drift map](http://127.0.0.1:8792/). NAV/enemy map selectors expose181 states and the same four moments as the image. [Protocol, limitations and commands (RU)](docs/VJEPA_SR_DYNAMICS_RU.md). At step 2506, mean drift after 180 steps across 24 fresh noncombat chases was 0.0000084 tiles for the player and 0.00319 for the enemy. Evaluation covers one map. [Results and limitations (RU)](training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics/quiet_pair_20261118T125552Z/refined/REPORT_RU.md).
 

@@ -18,7 +18,7 @@ import time
 
 import torch
 
-from .neural_play import NeuralRuntime, _arguments as runtime_arguments
+from .neural_play import NeuralFrameRate, NeuralRuntime, _arguments as runtime_arguments
 from .training_pipeline import atomic_json
 
 
@@ -129,6 +129,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
     small = _font(pygame, max(14, min(20, layout['panel']//38)))
     color, muted, orange = (235, 239, 243), (163, 180, 187), (255, 198, 115)
     clock = pygame.time.Clock()
+    neural_rate = NeuralFrameRate(pygame)
     frames = (_surface(pygame, pair.source_frame, layout['panel']),
               _surface(pygame, pair.neural_frame, layout['panel']))
     paused, trial_complete, running = True, False, True
@@ -206,10 +207,12 @@ def interactive(pair, gui, args, pygame, screen, layout):
                         status('complete_paused' if trial_complete else 'paused' if paused else 'running', force=True)
             if not running or args.seconds and time.perf_counter()-started >= args.seconds:
                 break
+            new_frame = False
             if not paused and time.perf_counter() >= next_update:
                 update_started = time.perf_counter()
                 action = keyboard_action(pygame, pygame.key.get_pressed(), physical_keys)
                 source_rgb, neural_rgb = pair.step(action)
+                new_frame = True
                 frames = (_surface(pygame, source_rgb, layout['panel']),
                           _surface(pygame, neural_rgb, layout['panel']))
                 # Never accumulate backlog or run a second Source tick alone.
@@ -235,11 +238,14 @@ def interactive(pair, gui, args, pygame, screen, layout):
             screen.blit(small.render(mode_label, True, orange), (layout['right'][0], 63))
             screen.blit(frames[0], layout['left'])
             screen.blit(frames[1], layout['right'])
+            fps_label = neural_rate.label(new_frame, paused)
+            screen.blit(small.render(fps_label, True, color, (13, 19, 24)),
+                        (layout['right'][0]+5, layout['right'][1]+5))
             y = layout['header']+layout['panel']+10
             screen.blit(small.render(f'{state_label} | шаг {steps}/{args.steps} | симуляция {steps*pair.neural.simulation_dt:.2f} с | XY-разница {drift_text} клетки', True, orange), (12, y))
             screen.blit(small.render('W/S, ↑/↓ — ходьба · A/D — стрейф · Q/E, ←/→ — поворот · SPACE/ЛКМ — выстрел', True, color), (12, y+30))
             screen.blit(small.render('T — бой / навигация · ENTER — старт · P — пауза · R — заново · TAB — камера · ESC — выход', True, muted), (12, y+58))
-            pygame.display.set_caption(f'TurkeyWorld COMPARE | Source LEFT / Neural RIGHT | {metrics.get("environment", "navigation")} | {metrics.get("mode", "autonomous")} | updates {steps}/{args.steps} | '+('PAUSED' if paused else 'RUNNING'))
+            pygame.display.set_caption(f'TurkeyWorld COMPARE | Source LEFT / Neural RIGHT | {metrics.get("environment", "navigation")} | {metrics.get("mode", "autonomous")} | updates {steps}/{args.steps} | display {clock.get_fps():.0f} FPS | '+('PAUSED' if paused else 'RUNNING'))
             pygame.display.flip()
             if displayed == 0:
                 pygame.image.save(screen, str(gui.session_dir/'window_ready.png'))

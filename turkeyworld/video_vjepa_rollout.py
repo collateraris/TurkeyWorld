@@ -12,6 +12,7 @@ from .record_paired_cuts import action_at, scene_factory
 from .record_quiet_chase import tracking_action
 from .rssm_combat_protocol import environment_profile
 from .small_enemy_data import digest
+from .sprite_scene import base_scene_state, set_sprite_scene
 from .vjepa_policy_world import VJEPAImaginationAdapter
 from .vjepa_sr_feedback import feedback_active, blend_memory
 from .workspace_paths import resolve_path
@@ -87,9 +88,9 @@ def paired_rollout(adapter, scenes, chase, *, action_tapes=None):
             adapter._bind_map_context(cur)
             result = w.transition(cur.state, control, cur.map_features, cur.memory)
             state = result['state']
-            base = renderer.base(state, grid, navigation_only=not chase)
-            sr.enemies_enabled = chase
-            sr.predicted_sprite_state = state.detach()
+            background = base_scene_state(state, sr, navigation_only=not chase)
+            base = renderer.base(background, grid, navigation_only=not chase)
+            set_sprite_scene(sr, state, grid, navigation_only=not chase)
             rendered = sr.forward_with_aux(base)
             image = rendered['image']
             alpha = rendered['sprite_alpha']

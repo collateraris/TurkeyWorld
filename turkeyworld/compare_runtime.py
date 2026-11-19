@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from .engine import Game, STATE_DIM, GLOBAL_DIM, ENTITY_DIM, ENTITY_SLOTS
+from .sprite_scene import uses_source_sprites
 
 
 def render_neural_pose(neural, state):
@@ -17,7 +18,10 @@ def render_neural_pose(neural, state):
     with torch.inference_mode():
         features = neural.model.vjepa_backend.latent_features(neural.memory)
         rgb = neural.model.render(state, features, neural.map_features)
-        output = neural._resize(rgb)
+        if uses_source_sprites(getattr(neural, 'sr', None)):
+            output = neural._resize(rgb, predicted_state=state)
+        else:
+            output = neural._resize(rgb)
         if not bool(torch.isfinite(output).all()):
             raise FloatingPointError('Nonfinite paired neural display image')
         return output[0].clamp(0, 1).mul(255).round().byte().permute(1, 2, 0).contiguous().cpu().numpy()

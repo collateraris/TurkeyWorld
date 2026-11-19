@@ -335,6 +335,9 @@ class VJEPA2ACWorldBackend(nn.Module):
                     self.spatial_spawn_anchor_head = nn.Linear(spawn_rank, 9)
                     nn.init.zeros_(self.spatial_spawn_anchor_head.weight)
                     nn.init.zeros_(self.spatial_spawn_anchor_head.bias)
+        if getattr(config, 'vjepa_spawn_phase_head', False):
+            from .spawn_phase_head import SpawnPhaseHead
+            self.spawn_phase_head = SpawnPhaseHead()
         # Append only: every legacy parameter name/order and RNG draw above
         # stays unchanged. Zero final logits are an untrained half-pass prior.
         if getattr(config, 'player_motion_mode', 'delta') == 'axis_fraction':
@@ -478,7 +481,9 @@ class VJEPA2ACWorldBackend(nn.Module):
                 anchor_residual=anchor_residual+extra['anchor_residual'].to(anchor_residual.dtype)
             result=hierarchical_spawn_logits(logits, anchor_residual, state,
                 self.renderer._spawn_walkable if walkable is None else walkable,
-                1/self.config.simulation_hz)
+                1/self.config.simulation_hz,
+                category_logits=(self.spawn_phase_head(state, dt=1/self.config.simulation_hz)
+                                 if getattr(self.config, 'vjepa_spawn_phase_head', False) else None))
             if extra is not None:result['spawn_conditioning']=extra
             return result
         return {'spawn_logits': logits}
@@ -545,11 +550,16 @@ class VJEPA2ACWorldBackend(nn.Module):
             dt=1/self.config.simulation_hz
             eligible=quiet_mask(state,action,dt)
             grid=~self.renderer._spawn_walkable
+            player_active = eligible
+            if getattr(self.config, 'vjepa_spawn_phase_head', False):
+                # While awaiting respawn the player can still move and collide with walls.
+                # The pursuit head applies only to live, quiet enemies.
+                awaiting_respawn = (state[:, 4] > 0) & (state[:, 13] < .5)
+                player_active = eligible | awaiting_respawn
+            if bool(player_active.any()):
+                learned = self.quiet_player_head(state, action, grid, dt=dt)['raw_player_delta']
+                player_delta = torch.where(player_active[:, None], learned, player_delta)
             if bool(eligible.any()):
-                # These are own states and the immutable map of this stream;
-                # the NPC goal is computed after the player's predicted movement.
-                learned=self.quiet_player_head(state,action,grid,dt=dt)['raw_player_delta']
-                player_delta=torch.where(eligible[:,None],learned,player_delta)
                 quiet_npc=self.quiet_pursuit_head(state,state[:,:2]+player_delta,grid)
                 if quiet_npc.shape!=(batch,2):raise ValueError('Invalid quiet NPC displacement')
                 npc_delta=torch.where(eligible[:,None,None],quiet_npc[:,None,:],npc_delta)

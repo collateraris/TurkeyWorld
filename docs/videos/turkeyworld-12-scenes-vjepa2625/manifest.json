@@ -1,0 +1,380 @@
+{
+  "world_step": 2625,
+  "base_step": 32909,
+  "autonomous": true,
+  "shared_actions": true,
+  "source_future_feedback": false,
+  "simulation_hz": 30,
+  "video_fps": 30,
+  "source_size": 128,
+  "sr_size": 128,
+  "combined": "turkeyworld-12-scenes.mp4",
+  "combined_duration_seconds": 72,
+  "counter_window_frames": 30,
+  "neural_fps_definition": "Reciprocal of trailing mean wall time of up to 30 completed neural steps, including generated visual feedback, Base, SR and RGB readback. Excludes Source, pacing and encoding. Timed on a GeForce RTX 4090 during training.",
+  "tick_convention": "One-based. Video frame zero corresponds to simulation tick one.",
+  "clips": [
+    {
+      "scene": 1,
+      "kind": "combat",
+      "starts_at_seconds": 0,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        2.5,
+        2.5
+      ],
+      "mean_neural_fps": 17.726,
+      "action_sha256": "ca8bd343263c288bb83197dc0557b6c666b991501edde45bad00296f623d1ad8",
+      "source": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 50,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 50,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "scene": 2,
+      "kind": "combat",
+      "starts_at_seconds": 6,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        8.5
+      ],
+      "mean_neural_fps": 17.051,
+      "action_sha256": "b215d1bdc156a6c2e6679b1065a7abc25652b9e4007f0738ac85fe2fdc5d7f3a",
+      "source": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "first_life_visible_frames": 31,
+        "second_life_visible_frames": 48,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          2.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "first_life_visible_frames": 31,
+        "second_life_visible_frames": 48,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "scene": 3,
+      "kind": "combat",
+      "starts_at_seconds": 12,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        13.5
+      ],
+      "mean_neural_fps": 16.928,
+      "action_sha256": "185bd06ab09fc07e90284720b4355e3dff69743b56599cff34357f79c2f33b63",
+      "source": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "first_life_visible_frames": 34,
+        "second_life_visible_frames": 47,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          8.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "first_life_visible_frames": 34,
+        "second_life_visible_frames": 47,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          8.5
+        ]
+      }
+    },
+    {
+      "scene": 4,
+      "kind": "combat",
+      "starts_at_seconds": 18,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.649999976158142,
+        14.300000190734863
+      ],
+      "mean_neural_fps": 17.443,
+      "action_sha256": "323727ee01bbf441bd137ebddf627a7e8156efa6af585a957a7df51303b94ded",
+      "source": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "first_life_visible_frames": 37,
+        "second_life_visible_frames": 38,
+        "shots": 4,
+        "respawn_xy": [
+          6.5,
+          13.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "first_life_visible_frames": 37,
+        "second_life_visible_frames": 38,
+        "shots": 4,
+        "respawn_xy": [
+          6.5,
+          13.5
+        ]
+      }
+    },
+    {
+      "scene": 5,
+      "kind": "pursuit",
+      "starts_at_seconds": 24,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.5,
+        9.5
+      ],
+      "mean_neural_fps": 17.182,
+      "action_sha256": "41cc1b4ef374747ce6609ab76c35e7b3d2651ad8882bede3c6be0bd8cc9009da",
+      "source": {
+        "player_travel": 5.5765228271484375,
+        "enemy_travel": 4.199999809265137,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 5.576521396636963,
+        "enemy_travel": 4.200037479400635,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 6,
+      "kind": "pursuit",
+      "starts_at_seconds": 30,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        9.5,
+        2.5
+      ],
+      "mean_neural_fps": 17.786,
+      "action_sha256": "e9c11ca8a9a513a139038fbe6501268ea22f72442d4fce95b15bd80e1acf7489",
+      "source": {
+        "player_travel": 5.17431640625,
+        "enemy_travel": 4.199999809265137,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 5.174313545227051,
+        "enemy_travel": 4.200000762939453,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 7,
+      "kind": "pursuit",
+      "starts_at_seconds": 36,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        6.5,
+        1.5
+      ],
+      "mean_neural_fps": 17.416,
+      "action_sha256": "fec78a9ffb49c4299af2bd8d85eae273f3ea5c43ac00119cd946662bd795eb66",
+      "source": {
+        "player_travel": 5.142259120941162,
+        "enemy_travel": 4.199999809265137,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 5.1422624588012695,
+        "enemy_travel": 4.199981689453125,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 8,
+      "kind": "pursuit",
+      "starts_at_seconds": 42,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        6.5
+      ],
+      "mean_neural_fps": 16.835,
+      "action_sha256": "99f83c912af179318e1d748cbb7b12c8b212a149e7feea0d3b5af4b08400f549",
+      "source": {
+        "player_travel": 5.395211219787598,
+        "enemy_travel": 4.200000762939453,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 5.395205020904541,
+        "enemy_travel": 4.1999897956848145,
+        "enemy_toward_player_frames": 180,
+        "enemy_alive_frames": 180,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 9,
+      "kind": "navigation",
+      "starts_at_seconds": 48,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        2.5
+      ],
+      "mean_neural_fps": 19.212,
+      "action_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source": {
+        "player_travel": 3.840000629425049,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 3.840010643005371,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 10,
+      "kind": "navigation",
+      "starts_at_seconds": 54,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        13.5
+      ],
+      "mean_neural_fps": 18.346,
+      "action_sha256": "05da1535f97c90d25500d6ea509ef7fb70cd274cbd66c753e9764aaa01930bb6",
+      "source": {
+        "player_travel": 4.1999993324279785,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 4.200016975402832,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 11,
+      "kind": "navigation",
+      "starts_at_seconds": 60,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        8.5,
+        1.5
+      ],
+      "mean_neural_fps": 19.309,
+      "action_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source": {
+        "player_travel": 4.679999351501465,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 4.679993629455566,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      }
+    },
+    {
+      "scene": 12,
+      "kind": "navigation",
+      "starts_at_seconds": 66,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.5,
+        2.5
+      ],
+      "mean_neural_fps": 18.88,
+      "action_sha256": "901e0af438d7c7f836d693bd166b3a83f4c2ac7a96ae80963347f67222b1222f",
+      "source": {
+        "player_travel": 4.579196453094482,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      },
+      "neural": {
+        "player_travel": 3.0886309146881104,
+        "enemy_travel": 0.0,
+        "enemy_toward_player_frames": 0,
+        "enemy_alive_frames": 0,
+        "constant_hp": true
+      }
+    }
+  ],
+  "parameters": {
+    "vjepa_dynamics_including_map_encoder": 300057860,
+    "active_base32_renderer_including_map_and_geometry": 4193085,
+    "rrdb_material_sr128": 2982920
+  },
+  "sr_step": 7187
+}

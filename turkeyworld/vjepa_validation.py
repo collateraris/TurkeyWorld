@@ -139,6 +139,7 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                 memory = model.initialize_from_image(context_rgb, context_states, map_features)
                 state = context_states[:, -1].clone()
                 generated = []
+                preview_states = []
                 invalid = not bool(torch.isfinite(memory).all())
                 for offset in range(horizon):
                     if not invalid:
@@ -152,6 +153,8 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                     if image.shape != source[:, offset].shape:
                         raise ValueError("Generated/source RGB dimensions differ")
                     generated.append(image)
+                    if preview is None:
+                        preview_states.append(state[0].detach().cpu())
                     measured = image_quality_metrics(image, source[:, offset])
                     values = {name: value.detach().cpu().tolist() for name, value in measured.items()}
                     for row, (episode_index, start) in enumerate(chosen):
@@ -172,6 +175,9 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
                     preview = {"context": _uint8(context_rgb[0]), "source": _uint8(source[0]),
                                "generated": _uint8(future),
                                "generated_float": future.detach().float().cpu(),
+                               "sr_predicted_states": torch.stack(preview_states),
+                               "sr_map": grid[:1].detach().cpu(),
+                               "sr_enemies_enabled": not getattr(model.config, 'navigation_only', False),
                                "metadata": {"step": int(step), "every": int(preview_every),
                                             "context": context, "horizon": horizon,
                                             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -207,7 +213,7 @@ def evaluate_autoregressive(model, data, panel=None, *, count=64, context=2, hor
     return report, preview
 
 
-def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model=None, sr_metadata=None):
+def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model=None, sr_metadata=None, sr_base_model=None):
     """Save three legacy rows, or five rows with prediction-only SR and bilinear."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,16 +255,31 @@ def save_autoregressive_preview(preview, path, *, step=None, every=500, sr_model
                 states=preview.get('sr_predicted_states')
                 if not torch.is_tensor(states) or states.shape!=(len(generated),20) or not bool(torch.isfinite(states).all()):
                     raise ValueError('Patrol preview needs matching own predicted animation states')
-                old_context=(sr_model.enemies_enabled,sr_model.predicted_sprite_state)
-                sr_model.enemies_enabled=bool(preview['sr_enemies_enabled'])
-                sr_model.predicted_sprite_state=states[:4].to(device=device).float().detach()
-                metadata.update(sr_sprite_frames=[0,1,2],sr_combat_animation_sprites=False,
+                from .sprite_scene import base_scene_state, set_sprite_scene, uses_source_sprites
+                navigation = not bool(preview['sr_enemies_enabled'])
+                old_context = (sr_model.enemies_enabled, sr_model.predicted_sprite_state,
+                               getattr(sr_model, 'predicted_sprite_map', None))
+                states = states[:4].to(device=device, dtype=torch.float32)
+                grid = preview.get('sr_map')
+                if grid is not None:
+                    grid = grid.to(device=device, dtype=torch.long).expand(len(states), -1, -1)
+                if uses_source_sprites(sr_model) and not navigation:
+                    if sr_base_model is None or grid is None:
+                        raise ValueError('Full-atlas SR preview requires the Base model and initial scene grid')
+                    background = base_scene_state(states, sr_model, navigation_only=False)
+                    fmap = sr_base_model.encode_map(grid)
+                    generated = sr_base_model.render_base(background, states.new_zeros(len(states), 128), fmap)
+                set_sprite_scene(sr_model, states, grid, navigation_only=navigation)
+                full_atlas = uses_source_sprites(sr_model)
+                metadata.update(sr_sprite_frames=list(range(7 if full_atlas else 3)),sr_combat_animation_sprites=full_atlas,
                     sr_navigation_sprites=False,sr_animation_veto_source='own_predicted_state')
             try:
                 sr = sr_model(generated[:4].to(device=device, dtype=dtype)).float()
             finally:
                 if old_context is not None:
-                    sr_model.enemies_enabled,sr_model.predicted_sprite_state=old_context
+                    sr_model.enemies_enabled, sr_model.predicted_sprite_state = old_context[:2]
+                    if uses_source_sprites(sr_model):
+                        sr_model.predicted_sprite_map = old_context[2]
             middle, final = native[0]*4, native[0]*16
             if tuple(sr.shape[1:]) != (3, middle, middle) or not bool(torch.isfinite(sr).all()):
                 raise ValueError("Preview SR must produce finite RGB at exactly x4 native size")

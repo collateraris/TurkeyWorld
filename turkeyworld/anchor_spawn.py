@@ -31,7 +31,7 @@ def anchor_target_labels(positions):
     return torch.where(matches.any(-1), matches.long().argmax(-1), torch.full_like(ids, 8))
 
 
-def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, dt):
+def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, dt, *, category_logits=None):
     """Return finite effective256 logits plus raw9 and raw fallback logits.
 
     The nine-way head adds to the old anchor scores and old legal fallback
@@ -93,6 +93,13 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
         fallback_mass = fallback_scores.logsumexp(-1)
         fallback_mass = torch.where(has_fallback, fallback_mass, fallback_mass.new_full((), negative))
         coarse = torch.cat([raw[:, slot, indices], fallback_mass[:, None]], -1)+residual[:, slot]
+        fallback_offset = residual[:, slot, 8:9]
+        if category_logits is not None:
+            if category_logits.shape != (batch, ENTITY_SLOTS, 9):
+                raise ValueError('Spawn category logits must be [batch, slots, 9]')
+            coarse = category_logits[:, slot].to(dtype)
+            # Keep the parent's conditional ranking within legal non-anchor cells.
+            fallback_offset = coarse[:, 8:9] - fallback_mass[:, None]
         allowed_categories = torch.cat([allowed[:, indices], has_fallback[:, None]], -1)
         usable = ready[:, slot] & allowed.any(-1)
         safe_categories = allowed_categories.clone()
@@ -101,7 +108,7 @@ def hierarchical_spawn_logits(tile_logits, anchor_residual, previous, walkable, 
         # Algebraically cancel fallback log-mass against its conditional
         # normalization. Besides saving work, this preserves old exact ties
         # when the new residual is zero instead of introducing roundoff bias.
-        scores = raw[:, slot]+residual[:, slot, 8:9]-normalizer
+        scores = raw[:, slot]+fallback_offset-normalizer
         scores = scores.masked_fill(~fallback, negative)
         # Direct assignment replaces fallback values only at the eight anchors.
         scores = scores.scatter(1, indices[None].expand(batch, -1),

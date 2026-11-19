@@ -23,6 +23,7 @@ import torch
 from torch.nn import functional as F
 
 from .engine import Game
+from .sprite_scene import base_scene_state, set_sprite_scene, uses_source_sprites
 from .models import (ENTITY_DIM, ENTITY_SLOTS, GLOBAL_DIM, STATE_DIM,
                      load_sr_checkpoint, load_world_checkpoint, parameter_counts)
 
@@ -44,6 +45,9 @@ def _arguments(argv=None):
     p.add_argument("--allow-unqualified-codec", action='store_true',
                    help="Explicit experimental preview of an unqualified compact codec; preserves failed validation metadata.")
     p.add_argument("--sr", type=Path, help="Optional trained x4 SR checkpoint; otherwise use classical resize.")
+    p.add_argument("--display-base-renderer", type=Path,
+                   help="Use this compact Base bundle for the displayed V-JEPA RGB32 frame, before --sr. "
+                        "The checkpoint's frozen V-JEPA observations still initialize and update memory.")
     p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     p.add_argument("--fp16", action="store_true", help="Half precision; supported here only on CUDA.")
     p.add_argument("--headless", action="store_true", help="Run a reproducible input sequence without a window or real-time pacing.")
@@ -92,6 +96,8 @@ def _arguments(argv=None):
         p.error(f"world checkpoint not found: {a.world}; train a checkpoint first")
     if a.renderer_checkpoint is not None and not a.renderer_checkpoint.is_file():
         p.error(f"renderer bundle not found: {a.renderer_checkpoint}")
+    if a.display_base_renderer is not None and not a.display_base_renderer.is_file():
+        p.error(f"display Base renderer bundle not found: {a.display_base_renderer}")
     if a.allow_unqualified_codec and a.renderer_checkpoint is None:
         p.error('--allow-unqualified-codec requires --renderer-checkpoint')
     if a.base_checkpoint is not None and not a.base_checkpoint.is_file():
@@ -219,16 +225,42 @@ class NeuralRuntime:
             raise ValueError(f"initial state must have {STATE_DIM} values")
         self.initial_state = torch.as_tensor(initial_state, device=self.device, dtype=self.state_dtype)[None]
         grid = torch.as_tensor(initial_map, device=self.device, dtype=torch.long)[None]
+        self.scene_grid = grid
         self.feedback_settings=self.world_metadata.get('vjepa_sr_feedback')
         self.feedback_renderer=None
+        display_bundle = getattr(args, 'display_base_renderer', None)
+        self.display_renderer_metadata = None
+        if display_bundle is not None and not self.feedback_settings:
+            raise ValueError('--display-base-renderer requires a V-JEPA world with frozen SR feedback')
         if self.feedback_settings:
-            from .vjepa_sr_feedback import FrozenBaseSR
+            from .vjepa_sr_feedback import FrozenBaseRenderer, FrozenBaseSR
             self.feedback_renderer=FrozenBaseSR(self.feedback_settings,self.device)
             self.feedback_grid=grid
-            self.model.render=lambda state,features,map_features:self.feedback_renderer.base(state,self.feedback_grid,navigation_only=self.model.config.navigation_only)
+            display = self.feedback_renderer
+            if display_bundle is not None:
+                display = FrozenBaseRenderer(self.feedback_settings['world'], display_bundle, self.device)
+                self.display_renderer_metadata = {
+                    'checkpoint': str(display_bundle),
+                    'base_training_steps': display.model.base_student_metadata['training_steps'],
+                }
+
+            def display_rgb(state, features, map_features):
+                frame = display.base(state, self.feedback_grid, navigation_only=self.model.config.navigation_only)
+                return frame.to(self.dtype) if display_bundle is not None and self.sr is not None else frame
+
+            self.model.render = display_rgb
             # No legacy image decoder is used by the feedback world.
             from torch import nn
             self.model.flow_renderer=nn.Module();self.model.flow_renderer.kind='base_only';self.model.flow_renderer.steps=0
+
+        if uses_source_sprites(self.sr):
+            render = self.model.render
+
+            def render_background(state, features, map_features):
+                background = base_scene_state(state, self.sr, navigation_only=self.model.config.navigation_only)
+                return render(background, features, map_features)
+
+            self.model.render = render_background
 
         with torch.inference_mode():
             self.map_features = self.model.encode_map(grid)
@@ -306,11 +338,15 @@ class NeuralRuntime:
                                           else 'none_independent_RGB' if visual_first else 'none_RGB_only_fallback')
         def learned_sr(image):
             if getattr(self.sr,'config',{}).get('architecture') in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr'):
-                self.sr.enemies_enabled = not bool(getattr(self.model.config,'navigation_only',False))
-                self.sr.predicted_sprite_state = predicted_state.detach() if predicted_state is not None else None
+                navigation = bool(getattr(self.model.config, 'navigation_only', False))
+                set_sprite_scene(self.sr, predicted_state, getattr(self, 'scene_grid', None), navigation_only=navigation)
             return self.sr(image, hypothesis=hypothesis) if guided else self.sr(image)
         def sr_stage(values):
-            if getattr(self.sr,'config',{}).get('architecture') in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr'):
+            if uses_source_sprites(self.sr):
+                values.update(fixed_atlas_enemy=True, sprite_frames=list(range(7)), combat_animation_sprites=True,
+                              navigation_sprites=False, sprite_pose_source='current_predicted_state',
+                              occlusion_source='initial_map', Source_hint=False)
+            elif getattr(self.sr,'config',{}).get('architecture') in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr'):
                 values.update(fixed_atlas_enemy=True,sprite_frames=[0,1,2],
                     combat_animation_sprites=False,navigation_sprites=False,
                     sprite_veto_from_current_predicted_state=True,Source_hint=False)
@@ -479,10 +515,17 @@ class NeuralRuntime:
             "gameplay_correctness_evaluated": False,
             "note": "Predicted state and events are model outputs, not verified game facts. Timing applies only to the device reported above; no RTX 4090 result is implied.",
         }
-        if getattr(self.sr,'config',{}).get('architecture') in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr'):
+        if uses_source_sprites(self.sr):
+            report['sr_sprite_policy'] = dict(sprite_frames=list(range(7)), combat_animation_sprites=True,
+                navigation_sprites=False, enemies_enabled=self.sr.enemies_enabled,
+                sprite_pose_source='current_predicted_state', occlusion_source='initial_map', Source_hint=False)
+        elif getattr(self.sr,'config',{}).get('architecture') in ('patrol_sprite_detail_sr','rrdb_material_sprite_sr'):
             report['sr_sprite_policy'] = dict(sprite_frames=[0,1,2],combat_animation_sprites=False,
                 navigation_sprites=False,enemies_enabled=self.sr.enemies_enabled,
                 animation_veto='current_predicted_state',Source_hint=False)
+        if getattr(self, 'display_renderer_metadata', None) is not None:
+            report['display_base_renderer'] = self.display_renderer_metadata
+            report['renderer_solver'] = 'base_only'
         if self._enemy_decoder_sr():
             report['sr_enemy_decoder'] = dict(architecture=self.sr.config['architecture'],
                 hypothesis_source=getattr(self, '_sr_hypothesis_source', 'not_run'),
@@ -548,6 +591,24 @@ def _draw_hud(screen, vector, font, *, endless):
         screen.blit(message, box)
 
 
+class NeuralFrameRate:
+    """Measure new neural frames presented per wall second, including pacing and GUI work."""
+    def __init__(self, pygame):
+        self.pygame = pygame
+        self.clock = None
+
+    def label(self, new_frame, paused=False):
+        if paused:
+            self.clock = None
+            return "Neural FPS 0"
+        if new_frame:
+            if self.clock is None:
+                self.clock = self.pygame.time.Clock()
+            self.clock.tick()
+        fps = self.clock.get_fps() if self.clock is not None else 0
+        return f"Neural FPS {fps:.0f}" if fps else "Neural FPS ..."
+
+
 def _interactive(runtime, args):
     try:
         import pygame
@@ -562,6 +623,7 @@ def _interactive(runtime, args):
     renderer = runtime.model.config.renderer_mode.replace("_", " ").upper()
     gameplay = "ENDLESS" if runtime.model.config.endless else "CLASSIC"
     clock = pygame.time.Clock()
+    neural_rate = NeuralFrameRate(pygame)
     screen.fill((0, 0, 0))
     pygame.display.flip()
     print("W/S: move | A/D: strafe | arrows or Q/E: turn | SPACE/LMB: fire | ESC: quit")
@@ -604,15 +666,18 @@ def _interactive(runtime, args):
                     running = False
                     break
             max_backlog = max(max_backlog, accumulator)
+            fps_label = neural_rate.label(caught_up > 0)
             if cached_surface is not None:
                 screen.blit(cached_surface, (0, 0))
                 if show_hud:
                     vector = runtime.state[0].detach().float().cpu().numpy()
                     _draw_hud(screen, vector, font, endless=runtime.model.config.endless)
+                    screen.blit(font.render(fps_label, True, (235, 239, 243), (13, 19, 24)),
+                                (8, font.get_height()+14))
                 pygame.display.flip()
                 displayed += 1
             pygame.display.set_caption(
-                f"TurkeyWorld NEURAL | {kind} {renderer} | {gameplay} | updates {runtime.steps} | {runtime.simulation_hz:g} Hz target | display {clock.get_fps():.0f} FPS")
+                f"TurkeyWorld NEURAL | {kind} {renderer} | {gameplay} | updates {runtime.steps} | {runtime.simulation_hz:g} Hz target | {fps_label} | display {clock.get_fps():.0f} FPS")
             clock.tick(args.fps)
     finally:
         pygame.quit()

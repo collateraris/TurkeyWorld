@@ -632,6 +632,10 @@ def load_renderer_student(teacher, path, *, require_trained=True, allow_unqualif
     payload = torch.load(resolve_path(path), map_location='cpu', weights_only=False)
     if not isinstance(payload, dict):
         raise ValueError('Expected a standalone renderer bundle dictionary')
+    if payload.get('format_version') == 9:
+        from .combat_base_renderer import load_combat_renderer
+        return load_combat_renderer(teacher, payload, checkpoint=path, require_trained=require_trained,
+            allow_unqualified_codec=allow_unqualified_codec)
     if payload.get('format_version') == 8:
         from .decoder_rf_chain_bundle import load_decoder_rf_chain_payload
         return load_decoder_rf_chain_payload(teacher, payload, checkpoint=path,

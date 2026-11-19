@@ -111,17 +111,21 @@ class CompactBaseHead(nn.Module):
     def forward(self, state, features, geometry):
         # Base stays the original RGB condition; the residual never conditions Flow.
         queries = self._queries(state, features, geometry)
-        return self._pixels(self._rgb_logits(queries, state)).sigmoid()
+        logits = self._rgb_logits(queries, state, navigation_only=geometry.get('navigation_only', False))
+        return self._pixels(logits).sigmoid()
 
-    def _rgb_logits(self, queries, state):
+    def _rgb_logits(self, queries, state, *, navigation_only=False):
         logits = self.rgb(queries)
         if hasattr(self, 'output_moe'):
             logits = logits+self.output_moe(queries, state)
+        if not navigation_only and hasattr(self, 'combat_readout'):
+            logits = self.combat_readout(queries, state, self.screen_coordinates, logits)
         return logits
 
     def forward_with_residual(self, state, features, geometry):
         queries = self._queries(state, features, geometry)
-        base = self._pixels(self._rgb_logits(queries, state)).sigmoid()
+        logits = self._rgb_logits(queries, state, navigation_only=geometry.get('navigation_only', False))
+        base = self._pixels(logits).sigmoid()
         residual = (.5*self._pixels(self.pixel_residual(queries)).tanh()
                     if self.config.pixel_residual else None)
         return base, residual

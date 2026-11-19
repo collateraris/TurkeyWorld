@@ -119,6 +119,7 @@ class WorldModelConfig:
     rssm_five_role_enabled: bool = False
     rssm_five_expanded_enabled: bool = False
     rssm_spawn_conditioning_enabled: bool = False
+    vjepa_spawn_phase_head: bool = False
     combat_rssm_enabled: bool = False
     combat_rssm_deter_dim: int = 1344
     combat_rssm_hidden_dim: int = 1392
@@ -130,6 +131,9 @@ class WorldModelConfig:
     combat_rssm_unimix: float = .01
 
     def __post_init__(self):
+        if type(self.vjepa_spawn_phase_head) is not bool or (self.vjepa_spawn_phase_head and
+                (self.architecture != 'vjepa2_ac' or not self.endless or not self.spatial_combat or not self.game_training_v5)):
+            raise ValueError('The learned V-JEPA spawn phase head requires the endless hierarchical combat model')
         if (type(self.rssm_spawn_conditioning_enabled) is not bool or self.rssm_spawn_conditioning_enabled and
                 (self.architecture!='dreamer_rssm' or not self.endless or not self.spatial_entities
                  or not self.spatial_combat or not self.game_training_v5 or not self.enemy_rssm_enabled)):
@@ -572,6 +576,7 @@ class NeuralWorldModel(nn.Module):
     def render_base(self, state, features, map_features):
         if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'} and hasattr(self, 'base_student'):
             geometry = self.render_geometry(state, map_features)
+            geometry['navigation_only'] = self.config.navigation_only
             return self.base_student(state, features, geometry)
         if self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}:
             return self.vjepa_backend.render_with_aux(state, features, map_features)['rgb']
@@ -600,6 +605,7 @@ class NeuralWorldModel(nn.Module):
         if (self.config.architecture in {'vjepa2_ac', 'dreamer_rssm'}
                 and hasattr(self, 'base_student') and getattr(self.base_student.config, 'pixel_residual', False)):
             geometry = self.render_geometry(state, map_features)
+            geometry['navigation_only'] = self.config.navigation_only
             return self.base_student.forward_with_residual(state, features, geometry)
         return self.render_base(state, features, map_features), None
 

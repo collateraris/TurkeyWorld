@@ -1,5 +1,8 @@
 import unittest
+from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
+from unittest.mock import Mock, patch
 import torch
 from test_base_student import tiny_teacher,states
 from turkeyworld.models import NeuralWorldModel
@@ -40,3 +43,33 @@ class PooledFeedbackTests(unittest.TestCase):
         self.assertEqual(model.core.memory_tokens,full)
         self.assertFalse(model.config.vjepa_pooled_memory)
         for k,v in model.state_dict().items():self.assertTrue(torch.equal(v,before[k]),k)
+
+    def test_display_override_changes_pixels_and_preserves_feedback_memory(self):
+        from test_rssm_runtime import arguments
+        from turkeyworld.neural_play import NeuralRuntime
+
+        world = tiny_teacher()
+        metadata = {'vjepa_sr_feedback': {'world': 'reference-world', 'every': 1, 'blend': .1}}
+        static = torch.ones(1, 3, 32, 32)
+        frozen = Mock()
+        frozen.base.return_value = static * .2
+        frozen.observation.return_value = static * .4
+        selected = Mock()
+        selected.base.return_value = static * .8
+        selected.model.base_student_metadata = {'training_steps': 99}
+        with patch('turkeyworld.vjepa_sr_feedback.FrozenBaseSR', return_value=frozen), \
+                patch('turkeyworld.vjepa_sr_feedback.FrozenBaseRenderer', return_value=selected) as loader, \
+                patch('turkeyworld.neural_play.load_world_checkpoint', side_effect=lambda *a: (deepcopy(world), metadata)):
+            previous = NeuralRuntime(arguments())
+            loader.assert_not_called()
+            after = NeuralRuntime(arguments(display_base_renderer=Path('combat.pt')))
+            loader.assert_called_once_with('reference-world', Path('combat.pt'), torch.device('cpu'))
+            self.assertTrue(torch.equal(previous.initial_memory, after.initial_memory))
+            old_frame = previous.step([1, 0, 0, 0])
+            new_frame = after.step([1, 0, 0, 0])
+            self.assertTrue((old_frame == 51).all())
+            self.assertTrue((new_frame == 204).all())
+            self.assertTrue(torch.equal(previous.memory, after.memory))
+            self.assertTrue(torch.equal(previous.state, after.state))
+            self.assertEqual(frozen.observation.call_count, 4)
+            selected.observation.assert_not_called()

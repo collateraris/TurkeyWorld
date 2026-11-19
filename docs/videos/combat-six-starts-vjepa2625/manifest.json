@@ -1,0 +1,234 @@
+{
+  "world_step": 2625,
+  "base_step": 32909,
+  "autonomous": true,
+  "shared_actions": true,
+  "source_future_feedback": false,
+  "simulation_hz": 30,
+  "video_fps": 30,
+  "source_size": 128,
+  "sr_size": 128,
+  "combined": "combat-six-starts.mp4",
+  "combined_duration_seconds": 36,
+  "counter_window_frames": 30,
+  "neural_fps_definition": "Reciprocal of trailing mean wall time of up to 30 completed neural steps, including generated visual feedback, Base, SR and RGB readback. Excludes Source, pacing and encoding. Timed on a GeForce RTX 4090 during training.",
+  "tick_convention": "One-based. Video frame zero corresponds to simulation tick one.",
+  "clips": [
+    {
+      "scene": 1,
+      "kind": "combat",
+      "starts_at_seconds": 0,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        2.5,
+        2.5
+      ],
+      "mean_neural_fps": 17.726,
+      "action_sha256": "ca8bd343263c288bb83197dc0557b6c666b991501edde45bad00296f623d1ad8",
+      "source": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 50,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 50,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "scene": 2,
+      "kind": "combat",
+      "starts_at_seconds": 6,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        2.5
+      ],
+      "mean_neural_fps": 16.876,
+      "action_sha256": "f8a85f3aec1739a2c50c7c747fc342611978aaaeedfbdffcf11e209bcd93ca4b",
+      "source": {
+        "kill_tick": 29,
+        "respawn_tick": 119,
+        "first_life_visible_frames": 28,
+        "second_life_visible_frames": 49,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 29,
+        "respawn_tick": 119,
+        "first_life_visible_frames": 28,
+        "second_life_visible_frames": 49,
+        "shots": 4,
+        "respawn_xy": [
+          8.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "scene": 3,
+      "kind": "combat",
+      "starts_at_seconds": 12,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        8.5
+      ],
+      "mean_neural_fps": 17.051,
+      "action_sha256": "b215d1bdc156a6c2e6679b1065a7abc25652b9e4007f0738ac85fe2fdc5d7f3a",
+      "source": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "first_life_visible_frames": 31,
+        "second_life_visible_frames": 48,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          2.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "first_life_visible_frames": 31,
+        "second_life_visible_frames": 48,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          2.5
+        ]
+      }
+    },
+    {
+      "scene": 4,
+      "kind": "combat",
+      "starts_at_seconds": 18,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        13.5
+      ],
+      "mean_neural_fps": 16.928,
+      "action_sha256": "185bd06ab09fc07e90284720b4355e3dff69743b56599cff34357f79c2f33b63",
+      "source": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "first_life_visible_frames": 34,
+        "second_life_visible_frames": 47,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          8.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "first_life_visible_frames": 34,
+        "second_life_visible_frames": 47,
+        "shots": 4,
+        "respawn_xy": [
+          13.5,
+          8.5
+        ]
+      }
+    },
+    {
+      "scene": 5,
+      "kind": "combat",
+      "starts_at_seconds": 24,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.649999976158142,
+        14.300000190734863
+      ],
+      "mean_neural_fps": 17.443,
+      "action_sha256": "323727ee01bbf441bd137ebddf627a7e8156efa6af585a957a7df51303b94ded",
+      "source": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "first_life_visible_frames": 37,
+        "second_life_visible_frames": 38,
+        "shots": 4,
+        "respawn_xy": [
+          6.5,
+          13.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "first_life_visible_frames": 37,
+        "second_life_visible_frames": 38,
+        "shots": 4,
+        "respawn_xy": [
+          6.5,
+          13.5
+        ]
+      }
+    },
+    {
+      "scene": 6,
+      "kind": "combat",
+      "starts_at_seconds": 30,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        8.5,
+        9.5
+      ],
+      "mean_neural_fps": 16.781,
+      "action_sha256": "e4e376276f636a35e87fa0e8c268cd6a47ea040dbb19f1349e8e50ea9314c6ff",
+      "source": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 52,
+        "shots": 4,
+        "respawn_xy": [
+          2.5,
+          8.5
+        ]
+      },
+      "neural": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "first_life_visible_frames": 25,
+        "second_life_visible_frames": 52,
+        "shots": 4,
+        "respawn_xy": [
+          2.5,
+          8.5
+        ]
+      }
+    }
+  ],
+  "sr_step": 7187,
+  "parameters": {
+    "vjepa_dynamics_including_map_encoder": 300057860,
+    "active_base32_renderer_including_map_and_geometry": 4193085,
+    "rrdb_material_sr128": 2982920
+  }
+}

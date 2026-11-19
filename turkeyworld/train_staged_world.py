@@ -210,7 +210,7 @@ class StagedWorldExperiment(VJEPAExperiment):
         if getattr(self, 'components', None):
             contact['metadata']['component_phase'] = self.components.name
         self.state['prediction_preview'] = save_autoregressive_preview(contact, self.root/'preview.png',
-            step=self.global_step, every=10, **self._prediction_sr_options(contact))
+            step=self.global_step, every=10, sr_base_model=model, **self._prediction_sr_options(contact))
         self.state['prediction_progress'] = {'status': 'complete', 'step': self.global_step}
         self.publish_curriculum()
         model.train()

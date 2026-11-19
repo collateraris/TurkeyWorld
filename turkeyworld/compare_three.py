@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from .neural_play import NeuralRuntime,_arguments
+from .neural_play import NeuralFrameRate,NeuralRuntime,_arguments
 from .compare_runtime import PairedRuntime
 from .compare_play import keyboard_action,shortcut_key,_surface,_font,_work_area
 from .training_pipeline import atomic_json,now
@@ -62,7 +62,7 @@ def main():
     if a.headless:
         for _ in range(a.steps):advance([.7,.2,.1,0.])
         complete=True;status();return
-    font=_font(pygame,22);small=_font(pygame,17);clock=pygame.time.Clock();status()
+    font=_font(pygame,22);small=_font(pygame,17);clock=pygame.time.Clock();neural_rate=NeuralFrameRate(pygame);status()
     try:
         while running:
             for event in pygame.event.get():
@@ -82,13 +82,17 @@ def main():
                         if not a.two_panel:right_pair.set_environment('navigation' if navigation else 'combat')
                         render.model.config=__import__('dataclasses').replace(render.model.config,navigation_only=navigation)
                         paused=False;complete=False;next_tick=time.perf_counter()
+            new_frame=False
             if not paused and not complete and time.perf_counter()>=next_tick:
                 started=time.perf_counter();advance(keyboard_action(pygame,pygame.key.get_pressed(),physical));next_tick=max(started+1/30,time.perf_counter())
+                new_frame=True
                 if right_pair.steps>=a.steps:complete=True;paused=True
                 status()
             screen.fill((13,19,24))
+            fps_label=small.render(neural_rate.label(new_frame,paused),True,(235,239,243),(13,19,24))
             for i,(title,pixels) in enumerate(zip(('Оригинал','V-JEPA 2-AC · справа') if a.two_panel else ('Оригинал','V-JEPA 2-AC · центр','RSSM · справа'),frames())):
                 x=12+i*(panel+12);screen.blit(font.render(title,True,(235,239,243)),(x,10));screen.blit(_surface(pygame,pixels,panel),(x,70))
+                if i>0:screen.blit(fps_label,(x+5,75))
                 screen.blit(small.render('Source256' if i==0 else 'Общий Base → SR · без Flow',True,(163,180,187)),(x,40))
             y=panel+83;label='ПАУЗА · Enter — начать' if paused and not complete else 'ПРОБА ЗАВЕРШЕНА · R — заново' if complete else 'Общие команды, независимая динамика'
             screen.blit(small.render(f'{label} · шаг {right_pair.steps}/{a.steps}',True,(235,239,243)),(12,y))

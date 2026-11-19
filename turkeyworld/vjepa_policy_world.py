@@ -48,6 +48,11 @@ class VJEPAImaginationAdapter(RSSMImaginationAdapter):
         return torch.cat((current.state,self.world.vjepa_backend.latent_features(current.memory)), -1).detach().float()
     @torch.no_grad()
     def transition_prior(self,current,action):
+        following, _ = self.transition_with_info(current, action)
+        return following
+    @torch.no_grad()
+    def transition_with_info(self,current,action):
+        """Advance the same autonomous prior and expose its accepted events to evaluation."""
         action=self._action(current,action)
         with self._prior_mode():
             self._bind_map_context(current)
@@ -60,7 +65,7 @@ class VJEPAImaginationAdapter(RSSMImaginationAdapter):
                 rgb=self.feedback_renderer.observation(result['state'],current.grid,navigation_only=self.world.config.navigation_only)
                 memory=blend_memory(self.world,memory,rgb,self.feedback_settings,active)
         following=WorldState(result['state'].detach().float(),memory.detach().flatten(1).float(),current.map_features,current.grid)
-        self._validate_state(following);return following
+        self._validate_state(following);return following,result
     @torch.no_grad()
     def observe(self,current,action,next_state,next_rgb):
         action=self._action(current,action);backend=self.world.vjepa_backend;core=backend.core
