@@ -74,13 +74,23 @@ class RRDBMaterialSR(nn.Module):
         super().train(mode)
         if hasattr(self,'sprite_renderer'):self.sprite_renderer.eval()
         return self
+    def background_layers(self, low):
+        stem = self.stem(low)
+        features = self.up(stem + self.trunk(stem))
+        materials = self.material_head(features)
+        seams = self.seam_head(features)
+        color = self.color_head(features)
+        probabilities = materials.softmax(1)
+        support = 1 - probabilities[:, :1]
+        texture_input = torch.cat((features, probabilities, seams.sigmoid()), 1)
+        texture = .25 * self.texture_head(texture_input).tanh() * support
+        return features, materials, seams, color, texture
+
     def forward_with_aux(self,low_rgb,hypothesis=None):
         if low_rgb.ndim!=4 or low_rgb.shape[1:]!=(3,32,32) or not bool(torch.isfinite(low_rgb).all()):raise ValueError('Expected finite RGB32')
-        low=low_rgb.to(self.stem.weight);x=self.stem(low);features=self.up(x+self.trunk(x))
-        materials=self.material_head(features);seams=self.seam_head(features)
+        low=low_rgb.to(self.stem.weight)
+        features, materials, seams, color, texture = self.background_layers(low)
         base=F.interpolate(low,scale_factor=4,mode='bilinear',align_corners=False)
-        color=self.color_head(features);support=1-materials.softmax(1)[:,:1]
-        texture=.25*self.texture_head(torch.cat((features,materials.softmax(1),seams.sigmoid()),1)).tanh()*support
         raw=base+color+texture;image=raw.clamp(0,1)
         if self.training:image=image.detach()+raw-raw.detach()
         wall_memory=None

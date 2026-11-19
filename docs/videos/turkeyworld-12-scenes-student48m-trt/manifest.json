@@ -1,0 +1,444 @@
+{
+  "teacher_step": 2625,
+  "base_step": 32909,
+  "sr_step": 7187,
+  "student_dynamics_parameters": 47867140,
+  "teacher_dynamics_parameters": 300057860,
+  "backend": "TensorRT FP16",
+  "engines": [
+    "vjepa_predictor",
+    "display_rrdb"
+  ],
+  "autonomous": true,
+  "shared_actions": true,
+  "source_future_feedback": false,
+  "simulation_hz": 30,
+  "video_fps": 30,
+  "source_size": 128,
+  "sr_size": 128,
+  "combined": "turkeyworld-12-scenes.mp4",
+  "combined_duration_seconds": 72,
+  "counter_window_frames": 30,
+  "neural_fps_definition": "Reciprocal of trailing mean wall time of up to 30 completed neural steps, including generated visual feedback, Base, SR and RGB readback. Excludes Source, pacing and encoding. Timed on a GeForce RTX 4090 during training.",
+  "tick_convention": "One-based. Video frame zero corresponds to simulation tick one.",
+  "clips": [
+    {
+      "scene": 1,
+      "kind": "combat",
+      "starts_at_seconds": 0,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        2.5,
+        2.5
+      ],
+      "mean_neural_fps": 49.771,
+      "action_sha256": "ca8bd343263c288bb83197dc0557b6c666b991501edde45bad00296f623d1ad8",
+      "source": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "kill_ticks": [
+          26,
+          166
+        ],
+        "respawn_ticks": [
+          116
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": 26,
+        "respawn_tick": 116,
+        "kill_ticks": [
+          26,
+          166
+        ],
+        "respawn_ticks": [
+          116
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 2,
+      "kind": "combat",
+      "starts_at_seconds": 6,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        8.5
+      ],
+      "mean_neural_fps": 31.834,
+      "action_sha256": "b215d1bdc156a6c2e6679b1065a7abc25652b9e4007f0738ac85fe2fdc5d7f3a",
+      "source": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "kill_ticks": [
+          32,
+          170
+        ],
+        "respawn_ticks": [
+          122
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": 32,
+        "respawn_tick": 122,
+        "kill_ticks": [
+          32,
+          170
+        ],
+        "respawn_ticks": [
+          122
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 3,
+      "kind": "combat",
+      "starts_at_seconds": 12,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        13.5
+      ],
+      "mean_neural_fps": 30.86,
+      "action_sha256": "185bd06ab09fc07e90284720b4355e3dff69743b56599cff34357f79c2f33b63",
+      "source": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "kill_ticks": [
+          35,
+          172
+        ],
+        "respawn_ticks": [
+          125
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": 35,
+        "respawn_tick": 125,
+        "kill_ticks": [
+          35,
+          172
+        ],
+        "respawn_ticks": [
+          125
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 4,
+      "kind": "combat",
+      "starts_at_seconds": 18,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.649999976158142,
+        14.300000190734863
+      ],
+      "mean_neural_fps": 33.621,
+      "action_sha256": "323727ee01bbf441bd137ebddf627a7e8156efa6af585a957a7df51303b94ded",
+      "source": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "kill_ticks": [
+          38,
+          166
+        ],
+        "respawn_ticks": [
+          128
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": 38,
+        "respawn_tick": 128,
+        "kill_ticks": [
+          38,
+          166
+        ],
+        "respawn_ticks": [
+          128
+        ],
+        "shots": 4,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 5,
+      "kind": "pursuit",
+      "starts_at_seconds": 24,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.5,
+        9.5
+      ],
+      "mean_neural_fps": 30.712,
+      "action_sha256": "41cc1b4ef374747ce6609ab76c35e7b3d2651ad8882bede3c6be0bd8cc9009da",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 6,
+      "kind": "pursuit",
+      "starts_at_seconds": 30,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        9.5,
+        2.5
+      ],
+      "mean_neural_fps": 32.044,
+      "action_sha256": "e9c11ca8a9a513a139038fbe6501268ea22f72442d4fce95b15bd80e1acf7489",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 7,
+      "kind": "pursuit",
+      "starts_at_seconds": 36,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        6.5,
+        1.5
+      ],
+      "mean_neural_fps": 31.351,
+      "action_sha256": "fec78a9ffb49c4299af2bd8d85eae273f3ea5c43ac00119cd946662bd795eb66",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 8,
+      "kind": "pursuit",
+      "starts_at_seconds": 42,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        6.5
+      ],
+      "mean_neural_fps": 30.597,
+      "action_sha256": "99f83c912af179318e1d748cbb7b12c8b212a149e7feea0d3b5af4b08400f549",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 180
+      }
+    },
+    {
+      "scene": 9,
+      "kind": "navigation",
+      "starts_at_seconds": 48,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        13.5,
+        2.5
+      ],
+      "mean_neural_fps": 40.555,
+      "action_sha256": "f9cb01b867d452d62d66e699ef1048312d60fee23bb12789878587c66cf2cf17",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      }
+    },
+    {
+      "scene": 10,
+      "kind": "navigation",
+      "starts_at_seconds": 54,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        14.5,
+        13.5
+      ],
+      "mean_neural_fps": 43.691,
+      "action_sha256": "05da1535f97c90d25500d6ea509ef7fb70cd274cbd66c753e9764aaa01930bb6",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      }
+    },
+    {
+      "scene": 11,
+      "kind": "navigation",
+      "starts_at_seconds": 60,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        8.5,
+        1.5
+      ],
+      "mean_neural_fps": 39.224,
+      "action_sha256": "a07848fd4f8e11f558e10d38d1b0d7a08f4e8e2fc0647d8b8781cb576d1978f8",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      }
+    },
+    {
+      "scene": 12,
+      "kind": "navigation",
+      "starts_at_seconds": 66,
+      "duration_seconds": 6,
+      "frames": 180,
+      "player_start_xy": [
+        1.5,
+        2.5
+      ],
+      "mean_neural_fps": 39.849,
+      "action_sha256": "901e0af438d7c7f836d693bd166b3a83f4c2ac7a96ae80963347f67222b1222f",
+      "source": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      },
+      "neural": {
+        "kill_tick": null,
+        "respawn_tick": null,
+        "kill_ticks": [],
+        "respawn_ticks": [],
+        "shots": 0,
+        "visible_frames": 0
+      }
+    }
+  ],
+  "distillation": {
+    "teacher_step": 2625,
+    "student_sha256": "26e941a658868bcf42ce633f5be0976e4513138ef04cf4674b953beb9f602203",
+    "kd_steps": 500,
+    "total_kd_updates": 600,
+    "student_dynamics_parameters": 47867140,
+    "teacher_dynamics_parameters": 300057860,
+    "base_parameters": 4193085,
+    "sr_parameters": 2982920,
+    "encoder_depth": 6,
+    "predictor_depth": 7,
+    "width": 512,
+    "heads": 8,
+    "heldout": {
+      "encoder_mse": 0.0003440531460607114,
+      "predictor_mse": 0.0001121557877468149,
+      "head_huber": 0.0005399593749568036,
+      "score": 0.0004832069025553665
+    },
+    "checkpoint_bytes": 506443303
+  },
+  "qa": {
+    "frames": 2160,
+    "seconds": 72,
+    "panels_compared": 4320,
+    "max_decoded_panel_rgb_mae": 1.8036702473958333,
+    "minimum_fps_glyph_iou": 0.9365079365079365,
+    "source_start_count": 12
+  },
+  "video_sha256": "8266ee56b8678a628f45782a9bfbe3078b200dd846875f92c501f6be188ec0ae"
+}

@@ -12,17 +12,35 @@ The current research target is an autonomous **180-transition rollout:6 seconds 
 
 ## Neural gameplay videos
 
-### Combat, pursuit and navigation in 12 scenes
+### Combat, pursuit and navigation with the 47.9M-parameter student
 
-[![Original and neural gameplay with a live neural frame-rate counter](docs/videos/turkeyworld-12-scenes-vjepa2625/poster.jpg)](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4)
+[![Original TurkeyWorld and the distilled neural game running with TensorRT](docs/videos/turkeyworld-12-scenes-student48m-trt/poster.jpg)](docs/videos/turkeyworld-12-scenes-student48m-trt/turkeyworld-12-scenes.mp4)
 
-[Watch the 72-second reel](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4) · [English social post](docs/videos/turkeyworld-12-scenes-vjepa2625/post-en.md) · [Scene measurements](docs/videos/turkeyworld-12-scenes-vjepa2625/manifest.json)
+[Watch the 72-second reel](docs/videos/turkeyworld-12-scenes-student48m-trt/turkeyworld-12-scenes.mp4) · [English social post](docs/videos/turkeyworld-12-scenes-student48m-trt/post-en.md) · [Per-scene measurements](docs/videos/turkeyworld-12-scenes-student48m-trt/manifest.json)
 
-The reel opens with four fights (0:00), followed by four enemy pursuits without gunfire (0:24) and four navigation runs without an enemy (0:48). Each scene lasts six seconds. The original game is on the left. On the right, the 300.1M-parameter V-JEPA dynamics model at step 2625 rolls forward from the same start and controls, using its own predictions after initialization.
+Four fights start at 0:00, four enemy pursuits without gunfire at 0:24, and four navigation runs without an enemy at 0:48. The original game is on the left. On the right, TurkeyWorld’s own V-JEPA-style world model runs autonomously with the same initial state and controls. The student has **47,867,140 dynamics parameters**, distilled from the 300,057,860-parameter teacher. A separate Base32 renderer and 4× sprite upscaler produce the image.
 
-The FPS counter above the right panel measures neural frame computation on the RTX 4090 during training. It includes the world update, rendering, upscaling and frame readback, averaged over the last 30 frames. The video plays at 30 frames per second.
+TensorRT runs the student’s action-conditioned predictor and the upscaler’s RRDB and material heads. The counter shows neural frame computation over up to 30 frames, including rendering, upscaling and GPU readback. The video plays at 30 fps. In a separate three-scene benchmark at the interactive 1024-pixel output size, the student averaged **40.7 FPS in PyTorch FP16 and 53.4 FPS with TensorRT** on a GeForce RTX 4090 with the background experiment cycle running. [Measurements](docs/videos/turkeyworld-12-scenes-student48m-trt/benchmark.json).
 
-**Six combat starts.** Each clip shows the first enemy, its death, and its respawn on both sides. [Watch all six fights in 36 seconds](docs/videos/combat-six-starts-vjepa2625/combat-six-starts.mp4) · [Respawn ticks and measurements](docs/videos/combat-six-starts-vjepa2625/manifest.json)
+<details>
+<summary>Run the distilled game with TensorRT</summary>
+
+Run this from the repository root with the trained checkpoints available locally.
+
+```bash
+.venv-ubuntu/bin/python -m pip install -r requirements-tensorrt.txt
+D=training_runs/vjepa_sr_cycle_20261117/dynamics/diagnostics
+.venv-ubuntu/bin/python -m turkeyworld.compare_play --device cuda --fp16 --trt \
+  --world "$D/trt_2625_20261119/student/final.pt" --sr "$D/combat_visual_20261118T143817Z/sr_sprites/sr.pt" \
+  --display-base-renderer "$D/combat_visual_20261118T143817Z/base/renderer.pt" \
+  --smooth --display-size 1024 --source-size 128 --initial-environment combat
+```
+
+The first launch builds engines for the local GPU. Press **Enter** to start the comparison. [Distillation and validation details (Russian)](docs/TENSORRT_GAMEPLAY_RU.md).
+
+</details>
+
+**Six combat starts with the original 300.1M teacher.** Each clip shows the first enemy, its death, and its respawn on both sides. [Watch all six fights in 36 seconds](docs/videos/combat-six-starts-vjepa2625/combat-six-starts.mp4) · [Respawn ticks and measurements](docs/videos/combat-six-starts-vjepa2625/manifest.json)
 
 ### Earlier navigation and pursuit recordings
 

@@ -1,0 +1,4 @@
+# Optional CUDA 12 dependencies for gameplay inference and ONNX engine export.
+--extra-index-url https://pypi.nvidia.com
+tensorrt-cu12==10.13.3.9.post1
+onnx==1.20.1

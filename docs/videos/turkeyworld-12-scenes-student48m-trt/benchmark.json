@@ -1,0 +1,668 @@
+{
+  "student": {
+    "teacher_step": 2625,
+    "student_sha256": "26e941a658868bcf42ce633f5be0976e4513138ef04cf4674b953beb9f602203",
+    "kd_steps": 500,
+    "total_kd_updates": 600,
+    "student_dynamics_parameters": 47867140,
+    "teacher_dynamics_parameters": 300057860,
+    "base_parameters": 4193085,
+    "sr_parameters": 2982920,
+    "encoder_depth": 6,
+    "predictor_depth": 7,
+    "width": 512,
+    "heads": 8,
+    "heldout": {
+      "encoder_mse": 0.0003440531460607114,
+      "predictor_mse": 0.0001121557877468149,
+      "head_huber": 0.0005399593749568036,
+      "score": 0.0004832069025553665
+    },
+    "checkpoint_bytes": 506443303
+  },
+  "distillation": {
+    "teacher_step": 2625,
+    "kd_updates": 500,
+    "checkpoint_sha256": "26e941a658868bcf42ce633f5be0976e4513138ef04cf4674b953beb9f602203",
+    "parameters": {
+      "active_dynamics": 47867140,
+      "checkpoint_model": 126480709
+    },
+    "optimizer": "AdamW",
+    "lr": 0.0001,
+    "batch": 12,
+    "train_windows": 1440,
+    "heldout_windows": 288,
+    "train_episodes": 120,
+    "heldout_episodes": 24,
+    "heldout_teacher_targets": 576,
+    "train_teacher_targets": 2880,
+    "frozen_noncore_tensors_exact": 1236,
+    "strict_cpu_load": true,
+    "feedback_metadata_preserved": true,
+    "selected": {
+      "encoder_mse": 0.0003440531460607114,
+      "predictor_mse": 0.0001121557877468149,
+      "head_huber": 0.0005399593749568036,
+      "score": 0.0004832069025553665
+    }
+  },
+  "benchmark": {
+    "eager": {
+      "benchmark": "same model, adjacent opposite-order H180 passes per mode, unpaced 1024x1024 CPU RGB output; excludes warmup/engine build and reference game",
+      "mean_fps": 40.67684139852088,
+      "rows": [
+        {
+          "kind": "combat",
+          "tape": "000.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 25.522157227777775,
+          "p95_ms": 41.5561125,
+          "fps": 39.181640919899245
+        },
+        {
+          "kind": "pursuit",
+          "tape": "pursuit_01.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 26.924653991666663,
+          "p95_ms": 43.593375949999995,
+          "fps": 37.14068155934356
+        },
+        {
+          "kind": "navigation",
+          "tape": "navigation_01.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 21.305227947222225,
+          "p95_ms": 37.10600535,
+          "fps": 46.93683646460962
+        }
+      ],
+      "quality": [
+        {
+          "kind": "combat",
+          "comparisons": [
+            {
+              "state_max_abs": 0.00036144256591796875,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 3.61453894583974e-05,
+              "rgb_mae_0_255": 0.8170230441623264
+            },
+            {
+              "state_max_abs": 0.00036144256591796875,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 3.61453894583974e-05,
+              "rgb_mae_0_255": 0.8170230441623264
+            }
+          ]
+        },
+        {
+          "kind": "pursuit",
+          "comparisons": [
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 1.08758465802228
+            },
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 1.08758465802228
+            }
+          ]
+        },
+        {
+          "kind": "navigation",
+          "comparisons": [
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 0.5107500994646991
+            },
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 0.5107500994646991
+            }
+          ]
+        }
+      ]
+    },
+    "trt": {
+      "benchmark": "same model, adjacent opposite-order H180 passes per mode, unpaced 1024x1024 CPU RGB output; excludes warmup/engine build and reference game",
+      "mean_fps": 53.41491671056328,
+      "rows": [
+        {
+          "kind": "combat",
+          "tape": "000.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 19.714641705555554,
+          "p95_ms": 34.934475750000004,
+          "fps": 50.72372173612476
+        },
+        {
+          "kind": "pursuit",
+          "tape": "pursuit_01.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 21.410857091666664,
+          "p95_ms": 36.82434235,
+          "fps": 46.70527647345845
+        },
+        {
+          "kind": "navigation",
+          "tape": "navigation_01.npz",
+          "frames_per_tape": 180,
+          "repetitions": 2,
+          "frames": 360,
+          "mean_ms": 15.038587655555553,
+          "p95_ms": 30.486927499999997,
+          "fps": 66.49560603056898
+        }
+      ],
+      "quality": [
+        {
+          "kind": "combat",
+          "comparisons": [
+            {
+              "state_max_abs": 0.00036144256591796875,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 3.61453894583974e-05,
+              "rgb_mae_0_255": 0.8170230441623264
+            },
+            {
+              "state_max_abs": 0.00036144256591796875,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 3.61453894583974e-05,
+              "rgb_mae_0_255": 0.8170230441623264
+            }
+          ]
+        },
+        {
+          "kind": "pursuit",
+          "comparisons": [
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 1.08758465802228
+            },
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 1.08758465802228
+            }
+          ]
+        },
+        {
+          "kind": "navigation",
+          "comparisons": [
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 0.5107500994646991
+            },
+            {
+              "state_max_abs": 0.0,
+              "event_mismatch_ticks": 0,
+              "player_xy_max_tiles": 0.0,
+              "enemy_xy_max_tiles": 0.0,
+              "rgb_mae_0_255": 0.5107500994646991
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "external_h180": {
+    "archive": {
+      "student_vs_teacher": {
+        "ticks": 2520,
+        "all_state_fields_exact_ticks": 1820,
+        "event_exact_ticks": 2520,
+        "reference_respawns": 6,
+        "actual_respawns": 6,
+        "matching_respawn_ticks": 6,
+        "matching_respawn_ticks_and_cells": 6,
+        "rgb_mae_0_255": 0.7777764537347057,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 8.183381006736973e-06,
+          "mean_end": 1.9921035735543618e-05,
+          "worst_end": 8.106231689453125e-05,
+          "maximum": 8.487835293635726e-05
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 2520,
+        "all_state_fields_exact_ticks": 25,
+        "event_exact_ticks": 2520,
+        "reference_respawns": 6,
+        "actual_respawns": 6,
+        "matching_respawn_ticks": 6,
+        "matching_respawn_ticks_and_cells": 6,
+        "rgb_mae_0_255": 14.38438245985243,
+        "player_tiles": {
+          "mean": 0.02783929481487592,
+          "mean_end": 0.10647475849025666,
+          "worst_end": 1.4905648231506348,
+          "maximum": 1.490565299987793
+        },
+        "enemy_tiles": {
+          "mean": 0.06961023712589005,
+          "mean_end": 0.11354187154595609,
+          "worst_end": 0.4240902066230774,
+          "maximum": 0.4240902066230774
+        }
+      },
+      "student_vs_source": {
+        "ticks": 2520,
+        "all_state_fields_exact_ticks": 25,
+        "event_exact_ticks": 2520,
+        "reference_respawns": 6,
+        "actual_respawns": 6,
+        "matching_respawn_ticks": 6,
+        "matching_respawn_ticks_and_cells": 6,
+        "rgb_mae_0_255": 14.386150670934606,
+        "player_tiles": {
+          "mean": 0.02783929481487592,
+          "mean_end": 0.10647475849025666,
+          "worst_end": 1.4905648231506348,
+          "maximum": 1.490565299987793
+        },
+        "enemy_tiles": {
+          "mean": 0.0696113924980669,
+          "mean_end": 0.1135434915150516,
+          "worst_end": 0.42407840490341187,
+          "maximum": 0.42407840490341187
+        }
+      }
+    },
+    "fresh": {
+      "student_vs_teacher": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 732,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 2,
+        "actual_respawns": 2,
+        "matching_respawn_ticks": 2,
+        "matching_respawn_ticks_and_cells": 2,
+        "rgb_mae_0_255": 0.5615232302818769,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 1.993795073455355e-05,
+          "mean_end": 1.463321253443913e-05,
+          "worst_end": 7.063148223096505e-05,
+          "maximum": 0.00014476072101388127
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 1,
+        "event_exact_ticks": 1076,
+        "reference_respawns": 2,
+        "actual_respawns": 2,
+        "matching_respawn_ticks": 2,
+        "matching_respawn_ticks_and_cells": 2,
+        "rgb_mae_0_255": 13.689433345088252,
+        "player_tiles": {
+          "mean": 0.1820504570122239,
+          "mean_end": 0.29099430251479436,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.18039213503167653,
+          "mean_end": 0.5227931573657164,
+          "worst_end": 1.654628872871399,
+          "maximum": 1.654628872871399
+        }
+      },
+      "student_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 1,
+        "event_exact_ticks": 1076,
+        "reference_respawns": 2,
+        "actual_respawns": 2,
+        "matching_respawn_ticks": 2,
+        "matching_respawn_ticks_and_cells": 2,
+        "rgb_mae_0_255": 13.689538819112895,
+        "player_tiles": {
+          "mean": 0.1820504570122239,
+          "mean_end": 0.29099430251479436,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.18039453908568248,
+          "mean_end": 0.5227789515920449,
+          "worst_end": 1.654560923576355,
+          "maximum": 1.654560923576355
+        }
+      }
+    },
+    "combat": {
+      "student_vs_teacher": {
+        "ticks": 1440,
+        "all_state_fields_exact_ticks": 392,
+        "event_exact_ticks": 1440,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 0.6664622836642795,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 2.9274379812704865e-05,
+          "mean_end": 4.583672193803068e-05,
+          "worst_end": 8.106231689453125e-05,
+          "maximum": 0.00014476072101388127
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 1440,
+        "all_state_fields_exact_ticks": 0,
+        "event_exact_ticks": 1436,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 15.05977114924678,
+        "player_tiles": {
+          "mean": 0.01312746014003352,
+          "mean_end": 0.026514054310382562,
+          "worst_end": 0.19692516326904297,
+          "maximum": 0.1974925696849823
+        },
+        "enemy_tiles": {
+          "mean": 0.25678437761962414,
+          "mean_end": 0.5901531334966421,
+          "worst_end": 1.654628872871399,
+          "maximum": 1.654628872871399
+        }
+      },
+      "student_vs_source": {
+        "ticks": 1440,
+        "all_state_fields_exact_ticks": 0,
+        "event_exact_ticks": 1436,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 15.065136139481158,
+        "player_tiles": {
+          "mean": 0.01312746014003352,
+          "mean_end": 0.026514054310382562,
+          "worst_end": 0.19692516326904297,
+          "maximum": 0.1974925696849823
+        },
+        "enemy_tiles": {
+          "mean": 0.2567882025614381,
+          "mean_end": 0.5901453141123056,
+          "worst_end": 1.654560923576355,
+          "maximum": 1.654560923576355
+        }
+      }
+    },
+    "pursuit": {
+      "student_vs_teacher": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 1080,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 0.8595882462866512,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 0,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 13.712331136067709,
+        "player_tiles": {
+          "mean": 4.0906319100031396e-05,
+          "mean_end": 1.636745662381145e-05,
+          "worst_end": 7.915640162536874e-05,
+          "maximum": 0.029104232788085938
+        },
+        "enemy_tiles": {
+          "mean": 0.0004368514992544685,
+          "mean_end": 0.0008533463107577669,
+          "worst_end": 0.004458025563508272,
+          "maximum": 0.006578661035746336
+        }
+      },
+      "student_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 0,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 13.710141895435475,
+        "player_tiles": {
+          "mean": 4.0906319100031396e-05,
+          "mean_end": 1.636745662381145e-05,
+          "worst_end": 7.915640162536874e-05,
+          "maximum": 0.029104232788085938
+        },
+        "enemy_tiles": {
+          "mean": 0.0004368514992544685,
+          "mean_end": 0.0008533463107577669,
+          "worst_end": 0.004458025563508272,
+          "maximum": 0.006578661035746336
+        }
+      }
+    },
+    "navigation": {
+      "student_vs_teacher": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 1080,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 0.6281303311571662,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 26,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 13.460966416347175,
+        "player_tiles": {
+          "mean": 0.2294646250744563,
+          "mean_end": 0.5040669657882594,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        }
+      },
+      "student_vs_source": {
+        "ticks": 1080,
+        "all_state_fields_exact_ticks": 26,
+        "event_exact_ticks": 1080,
+        "reference_respawns": 0,
+        "actual_respawns": 0,
+        "matching_respawn_ticks": 0,
+        "matching_respawn_ticks_and_cells": 0,
+        "rgb_mae_0_255": 13.46023363654996,
+        "player_tiles": {
+          "mean": 0.2294646250744563,
+          "mean_end": 0.5040669657882594,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        }
+      }
+    },
+    "all": {
+      "student_vs_teacher": {
+        "ticks": 3600,
+        "all_state_fields_exact_ticks": 2552,
+        "event_exact_ticks": 3600,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 0.712900486698857,
+        "player_tiles": {
+          "mean": 0.0,
+          "mean_end": 0.0,
+          "worst_end": 0.0,
+          "maximum": 0.0
+        },
+        "enemy_tiles": {
+          "mean": 1.1709751925081946e-05,
+          "mean_end": 1.833468877521227e-05,
+          "worst_end": 8.106231689453125e-05,
+          "maximum": 0.00014476072101388127
+        }
+      },
+      "teacher_vs_source": {
+        "ticks": 3600,
+        "all_state_fields_exact_ticks": 26,
+        "event_exact_ticks": 3596,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 14.175897725423178,
+        "player_tiles": {
+          "mean": 0.07410264347408031,
+          "mean_end": 0.16183062169761797,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.10284480649762599,
+          "mean_end": 0.2363172572918842,
+          "worst_end": 1.654628872871399,
+          "maximum": 1.654628872871399
+        }
+      },
+      "student_vs_source": {
+        "ticks": 3600,
+        "all_state_fields_exact_ticks": 26,
+        "event_exact_ticks": 3596,
+        "reference_respawns": 8,
+        "actual_respawns": 8,
+        "matching_respawn_ticks": 8,
+        "matching_respawn_ticks_and_cells": 8,
+        "rgb_mae_0_255": 14.177167115388096,
+        "player_tiles": {
+          "mean": 0.07410264347408031,
+          "mean_end": 0.16183062169761797,
+          "worst_end": 1.5309092998504639,
+          "maximum": 1.5309092998504639
+        },
+        "enemy_tiles": {
+          "mean": 0.10284633647435157,
+          "mean_end": 0.2363141295381496,
+          "worst_end": 1.654560923576355,
+          "maximum": 1.654560923576355
+        }
+      }
+    }
+  },
+  "engine_files": {
+    "display_rrdb": {
+      "file": "display_rrdb-f2d8358f1510a7fcfde512ea235476ee4854edab254347998d668dc34da30616.engine",
+      "bytes": 7792596,
+      "tensorrt": "10.13.3.9.post1"
+    },
+    "vjepa_predictor": {
+      "file": "vjepa_predictor-287fb7eef3288bc2c1f90d1b1bb0669e4f47eb3a05a9459bf4cba7b9ec48f2af.engine",
+      "bytes": 46923204,
+      "tensorrt": "10.13.3.9.post1"
+    }
+  },
+  "fps_counter": "Recording shows unpaced neural frame throughput at native RGB128, including feedback, Base and SR plus GPU readback. Video playback is 30 FPS.",
+  "timed_gpu": "NVIDIA GeForce RTX 4090",
+  "fps_speedup_same_student": 1.3131530097739004,
+  "background": "Existing training, validation and collection cycle left running. Its GPU load varies with its phase."
+}

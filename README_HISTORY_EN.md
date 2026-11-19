@@ -5254,3 +5254,9 @@ Recorded the autonomous V-JEPA step 2625 with combat Base32 step 32909 and sprit
 The live HUD counts newly presented neural frames. The recordings show neural computation speed over the last 30 frames, including visual feedback, Base, upscaling and GPU readback. The six fights averaged 17.13 neural FPS on a GeForce RTX 4090 during training. All videos play at 30 fps. For the social post we verified 300,057,860 parameters in V-JEPA dynamics including the map encoder, 4,193,085 in the active Base32 rendering path, and 2,982,920 in SR128.
 
 [12-scene reel](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4) · [Six fights](docs/videos/combat-six-starts-vjepa2625/combat-six-starts.mp4) · [English post](docs/videos/turkeyworld-12-scenes-vjepa2625/post-en.md).
+
+## H169 · 2026-11-19 · Gameplay distillation, TensorRT and a new replay
+
+Distilled TurkeyWorld’s own V-JEPA-style dynamics from 300,057,860 to 47,867,140 parameters. Held-out loss selected update 500 from 600 updates. The student predictor and the learned RRDB/material network run as two TensorRT engines. At the interactive RGB1024 output size, inference on the same RTX 4090 and controls increased from 40.7 to 53.4 FPS. Across 20 external episodes, student and teacher agreed on four event flags for all 3,600 ticks and on the timing and cell of all eight respawns. Both differed from the original game's events on four ticks.
+
+Re-recorded the 72-second comparison with four fights, four pursuits and four navigation runs. Every scene carries the student’s measured frame rate. Both READMEs now feature the new comparison and an English social post. [Video](docs/videos/turkeyworld-12-scenes-student48m-trt/turkeyworld-12-scenes.mp4) · [Post](docs/videos/turkeyworld-12-scenes-student48m-trt/post-en.md) · [Measurements](docs/videos/turkeyworld-12-scenes-student48m-trt/benchmark.json).

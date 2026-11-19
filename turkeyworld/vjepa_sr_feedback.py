@@ -17,11 +17,23 @@ class FrozenBaseRenderer:
         load_renderer_student(self.model, resolve_path(renderer), allow_unqualified_codec=True)
         enable_base_only(self.model)
         self.model.to(device).eval().requires_grad_(False)
+        self._static_map = None
+
+    @torch.no_grad()
+    def cache_game_map(self, grid):
+        """Retain frozen renderer features for one interactive game's map."""
+        self._static_map = grid.clone(), self.model.encode_map(grid)
 
     @torch.no_grad()
     def base(self, state, grid, *, navigation_only=False):
         with environment_profile(self.model, navigation_only=navigation_only):
-            fmap = self.model.encode_map(grid)
+            if self._static_map is None:
+                fmap = self.model.encode_map(grid)
+            else:
+                cached_grid, fmap = self._static_map
+                if cached_grid.device != grid.device or not torch.equal(cached_grid, grid):
+                    self.cache_game_map(grid)
+                    _, fmap = self._static_map
             return self.model.render(state, torch.zeros(len(state), 128, device=state.device), fmap)
 
 

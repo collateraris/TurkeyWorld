@@ -130,6 +130,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
     color, muted, orange = (235, 239, 243), (163, 180, 187), (255, 198, 115)
     clock = pygame.time.Clock()
     neural_rate = NeuralFrameRate(pygame)
+    backend_label = 'TensorRT' if getattr(pair.neural, 'trt_engines', {}) else 'PyTorch'
     frames = (_surface(pygame, pair.source_frame, layout['panel']),
               _surface(pygame, pair.neural_frame, layout['panel']))
     paused, trial_complete, running = True, False, True
@@ -149,6 +150,8 @@ def interactive(pair, gui, args, pygame, screen, layout):
             'trial_complete': trial_complete, 'trial_steps': args.steps,
             'window_size': [layout['width'], layout['height']], 'panel_size': layout['panel'],
             'source_render_size': gui.source_size,
+            'tensorrt_engines': getattr(pair.neural, 'trt_engines', {}),
+            'distillation': pair.neural.world_metadata.get('distillation'),
             'neural_display_chain': 'native32 -> learnedSR128 -> bilinear1024 -> fitted panel',
             'renderer_solver_steps': getattr(getattr(pair.neural.model, 'flow_renderer', None), 'steps', None),
             'renderer_solver_override': getattr(pair.neural, 'rf_solver_override', None),
@@ -234,7 +237,7 @@ def interactive(pair, gui, args, pygame, screen, layout):
             screen.blit(font.render('Нейросетевая игра · СПРАВА', True, color), (layout['right'][0], 8))
             screen.blit(small.render(f'Source {gui.source_size}×{gui.source_size} · обычный движок', True, muted), (12, 42))
             screen.blit(small.render(environment_label, True, orange), (12, 63))
-            screen.blit(small.render('Нейро32 → SR128 → bilinear1024 · эксперимент', True, muted), (layout['right'][0], 40))
+            screen.blit(small.render(f'Нейро32 → SR128 → bilinear1024 · {backend_label}', True, muted), (layout['right'][0], 40))
             screen.blit(small.render(mode_label, True, orange), (layout['right'][0], 63))
             screen.blit(frames[0], layout['left'])
             screen.blit(frames[1], layout['right'])

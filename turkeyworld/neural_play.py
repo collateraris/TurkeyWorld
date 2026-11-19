@@ -50,6 +50,9 @@ def _arguments(argv=None):
                         "The checkpoint's frozen V-JEPA observations still initialize and update memory.")
     p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     p.add_argument("--fp16", action="store_true", help="Half precision; supported here only on CUDA.")
+    p.add_argument("--trt", action="store_true", help="Use cached TensorRT engines for CUDA FP16 gameplay.")
+    p.add_argument("--trt-cache", type=Path, default=Path("training_runs/tensorrt_engines"),
+                   help="Directory for GPU- and weight-specific TensorRT engines.")
     p.add_argument("--headless", action="store_true", help="Run a reproducible input sequence without a window or real-time pacing.")
     p.add_argument("--steps", type=int, default=0, help="Stop after N simulated 1/30-second steps; headless default is 300, window default unlimited.")
     p.add_argument("--seconds", type=float, default=0, help="Optional window wall-clock duration limit.")
@@ -88,6 +91,8 @@ def _arguments(argv=None):
         p.error("--threads must be positive")
     if a.max_catchup_steps < 1:
         p.error("--max-catchup-steps must be positive")
+    if a.trt and (a.device != "cuda" or not a.fp16):
+        p.error("--trt requires --device cuda --fp16")
     if a.fp16 and a.device != "cuda":
         p.error("--fp16 requires --device cuda")
     if a.device == "cuda" and not torch.cuda.is_available():
@@ -244,6 +249,8 @@ class NeuralRuntime:
                     'base_training_steps': display.model.base_student_metadata['training_steps'],
                 }
 
+            self.display_base = display
+
             def display_rgb(state, features, map_features):
                 frame = display.base(state, self.feedback_grid, navigation_only=self.model.config.navigation_only)
                 return frame.to(self.dtype) if display_bundle is not None and self.sr is not None else frame
@@ -286,6 +293,20 @@ class NeuralRuntime:
         self.last_frame = None
         self.upscale_stages = []
         self.reset_from_cached_initial_state()
+        if getattr(args, "trt", False):
+            self.enable_tensorrt()
+
+    @torch.inference_mode()
+    def enable_tensorrt(self):
+        from .trt_dynamics import enable_dynamics_trt
+        from .trt_engine import EngineCache
+        from .trt_visual import enable_visual_trt
+
+        factory = EngineCache(self.args.trt_cache)
+        components = enable_visual_trt(self, factory) + enable_dynamics_trt(self, factory)
+        if not components:
+            raise ValueError('No TensorRT-compatible components in the loaded gameplay models')
+        self.trt_engines = factory.engines
 
     def synchronize(self):
         if self.device.type == "cuda":
@@ -456,6 +477,8 @@ class NeuralRuntime:
         training_steps = int(self.world_metadata.get("training_steps", 0))
         report = {
             "mode": "standalone_neural_world_rollout",
+            "tensorrt_engines": getattr(self, "trt_engines", {}),
+            "distillation": self.world_metadata.get("distillation"),
             "base_only_renderer":getattr(self,"base_only_metadata",None),
             "vjepa_sr_feedback":getattr(self,"feedback_settings",None),
             "device": str(self.device),
