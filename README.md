@@ -12,13 +12,13 @@ The current research target is an autonomous **180-transition rollout:6 seconds 
 
 ## Neural gameplay videos
 
-### V-JEPA step 2625 on a GeForce RTX 4090
+### Combat, pursuit and navigation in 12 scenes
 
 [![Original and neural gameplay with a live neural frame-rate counter](docs/videos/turkeyworld-12-scenes-vjepa2625/poster.jpg)](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4)
 
 [Watch the 72-second reel](docs/videos/turkeyworld-12-scenes-vjepa2625/turkeyworld-12-scenes.mp4) · [English social post](docs/videos/turkeyworld-12-scenes-vjepa2625/post-en.md) · [Scene measurements](docs/videos/turkeyworld-12-scenes-vjepa2625/manifest.json)
 
-The reel opens with four fights (0:00), followed by four enemy pursuits without gunfire (0:24) and four navigation runs without an enemy (0:48). Each scene lasts six seconds. The original game is on the left. On the right, the 300.1M-parameter V-JEPA dynamics model rolls forward from the same start and controls, using its own predictions after initialization.
+The reel opens with four fights (0:00), followed by four enemy pursuits without gunfire (0:24) and four navigation runs without an enemy (0:48). Each scene lasts six seconds. The original game is on the left. On the right, the 300.1M-parameter V-JEPA dynamics model at step 2625 rolls forward from the same start and controls, using its own predictions after initialization.
 
 The FPS counter above the right panel measures neural frame computation on the RTX 4090 during training. It includes the world update, rendering, upscaling and frame readback, averaged over the last 30 frames. The video plays at 30 frames per second.
 
